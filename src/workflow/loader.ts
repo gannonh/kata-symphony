@@ -36,7 +36,8 @@ function splitFrontMatter(
 
   let closingIndex = -1
   for (let i = 1; i < lines.length; i += 1) {
-    if (lines[i].trim() === '---') {
+    const line = lines[i]
+    if (line !== undefined && line.trim() === '---') {
       closingIndex = i
       break
     }
