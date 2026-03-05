@@ -25,6 +25,11 @@ describe('layer contract surface', () => {
       async ensureWorkspace(id: string) {
         return { path: `/tmp/${id}`, workspace_key: id, created_now: false }
       },
+      async runBeforeRun() {},
+      async runAfterRun() {},
+      async removeWorkspace(id: string) {
+        return { removed: true, path: `/tmp/${id}` }
+      },
     }
 
     const agent: AgentRunner = {
@@ -38,6 +43,9 @@ describe('layer contract surface', () => {
 
     expect(tracker.fetchCandidates).toBeTypeOf('function')
     expect(workspace.ensureWorkspace).toBeTypeOf('function')
+    expect(workspace.runBeforeRun).toBeTypeOf('function')
+    expect(workspace.runAfterRun).toBeTypeOf('function')
+    expect(workspace.removeWorkspace).toBeTypeOf('function')
     expect(agent.runAttempt).toBeTypeOf('function')
     expect(logger.info).toBeTypeOf('function')
   })

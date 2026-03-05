@@ -4,6 +4,7 @@ describe('runtime-loadable contract modules', () => {
   it('loads tracker, execution, observability, and workflow contract modules', async () => {
     const trackerContracts = await import('../../src/tracker/contracts.js')
     const executionContracts = await import('../../src/execution/contracts.js')
+    const executionWorkspace = await import('../../src/execution/workspace/index.js')
     const observabilityContracts = await import(
       '../../src/observability/contracts.js'
     )
@@ -13,6 +14,8 @@ describe('runtime-loadable contract modules', () => {
     expect(Object.keys(trackerContracts)).toEqual([])
     expect(executionContracts).toBeTypeOf('object')
     expect(executionContracts.PROMPT_ERROR_KINDS).toBeDefined()
+    expect(executionWorkspace).toBeTypeOf('object')
+    expect(typeof executionWorkspace.createWorkspaceManager).toBe('function')
     expect(observabilityContracts).toBeTypeOf('object')
     expect(Object.keys(observabilityContracts)).toEqual([])
     expect(workflow).toBeTypeOf('object')

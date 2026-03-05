@@ -59,12 +59,14 @@ describe('service bootstrap wiring', () => {
     )
   })
 
-  it('sanitizes workspace identifiers used for workspace pathing', async () => {
+  it('returns absolute workspace paths under configured root and sanitizes workspace identifiers', async () => {
     const service = createService()
+    const snapshot = service.config.getSnapshot()
     const workspace = await service.workspace.ensureWorkspace('KAT-221/fix*scope')
 
+    expect(workspace.path.startsWith('/')).toBe(true)
+    expect(workspace.path.startsWith(snapshot.workspace.root)).toBe(true)
     expect(workspace.workspace_key).toBe('KAT-221_fix_scope')
-    expect(workspace.path).toContain('/tmp/symphony/KAT-221_fix_scope')
   })
 
   it('creates independent logger instances for each service bootstrap', () => {

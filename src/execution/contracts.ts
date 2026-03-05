@@ -7,9 +7,20 @@ export type {
   PromptBuilder,
 } from './prompt/contracts.js'
 export { PROMPT_ERROR_KINDS } from './prompt/contracts.js'
+export type {
+  WorkspaceExecutionErrorCode,
+  WorkspaceExecutionErrorContext,
+} from './workspace/errors.js'
+export {
+  WORKSPACE_EXECUTION_ERROR_CODES,
+  WorkspaceExecutionError,
+} from './workspace/errors.js'
 
 export interface WorkspaceManager {
   ensureWorkspace(issueIdentifier: string): Promise<Workspace>
+  runBeforeRun(workspace: Workspace): Promise<void>
+  runAfterRun(workspace: Workspace): Promise<void>
+  removeWorkspace(issueIdentifier: string): Promise<{ removed: boolean; path: string }>
 }
 
 export interface AgentRunner {
