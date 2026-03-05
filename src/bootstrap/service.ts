@@ -1,3 +1,4 @@
+import { buildEffectiveConfig } from '../config/build-effective-config.js'
 import { createStaticConfigProvider } from '../config/contracts.js'
 import { sanitizeWorkspaceKey } from '../domain/normalization.js'
 import type { AgentRunner, WorkspaceManager } from '../execution/contracts.js'
@@ -24,10 +25,18 @@ export interface ServiceBootstrap {
 }
 
 export function createService(): ServiceBootstrap {
-  const config = createStaticConfigProvider({
-    poll_interval_ms: 30000,
-    max_concurrent_agents: 5,
-  })
+  const config = createStaticConfigProvider(
+    buildEffectiveConfig(
+      {
+        tracker: {
+          kind: 'linear',
+          project_slug: 'bootstrap',
+          api_key: process.env.LINEAR_API_KEY ?? 'bootstrap-linear-api-key',
+        },
+      },
+      process.env,
+    ),
+  )
 
   const tracker: TrackerClient = {
     async fetchCandidates() {

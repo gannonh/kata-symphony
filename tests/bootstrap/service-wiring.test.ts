@@ -4,8 +4,10 @@ import { createService, startService } from '../../src/bootstrap/service.js'
 describe('service bootstrap wiring', () => {
   it('creates dependency graph and starts without orchestration loop', async () => {
     const service = createService()
+    const snapshot = service.config.getSnapshot()
 
-    expect(service.config.getSnapshot().poll_interval_ms).toBeGreaterThan(0)
+    expect(snapshot.tracker.kind).toBe('linear')
+    expect(snapshot.agent.max_retry_backoff_ms).toBeGreaterThan(0)
     await expect(startService(service)).resolves.toBeUndefined()
   })
 
