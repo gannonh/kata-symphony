@@ -37,3 +37,13 @@ export interface LinearIssueNode {
   createdAt?: string | null
   updatedAt?: string | null
 }
+
+export interface LinearPageInfo {
+  hasNextPage?: boolean | null
+  endCursor?: string | null
+}
+
+export interface LinearIssueConnection {
+  nodes?: LinearIssueNode[] | null
+  pageInfo?: LinearPageInfo | null
+}
