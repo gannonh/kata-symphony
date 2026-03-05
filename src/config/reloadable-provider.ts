@@ -1,6 +1,7 @@
 import type { WorkflowDefinition } from '../domain/models.js'
 import { buildEffectiveConfig } from './build-effective-config.js'
 import type { ConfigSnapshot, ReloadableConfigProvider } from './contracts.js'
+import { ConfigValidationError } from './errors.js'
 
 export function createReloadableConfigProvider(
   initialWorkflow: WorkflowDefinition,
@@ -15,7 +16,10 @@ export function createReloadableConfigProvider(
         current = buildEffectiveConfig(nextWorkflow.config, env)
         return { applied: true }
       } catch (error) {
-        return { applied: false, error }
+        if (error instanceof ConfigValidationError) {
+          return { applied: false, error }
+        }
+        throw error
       }
     },
   }

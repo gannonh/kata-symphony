@@ -12,6 +12,8 @@ describe('defaults and coercion', () => {
     expect(coerceInteger('42', 1)).toBe(42)
     expect(coerceInteger('bad', 9)).toBe(9)
     expect(coerceInteger(7, 1)).toBe(7)
+    expect(coerceInteger('', 30000)).toBe(30000)
+    expect(coerceInteger('   ', 30000)).toBe(30000)
     expect(coerceStringList('Todo, In Progress')).toEqual(['Todo', 'In Progress'])
     expect(coerceStringList([' Todo ', 123, 'In Progress', ''])).toEqual(['Todo', 'In Progress'])
     expect(coerceStringList(undefined)).toEqual([])

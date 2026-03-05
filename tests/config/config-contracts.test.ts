@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { EffectiveConfig } from '../../src/config/types.js'
+import { DEFAULTS } from '../../src/config/defaults.js'
 
 describe('config contracts', () => {
   it('exposes typed config sections', async () => {
@@ -35,9 +36,23 @@ describe('config contracts', () => {
     }).getSnapshot()
 
     expect(snapshot.tracker.kind).toBe('linear')
-    expect(snapshot.tracker.endpoint).toBe('')
-    expect(snapshot.tracker.active_states).toEqual([])
+    expect(snapshot.tracker.endpoint).toBe(DEFAULTS.tracker.endpoint)
+    expect(snapshot.tracker.active_states).toEqual(DEFAULTS.tracker.active_states)
     expect(snapshot.codex.command).toBe('codex run')
-    expect(snapshot.codex.turn_timeout_ms).toBe(0)
+    expect(snapshot.codex.turn_timeout_ms).toBe(DEFAULTS.codex.turn_timeout_ms)
+  })
+
+  it('yields canonical defaults from createStaticConfigProvider({})', async () => {
+    const mod = await import('../../src/config/contracts.js')
+    const snapshot = mod.createStaticConfigProvider({}).getSnapshot()
+
+    expect(snapshot.tracker.kind).toBe(DEFAULTS.tracker.kind)
+    expect(snapshot.tracker.endpoint).toBe(DEFAULTS.tracker.endpoint)
+    expect(snapshot.polling.interval_ms).toBe(DEFAULTS.polling.interval_ms)
+    expect(snapshot.agent.max_concurrent_agents).toBe(DEFAULTS.agent.max_concurrent_agents)
+    expect(snapshot.agent.max_turns).toBe(DEFAULTS.agent.max_turns)
+    expect(snapshot.codex.command).toBe(DEFAULTS.codex.command)
+    expect(snapshot.codex.turn_timeout_ms).toBe(DEFAULTS.codex.turn_timeout_ms)
+    expect(snapshot.hooks.timeout_ms).toBe(DEFAULTS.hooks.timeout_ms)
   })
 })

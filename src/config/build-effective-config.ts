@@ -1,12 +1,8 @@
-import { coerceInteger, coerceStringList, normalizeStateMap } from './coerce.js'
+import { coerceInteger, coerceStringList, isRecord, normalizeStateMap } from './coerce.js'
 import { DEFAULTS } from './defaults.js'
 import { ConfigValidationError } from './errors.js'
 import { resolveEnvToken, resolvePathValue } from './resolve.js'
 import type { CodexConfig, EffectiveConfig } from './types.js'
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 function readSection(raw: Record<string, unknown>, key: string): Record<string, unknown> {
   const section = raw[key]
@@ -118,7 +114,17 @@ export function buildEffectiveConfig(rawConfig: Record<string, unknown>, env: No
       interval_ms: coerceInteger(pollingRaw.interval_ms, DEFAULTS.polling.interval_ms),
     },
     workspace: {
-      root: resolvePathValue(coerceString(workspaceRaw.root, DEFAULTS.workspace.root), env),
+      root: (() => {
+        const resolved = resolvePathValue(coerceString(workspaceRaw.root, DEFAULTS.workspace.root), env)
+        if (!resolved.trim()) {
+          throw new ConfigValidationError(
+            'missing_workspace_root',
+            'workspace.root',
+            'workspace.root is required after $VAR resolution',
+          )
+        }
+        return resolved
+      })(),
     },
     hooks: {
       after_create: coerceScript(hooksRaw.after_create),

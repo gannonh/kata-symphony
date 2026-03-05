@@ -7,6 +7,7 @@ import type {
   TrackerConfig,
   WorkspaceConfig,
 } from './types.js'
+import { DEFAULTS } from './defaults.js'
 import type { WorkflowDefinition } from '../domain/models.js'
 
 interface LegacyRuntimeConfig {
@@ -36,41 +37,7 @@ export interface ReloadableConfigProvider extends ConfigProvider {
 }
 
 function createDefaultEffectiveConfig(): EffectiveConfig {
-  return {
-    tracker: {
-      kind: '',
-      endpoint: '',
-      api_key: '',
-      project_slug: '',
-      active_states: [],
-      terminal_states: [],
-    },
-    polling: {
-      interval_ms: 0,
-    },
-    workspace: {
-      root: '',
-    },
-    hooks: {
-      after_create: null,
-      before_run: null,
-      after_run: null,
-      before_remove: null,
-      timeout_ms: 0,
-    },
-    agent: {
-      max_concurrent_agents: 0,
-      max_turns: 0,
-      max_retry_backoff_ms: 0,
-      max_concurrent_agents_by_state: {},
-    },
-    codex: {
-      command: '',
-      turn_timeout_ms: 0,
-      read_timeout_ms: 0,
-      stall_timeout_ms: 0,
-    },
-  }
+  return structuredClone(DEFAULTS)
 }
 
 export function createStaticConfigProvider(snapshot: ConfigInput): ConfigProvider {
@@ -90,6 +57,9 @@ export function createStaticConfigProvider(snapshot: ConfigInput): ConfigProvide
 
   if (snapshot.max_concurrent_agents !== undefined) {
     merged.max_concurrent_agents = snapshot.max_concurrent_agents
+    merged.agent.max_concurrent_agents = snapshot.max_concurrent_agents
+  } else if (snapshot.agent?.max_concurrent_agents !== undefined) {
+    merged.max_concurrent_agents = snapshot.agent.max_concurrent_agents
   }
 
   const initialSnapshot: ConfigSnapshot = structuredClone(merged)

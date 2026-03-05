@@ -1,7 +1,21 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createService } from '../../src/bootstrap/service.js'
 
 describe('bootstrap service internals', () => {
+  let originalApiKey: string | undefined
+
+  beforeAll(() => {
+    originalApiKey = process.env.LINEAR_API_KEY
+    process.env.LINEAR_API_KEY = process.env.LINEAR_API_KEY ?? 'test-bootstrap-key'
+  })
+
+  afterAll(() => {
+    if (originalApiKey === undefined) {
+      delete process.env.LINEAR_API_KEY
+    } else {
+      process.env.LINEAR_API_KEY = originalApiKey
+    }
+  })
   it('returns empty tracker results from bootstrap stubs', async () => {
     const service = createService()
 

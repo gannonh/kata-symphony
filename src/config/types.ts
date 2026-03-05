@@ -1,5 +1,5 @@
 export interface TrackerConfig {
-  kind: string
+  kind: 'linear'
   endpoint: string
   api_key: string
   project_slug: string

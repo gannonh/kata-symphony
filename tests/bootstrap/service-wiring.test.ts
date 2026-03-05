@@ -1,7 +1,22 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { createService, startService } from '../../src/bootstrap/service.js'
 
 describe('service bootstrap wiring', () => {
+  let originalApiKey: string | undefined
+
+  beforeAll(() => {
+    originalApiKey = process.env.LINEAR_API_KEY
+    process.env.LINEAR_API_KEY = process.env.LINEAR_API_KEY ?? 'test-bootstrap-key'
+  })
+
+  afterAll(() => {
+    if (originalApiKey === undefined) {
+      delete process.env.LINEAR_API_KEY
+    } else {
+      process.env.LINEAR_API_KEY = originalApiKey
+    }
+  })
+
   it('creates dependency graph and starts without orchestration loop', async () => {
     const service = createService()
     const snapshot = service.config.getSnapshot()

@@ -7,7 +7,7 @@ describe('startup command', () => {
   it('prints bootstrap message and exits 0', () => {
     const result = spawnSync('pnpm', ['start'], {
       encoding: 'utf8',
-      env: process.env,
+      env: { ...process.env, LINEAR_API_KEY: process.env.LINEAR_API_KEY ?? 'test-bootstrap-key' },
     })
 
     expect(result.status).toBe(0)

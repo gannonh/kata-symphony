@@ -12,6 +12,8 @@
 
 Execution notes: apply `@test-driven-development` on every task, use `@systematic-debugging` if a test behaves unexpectedly, and run `@verification-before-completion` before claiming completion.
 
+## Tasks
+
 ### Task 1: Expand Typed Config Contracts
 
 **Files:**
@@ -347,7 +349,7 @@ git commit -m "feat(bootstrap): wire typed config snapshot into service bootstra
 ### Task 7: Full Verification and Documentation Sync
 
 **Files:**
-- Modify: `docs/plans/2026-03-05-kat-223-typed-config-layer-design.md` (only if implementation decisions diverge)
+- Modify: `docs/design-docs/2026-03-05-kat-223-typed-config-layer-design.md` (only if implementation decisions diverge)
 - Modify: `PLANS.md` (status line for KAT-223 when ready)
 - Create: `docs/generated/kat-223-verification.md`
 
@@ -388,7 +390,7 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add docs/generated/kat-223-verification.md PLANS.md docs/plans/2026-03-05-kat-223-typed-config-layer-design.md
+git add docs/generated/kat-223-verification.md PLANS.md docs/design-docs/2026-03-05-kat-223-typed-config-layer-design.md
 git commit -m "docs: add kat-223 verification evidence and plan sync"
 ```
 

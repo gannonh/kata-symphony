@@ -31,7 +31,7 @@ export function createService(): ServiceBootstrap {
         tracker: {
           kind: 'linear',
           project_slug: 'bootstrap',
-          api_key: process.env.LINEAR_API_KEY ?? 'bootstrap-linear-api-key',
+          api_key: '$LINEAR_API_KEY',
         },
       },
       process.env,

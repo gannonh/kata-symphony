@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createReloadableConfigProvider } from '../../src/config/reloadable-provider.js'
+import { ConfigValidationError } from '../../src/config/errors.js'
 import type { WorkflowDefinition } from '../../src/domain/models.js'
 
 const env: NodeJS.ProcessEnv = {
@@ -36,6 +37,23 @@ describe('reloadable config provider', () => {
 
     const result = await provider.reload(invalidWorkflow)
     expect(result.applied).toBe(false)
+    if (!result.applied) {
+      expect(result.error).toBeDefined()
+      expect(result.error).toBeInstanceOf(ConfigValidationError)
+    }
     expect(provider.getSnapshot()).toEqual(before)
+  })
+
+  it('rethrows unexpected runtime errors from reload', async () => {
+    const provider = createReloadableConfigProvider(validWorkflow, env)
+
+    const buildMod = await import('../../src/config/build-effective-config.js')
+    const runtimeError = new TypeError('unexpected runtime fault')
+    vi.spyOn(buildMod, 'buildEffectiveConfig').mockImplementation(() => {
+      throw runtimeError
+    })
+
+    await expect(provider.reload(validWorkflow)).rejects.toThrow(runtimeError)
+    vi.restoreAllMocks()
   })
 })

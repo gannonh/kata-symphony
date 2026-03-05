@@ -1,4 +1,4 @@
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
@@ -8,7 +8,9 @@ export function coerceInteger(value: unknown, fallback: number): number {
   }
 
   if (typeof value === 'string') {
-    const parsed = Number(value.trim())
+    const trimmed = value.trim()
+    if (trimmed === '') return fallback
+    const parsed = Number(trimmed)
     if (Number.isInteger(parsed)) {
       return parsed
     }
