@@ -36,7 +36,7 @@ function splitFrontMatter(
   let closingIndex = -1
   for (let i = 1; i < lines.length; i += 1) {
     const line = lines[i]
-    if (line !== undefined && line.trim() === '---') {
+    if (line !== undefined && line === '---') {
       closingIndex = i
       break
     }
@@ -64,8 +64,8 @@ export const loadWorkflowDefinition: LoadWorkflowDefinition = async (options = {
   let raw: string
   try {
     raw = await readFile(resolvedPath)
-  } catch {
-    throw createMissingWorkflowFileError(resolvedPath)
+  } catch (cause) {
+    throw createMissingWorkflowFileError(resolvedPath, cause)
   }
 
   const split = splitFrontMatter(raw, resolvedPath)

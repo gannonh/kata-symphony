@@ -12,7 +12,7 @@
 
 **Skill refs for execution:** `@test-driven-development`, `@verification-before-completion`
 
-### Task 1: Scaffold workflow contracts and public module exports
+## Task 1: Scaffold workflow contracts and public module exports
 
 **Files:**
 - Create: `src/workflow/contracts.ts`
@@ -150,7 +150,7 @@ git add tests/workflow/workflow-module-contracts.test.ts src/workflow/contracts.
 git commit -m "feat(workflow): scaffold loader contracts and typed errors"
 ```
 
-### Task 2: Lock down path precedence and missing-file error behavior
+## Task 2: Lock down path precedence and missing-file error behavior
 
 **Files:**
 - Modify: `tests/workflow/workflow-loader.test.ts`
@@ -261,7 +261,7 @@ git add tests/workflow/workflow-loader.test.ts src/workflow/loader.ts
 git commit -m "feat(workflow): implement file path precedence and missing-file error"
 ```
 
-### Task 3: Add front matter split and prompt body trim behavior
+## Task 3: Add front matter split and prompt body trim behavior
 
 **Files:**
 - Modify: `tests/workflow/workflow-loader.test.ts`
@@ -371,7 +371,7 @@ git add tests/workflow/workflow-loader.test.ts src/workflow/loader.ts package.js
 git commit -m "feat(workflow): parse yaml front matter and prompt body"
 ```
 
-### Task 4: Enforce parse error and non-map front matter error contract
+## Task 4: Enforce parse error and non-map front matter error contract
 
 **Files:**
 - Modify: `tests/workflow/workflow-loader.test.ts`
@@ -460,7 +460,7 @@ git add tests/workflow/workflow-loader.test.ts src/workflow/loader.ts
 git commit -m "feat(workflow): enforce deterministic parse and non-map yaml errors"
 ```
 
-### Task 5: Add end-to-end contract coverage and docs touchpoint
+## Task 5: Add end-to-end contract coverage and docs touchpoint
 
 **Files:**
 - Modify: `tests/contracts/layer-contracts.test.ts`
@@ -509,7 +509,7 @@ git add tests/contracts/layer-contracts.test.ts tests/contracts/runtime-modules.
 git commit -m "test(workflow): add layer-level contract coverage for workflow loader"
 ```
 
-### Task 6: Full verification gate before handoff
+## Task 6: Full verification gate before handoff
 
 **Files:**
 - Modify: `docs/generated/kat-222-pr-summary.md` (if your PR workflow requires it)

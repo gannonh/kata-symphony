@@ -1,10 +1,10 @@
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import { loadWorkflowDefinition } from '../../src/workflow/index.js'
 
-describe('workflow loader path precedence', () => {
+describe('workflow loader', () => {
   it('uses explicit workflow path over cwd default', async () => {
     const calls: string[] = []
     const readFile = async (path: string): Promise<string> => {
@@ -36,14 +36,18 @@ describe('workflow loader path precedence', () => {
 
   it('uses default fs reader when readFile is not provided', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'workflow-loader-'))
-    await writeFile(join(cwd, 'WORKFLOW.md'), 'Prompt from disk', 'utf8')
+    try {
+      await writeFile(join(cwd, 'WORKFLOW.md'), 'Prompt from disk', 'utf8')
 
-    const result = await loadWorkflowDefinition({ cwd })
+      const result = await loadWorkflowDefinition({ cwd })
 
-    expect(result).toEqual({
-      config: {},
-      prompt_template: 'Prompt from disk',
-    })
+      expect(result).toEqual({
+        config: {},
+        prompt_template: 'Prompt from disk',
+      })
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
   })
 
   it('resolves absolute workflow path when cwd is omitted', async () => {
@@ -70,6 +74,23 @@ describe('workflow loader path precedence', () => {
     ).rejects.toMatchObject({
       code: 'missing_workflow_file',
       workflowPath: '/repo/WORKFLOW.md',
+    })
+  })
+
+  it('preserves read failure as error cause', async () => {
+    const cause = new Error('ENOENT')
+
+    await expect(
+      loadWorkflowDefinition({
+        cwd: '/repo',
+        readFile: async (): Promise<string> => {
+          throw cause
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'missing_workflow_file',
+      workflowPath: '/repo/WORKFLOW.md',
+      cause,
     })
   })
 
@@ -132,6 +153,28 @@ polling:
     })
 
     expect(result.config).toEqual({ polling: { interval_ms: 5000 } })
+    expect(result.prompt_template).toBe('Prompt')
+  })
+
+  it('does not treat indented --- inside yaml block scalar as closing delimiter', async () => {
+    const result = await loadWorkflowDefinition({
+      cwd: '/repo',
+      readFile: async () => `---
+hooks:
+  pre:
+    - |
+      echo start
+      ---
+      echo end
+---
+Prompt`,
+    })
+
+    expect(result.config).toEqual({
+      hooks: {
+        pre: ['echo start\n---\necho end\n'],
+      },
+    })
     expect(result.prompt_template).toBe('Prompt')
   })
 

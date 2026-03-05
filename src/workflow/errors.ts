@@ -4,18 +4,26 @@ function withCode(
   code: WorkflowLoaderError['code'],
   workflowPath: string,
   message: string,
+  cause?: unknown,
 ): WorkflowLoaderError {
-  const error = new Error(message) as WorkflowLoaderError
+  const error =
+    cause === undefined
+      ? (new Error(message) as WorkflowLoaderError)
+      : (new Error(message, { cause }) as WorkflowLoaderError)
   error.code = code
   error.workflowPath = workflowPath
   return error
 }
 
-export function createMissingWorkflowFileError(workflowPath: string): WorkflowLoaderError {
+export function createMissingWorkflowFileError(
+  workflowPath: string,
+  cause?: unknown,
+): WorkflowLoaderError {
   return withCode(
     'missing_workflow_file',
     workflowPath,
     `Workflow file not found: ${workflowPath}`,
+    cause,
   )
 }
 
