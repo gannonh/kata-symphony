@@ -5,6 +5,7 @@ import { resolve, dirname } from 'node:path'
 
 import { createStaticConfigProvider } from '../../src/config/contracts.js'
 import type { TrackerClient } from '../../src/tracker/contracts.js'
+import { createLinearTrackerClient } from '../../src/tracker/index.js'
 import type { WorkspaceManager, AgentRunner } from '../../src/execution/contracts.js'
 import type { Logger } from '../../src/observability/contracts.js'
 import { createNoopOrchestrator } from '../../src/orchestrator/contracts.js'
@@ -62,5 +63,30 @@ describe('layer contract surface', () => {
       config: {},
       prompt_template: 'Hello prompt',
     })
+  })
+
+  it('builds a concrete linear tracker adapter from config layer', async () => {
+    const client = createLinearTrackerClient(
+      createStaticConfigProvider({
+        tracker: {
+          kind: 'linear',
+          endpoint: 'https://api.linear.app/graphql',
+          api_key: 'token',
+          project_slug: 'proj',
+          active_states: ['Todo'],
+          terminal_states: ['Done'],
+        },
+      }),
+      async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              issues: { nodes: [], pageInfo: { hasNextPage: false, endCursor: null } },
+            },
+          }),
+        ),
+    )
+
+    await expect(client.fetchCandidates()).resolves.toEqual([])
   })
 })

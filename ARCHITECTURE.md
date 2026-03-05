@@ -30,6 +30,12 @@ Language-agnostic architecture reference for implementing `SPEC.md`.
    - `src/config/contracts.ts`
 3. Integration layer contracts
    - `src/tracker/contracts.ts`
+   - `src/tracker/errors.ts`
+   - `src/tracker/linear/types.ts`
+   - `src/tracker/linear/queries.ts`
+   - `src/tracker/linear/http.ts`
+   - `src/tracker/linear/normalize.ts`
+   - `src/tracker/linear/client.ts`
 4. Execution layer contracts
    - `src/execution/contracts.ts`
 5. Coordination layer contracts
