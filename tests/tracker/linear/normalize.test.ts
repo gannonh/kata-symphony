@@ -18,7 +18,7 @@ describe('linear normalization', () => {
       labels: {
         nodes: [{ name: 'Area:Symphony' }, { name: 'TRACK:Integration' }],
       },
-      issueRelations: {
+      inverseRelations: {
         nodes: [
           {
             type: 'blocks',
@@ -31,7 +31,7 @@ describe('linear normalization', () => {
         ],
       },
       createdAt: '2026-03-05T00:00:00.000Z',
-      updatedAt: 'not-a-date',
+      updatedAt: '2026-03-05',
     })
 
     expect(issue.labels).toEqual(['area:symphony', 'track:integration'])
@@ -47,7 +47,7 @@ describe('linear normalization', () => {
     try {
       normalizeLinearIssue({
         id: 'lin-1',
-        identifier: null,
+        identifier: '   ',
         title: 'Tracker work',
         state: { name: 'Todo' },
       })

@@ -33,6 +33,7 @@ export interface LinearIssueNode {
   url?: string | null
   labels?: { nodes?: LinearLabelNode[] | null } | null
   issueRelations?: { nodes?: LinearIssueRelationNode[] | null } | null
+  inverseRelations?: { nodes?: LinearIssueRelationNode[] | null } | null
   createdAt?: string | null
   updatedAt?: string | null
 }

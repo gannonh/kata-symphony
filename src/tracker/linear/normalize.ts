@@ -3,11 +3,19 @@ import { createLinearUnknownPayloadError } from '../errors.js'
 import type { LinearIssueNode } from './types.js'
 
 function isRequiredIssueField(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0
+  return typeof value === 'string' && value.trim().length > 0
 }
 
 function parseIsoTimestamp(value: unknown): string | null {
   if (typeof value !== 'string') {
+    return null
+  }
+
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(
+      value,
+    )
+  ) {
     return null
   }
 
@@ -37,7 +45,7 @@ export function normalizeLinearIssue(node: LinearIssueNode): Issue {
     .map((label) => (typeof label?.name === 'string' ? label.name.toLowerCase() : null))
     .filter((label): label is string => label !== null)
 
-  const blockedBy = (node.issueRelations?.nodes ?? [])
+  const blockedBy = (node.inverseRelations?.nodes ?? [])
     .filter((relation) => relation?.type === 'blocks')
     .map((relation) => ({
       id: relation.issue?.id ?? null,
