@@ -2,7 +2,13 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MAIN_DIR="${MAIN_DIR:-$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)}"
+if [ -z "${MAIN_DIR:-}" ]; then
+  MAIN_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)" || true
+  if [ -z "$MAIN_DIR" ]; then
+    echo "FATAL: could not detect git repo root from $SCRIPT_DIR" >&2
+    exit 1
+  fi
+fi
 WT_DIR="${WT_DIR:-$(dirname "$MAIN_DIR")/$(basename "$MAIN_DIR").worktrees}"
 
 # Discover all worktree directories automatically (bash 3.2 compatible)
