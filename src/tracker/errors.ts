@@ -1,3 +1,5 @@
+import type { LinearGraphQLError } from './linear/types.js'
+
 export type TrackerErrorCode =
   | 'linear_api_request'
   | 'linear_api_status'
@@ -13,11 +15,42 @@ export class TrackerIntegrationError extends Error {
     code: TrackerErrorCode,
     message: string,
     details: Record<string, unknown> = {},
+    cause?: unknown,
   ) {
-    super(message)
+    super(message, cause === undefined ? undefined : { cause })
     this.name = 'TrackerIntegrationError'
     this.code = code
-    this.details = details
+    this.details = { ...details }
+  }
+}
+
+function serializeCauseDetail(cause: unknown): Record<string, unknown> | undefined {
+  if (cause === undefined) {
+    return undefined
+  }
+
+  if (cause instanceof Error) {
+    return {
+      type: 'error',
+      name: cause.name,
+      message: cause.message,
+    }
+  }
+
+  if (
+    typeof cause === 'string' ||
+    typeof cause === 'number' ||
+    typeof cause === 'boolean' ||
+    cause === null
+  ) {
+    return {
+      type: typeof cause,
+      value: cause,
+    }
+  }
+
+  return {
+    type: Object.prototype.toString.call(cause).slice(8, -1),
   }
 }
 
@@ -25,7 +58,13 @@ export function createLinearApiRequestError(
   message: string,
   cause?: unknown,
 ): TrackerIntegrationError {
-  return new TrackerIntegrationError('linear_api_request', message, { cause })
+  const serializedCause = serializeCauseDetail(cause)
+  return new TrackerIntegrationError(
+    'linear_api_request',
+    message,
+    serializedCause === undefined ? {} : { cause: serializedCause },
+    cause,
+  )
 }
 
 export function createLinearApiStatusError(
@@ -40,12 +79,12 @@ export function createLinearApiStatusError(
 }
 
 export function createLinearGraphQLErrorsError(
-  errors: unknown[],
+  errors: LinearGraphQLError[],
 ): TrackerIntegrationError {
   return new TrackerIntegrationError(
     'linear_graphql_errors',
     'Linear GraphQL returned errors',
-    { errors },
+    { errors: [...errors] },
   )
 }
 
