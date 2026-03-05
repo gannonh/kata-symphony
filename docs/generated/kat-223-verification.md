@@ -48,8 +48,8 @@ Branch: `feature/kat-223-plan-build-typed-config-layer-with-defaults-env-resolut
 - `pnpm run typecheck`
   - PASS
 - `pnpm test`
-  - PASS (`20` files, `40` tests)
+  - PASS (`20` files, `46` tests)
 - `pnpm test -- tests/config tests/bootstrap/service-wiring.test.ts`
-  - PASS (`20` files, `40` tests)
+  - PASS (`20` files, `46` tests)
 - `make check`
   - PASS (validated after documentation updates)

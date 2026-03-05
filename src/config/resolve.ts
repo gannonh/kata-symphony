@@ -8,12 +8,7 @@ export function resolveEnvToken(value: string, env: NodeJS.ProcessEnv): string {
     return value
   }
 
-  const token = match[1]
-  if (!token) {
-    return ''
-  }
-
-  return env[token] ?? ''
+  return env[match[1]!] ?? ''
 }
 
 export function resolvePathValue(value: string, env: NodeJS.ProcessEnv): string {

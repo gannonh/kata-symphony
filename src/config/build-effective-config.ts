@@ -73,10 +73,11 @@ export function buildEffectiveConfig(rawConfig: Record<string, unknown>, env: No
     )
   }
 
-  const codexCommand = coerceString(codexRaw.command, DEFAULTS.codex.command)
-  if (!codexCommand) {
+  const rawCodexCommand = codexRaw.command
+  if (typeof rawCodexCommand === 'string' && rawCodexCommand.trim().length === 0) {
     throw new ConfigValidationError('missing_codex_command', 'codex.command', 'codex.command is required')
   }
+  const codexCommand = coerceString(rawCodexCommand, DEFAULTS.codex.command)
 
   const activeStates = coerceStringList(trackerRaw.active_states)
   const terminalStates = coerceStringList(trackerRaw.terminal_states)

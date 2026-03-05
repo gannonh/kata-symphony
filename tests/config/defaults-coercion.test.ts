@@ -11,7 +11,11 @@ describe('defaults and coercion', () => {
   it('coerces string and number forms', () => {
     expect(coerceInteger('42', 1)).toBe(42)
     expect(coerceInteger('bad', 9)).toBe(9)
+    expect(coerceInteger(7, 1)).toBe(7)
     expect(coerceStringList('Todo, In Progress')).toEqual(['Todo', 'In Progress'])
+    expect(coerceStringList([' Todo ', 123, 'In Progress', ''])).toEqual(['Todo', 'In Progress'])
+    expect(coerceStringList(undefined)).toEqual([])
     expect(normalizeStateMap({ ' In Progress ': '3', Done: 0 })).toEqual({ 'in progress': 3 })
+    expect(normalizeStateMap('bad')).toEqual({})
   })
 })
