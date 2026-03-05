@@ -209,6 +209,7 @@ Implemented `KAT-224` strict prompt rendering contract with typed results/errors
   - `tests/contracts/execution-prompt-contracts.test.ts`
   - `tests/execution/prompt/build-prompt.test.ts`
   - `tests/execution/prompt/build-prompt-errors.test.ts`
+- Added classifier branch-coverage tests for non-standard throwables and regex parse fallback to satisfy strict CI coverage gating.
 - Added runtime templating dependency:
   - `package.json` (`liquidjs`)
   - `pnpm-lock.yaml`
