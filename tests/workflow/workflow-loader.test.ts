@@ -1,3 +1,6 @@
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import { loadWorkflowDefinition } from '../../src/workflow/index.js'
 
@@ -22,6 +25,31 @@ describe('workflow loader path precedence', () => {
     const calls: string[] = []
     await loadWorkflowDefinition({
       cwd: '/repo',
+      readFile: async (path: string): Promise<string> => {
+        calls.push(path)
+        return 'Prompt body'
+      },
+    })
+
+    expect(calls[0]).toBe('/repo/WORKFLOW.md')
+  })
+
+  it('uses default fs reader when readFile is not provided', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'workflow-loader-'))
+    await writeFile(join(cwd, 'WORKFLOW.md'), 'Prompt from disk', 'utf8')
+
+    const result = await loadWorkflowDefinition({ cwd })
+
+    expect(result).toEqual({
+      config: {},
+      prompt_template: 'Prompt from disk',
+    })
+  })
+
+  it('resolves absolute workflow path when cwd is omitted', async () => {
+    const calls: string[] = []
+    await loadWorkflowDefinition({
+      workflowPath: '/repo/WORKFLOW.md',
       readFile: async (path: string): Promise<string> => {
         calls.push(path)
         return 'Prompt body'
@@ -85,6 +113,16 @@ polling:
 
     expect(result.config).toEqual({})
     expect(result.prompt_template).toBe('Run the issue.')
+  })
+
+  it('treats a first line that starts with --- but is not delimiter as body', async () => {
+    const result = await loadWorkflowDefinition({
+      cwd: '/repo',
+      readFile: async () => '----\nStill prompt body',
+    })
+
+    expect(result.config).toEqual({})
+    expect(result.prompt_template).toBe('----\nStill prompt body')
   })
 
   it('parses yaml front matter with CRLF delimiters', async () => {

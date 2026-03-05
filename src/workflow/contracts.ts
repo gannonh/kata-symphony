@@ -1,3 +1,4 @@
+/* c8 ignore file -- type-only contract surface */
 import type { WorkflowDefinition } from '../domain/models.js'
 
 export type WorkflowLoaderErrorCode =

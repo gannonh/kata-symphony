@@ -17,8 +17,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
     return false
   }
 
-  const prototype = Object.getPrototypeOf(value)
-  return prototype === Object.prototype || prototype === null
+  return Object.getPrototypeOf(value) === Object.prototype
 }
 
 function splitFrontMatter(
@@ -77,8 +76,7 @@ export const loadWorkflowDefinition: LoadWorkflowDefinition = async (options = {
     try {
       decoded = parseYaml(split.yamlText)
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      throw createWorkflowParseError(resolvedPath, message)
+      throw createWorkflowParseError(resolvedPath, (error as Error).message)
     }
 
     if (!isPlainObject(decoded)) {
