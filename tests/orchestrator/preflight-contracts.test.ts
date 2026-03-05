@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import type { DispatchPreflightErrorCode } from '../../src/orchestrator/preflight/index.js'
+import type {
+  DispatchPreflightErrorCode,
+  DispatchPreflightResult,
+} from '../../src/orchestrator/preflight/index.js'
 import { isDispatchPreflightFailure } from '../../src/orchestrator/preflight/index.js'
 
 describe('dispatch preflight contracts', () => {
@@ -14,6 +17,17 @@ describe('dispatch preflight contracts', () => {
     ]
 
     expect(codes).toHaveLength(6)
-    expect(isDispatchPreflightFailure({ ok: false, errors: [] })).toBe(true)
+
+    const result: DispatchPreflightResult = {
+      ok: false,
+      errors: [{ code: 'workflow_invalid', message: 'invalid workflow', source: 'workflow' }],
+    }
+
+    if (isDispatchPreflightFailure(result)) {
+      expect(result.errors).toHaveLength(1)
+      expect(result.errors[0]?.code).toBe('workflow_invalid')
+    } else {
+      expect.unreachable('expected dispatch preflight failure')
+    }
   })
 })
