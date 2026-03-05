@@ -3,10 +3,23 @@ import { readFile as fsReadFile } from 'node:fs/promises'
 import { parse as parseYaml } from 'yaml'
 
 import type { LoadWorkflowDefinition } from './contracts.js'
-import { createMissingWorkflowFileError, createWorkflowParseError } from './errors.js'
+import {
+  createMissingWorkflowFileError,
+  createWorkflowFrontMatterNotAMapError,
+  createWorkflowParseError,
+} from './errors.js'
 
 const defaultReadFile = (filePath: string): Promise<string> =>
   fsReadFile(filePath, 'utf8')
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return false
+  }
+
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
 
 function splitFrontMatter(
   raw: string,
@@ -59,13 +72,19 @@ export const loadWorkflowDefinition: LoadWorkflowDefinition = async (options = {
   let config: Record<string, unknown> = {}
 
   if (split.yamlText !== null) {
+    let decoded: unknown
     try {
-      const decoded = parseYaml(split.yamlText)
-      config = (decoded ?? {}) as Record<string, unknown>
+      decoded = parseYaml(split.yamlText)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       throw createWorkflowParseError(resolvedPath, message)
     }
+
+    if (!isPlainObject(decoded)) {
+      throw createWorkflowFrontMatterNotAMapError(resolvedPath)
+    }
+
+    config = decoded
   }
 
   return {

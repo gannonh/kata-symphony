@@ -5,4 +5,8 @@ export type {
   WorkflowLoaderError,
   WorkflowLoaderErrorCode,
 } from './contracts.js'
-export { createMissingWorkflowFileError, createWorkflowParseError } from './errors.js'
+export {
+  createMissingWorkflowFileError,
+  createWorkflowFrontMatterNotAMapError,
+  createWorkflowParseError,
+} from './errors.js'

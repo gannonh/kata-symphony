@@ -29,3 +29,13 @@ export function createWorkflowParseError(
     `Failed to parse workflow file: ${detail}`,
   )
 }
+
+export function createWorkflowFrontMatterNotAMapError(
+  workflowPath: string,
+): WorkflowLoaderError {
+  return withCode(
+    'workflow_front_matter_not_a_map',
+    workflowPath,
+    `Workflow front matter root must be a YAML map/object: ${workflowPath}`,
+  )
+}

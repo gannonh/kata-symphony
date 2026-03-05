@@ -111,4 +111,19 @@ Prompt without delimiter`,
       workflowPath: '/repo/WORKFLOW.md',
     })
   })
+
+  it('returns workflow_front_matter_not_a_map when yaml root is list', async () => {
+    await expect(
+      loadWorkflowDefinition({
+        cwd: '/repo',
+        readFile: async () => `---
+- item
+---
+Prompt`,
+      }),
+    ).rejects.toMatchObject({
+      code: 'workflow_front_matter_not_a_map',
+      workflowPath: '/repo/WORKFLOW.md',
+    })
+  })
 })
