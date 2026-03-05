@@ -14,4 +14,16 @@ describe('config contracts', () => {
     expect(snapshot).toHaveProperty('agent')
     expect(snapshot).toHaveProperty('codex')
   })
+
+  it('returns deep-cloned snapshots for nested sections', async () => {
+    const mod = await import('../../src/config/contracts.js')
+    const provider = mod.createStaticConfigProvider({
+      tracker: { kind: 'linear' },
+    } as EffectiveConfig)
+
+    const snapshot = provider.getSnapshot()
+    ;(snapshot.tracker as { kind: string }).kind = 'changed'
+
+    expect((provider.getSnapshot().tracker as { kind: string }).kind).toBe('linear')
+  })
 })

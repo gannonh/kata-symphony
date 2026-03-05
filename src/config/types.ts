@@ -1,25 +1,43 @@
 export interface TrackerConfig {
-  [key: string]: unknown
+  kind: string
+  endpoint: string
+  api_key: string
+  project_slug: string
+  active_states: string[]
+  terminal_states: string[]
 }
 
 export interface PollingConfig {
-  [key: string]: unknown
+  interval_ms: number
 }
 
 export interface WorkspaceConfig {
-  [key: string]: unknown
+  root: string
 }
 
 export interface HooksConfig {
-  [key: string]: unknown
+  after_create: string | null
+  before_run: string | null
+  after_run: string | null
+  before_remove: string | null
+  timeout_ms: number
 }
 
 export interface AgentConfig {
-  [key: string]: unknown
+  max_concurrent_agents: number
+  max_turns: number
+  max_retry_backoff_ms: number
+  max_concurrent_agents_by_state: Record<string, number>
 }
 
 export interface CodexConfig {
-  [key: string]: unknown
+  command: string
+  approval_policy?: string
+  thread_sandbox?: string
+  turn_sandbox_policy?: string
+  turn_timeout_ms: number
+  read_timeout_ms: number
+  stall_timeout_ms: number
 }
 
 export interface EffectiveConfig {
