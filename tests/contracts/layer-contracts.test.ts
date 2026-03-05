@@ -8,6 +8,7 @@ import type { TrackerClient } from '../../src/tracker/contracts.js'
 import type { WorkspaceManager, AgentRunner } from '../../src/execution/contracts.js'
 import type { Logger } from '../../src/observability/contracts.js'
 import { createNoopOrchestrator } from '../../src/orchestrator/contracts.js'
+import { loadWorkflowDefinition } from '../../src/workflow/index.js'
 
 describe('layer contract surface', () => {
   it('exports required layer contracts', () => {
@@ -49,5 +50,17 @@ describe('layer contract surface', () => {
     expect(source).not.toMatch(/from '..\/orchestrator/)
     expect(source).not.toMatch(/from '..\/execution/)
     expect(source).not.toMatch(/from '..\/observability/)
+  })
+
+  it('loads workflow definition with expected contract shape', async () => {
+    const definition = await loadWorkflowDefinition({
+      cwd: '/repo',
+      readFile: async () => 'Hello prompt',
+    })
+
+    expect(definition).toEqual({
+      config: {},
+      prompt_template: 'Hello prompt',
+    })
   })
 })
