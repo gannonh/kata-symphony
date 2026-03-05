@@ -1,4 +1,0 @@
-interface:
-  display_name: "Symphony Start Work"
-  short_description: "Start Symphony issue execution safely"
-  default_prompt: "Use $symphony-start-work to start work on a Symphony Linear issue with SPEC.md and WORKFLOW.md context."

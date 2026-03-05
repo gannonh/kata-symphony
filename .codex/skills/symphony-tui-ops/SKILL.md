@@ -1,34 +1,38 @@
 ---
 name: symphony-tui-ops
-description: Operate and validate Symphony TUI monitoring workflows. Use when building, testing, or running the terminal monitoring surface for orchestrator sessions, retries, health, token usage, and event tails.
+description: Build and validate Symphony operator TUI monitoring behavior for sessions, retries, health, token usage, and event tails.
 ---
 
 # Symphony TUI Ops
 
-## Overview
+## Purpose
 
-Guide TUI implementation and operations for Symphony monitoring.
+Guide TUI-specific implementation and validation for operator monitoring.
+
+## Use This For
+
+- TUI panel behavior and layout validation
+- Keyboard navigation and filtering flows
+- Refresh/reconnect/error-state behavior
+- Live-run monitoring checks against Symphony runtime
+
+## Do Not Use This For
+
+- Ticket lifecycle/state transitions
+- Generic project planning workflow
+- Non-TUI backend changes unless directly required by TUI behavior
 
 ## Workflow
 
-1. Verify runtime data contract (snapshot/event feed).
-2. Validate TUI behaviors:
-   - panel rendering
-   - keyboard navigation
-   - filtering
-   - refresh/reconnect handling
-3. Run scenario checks against a live Symphony instance:
-   - active runs
-   - queued retries
-   - error/stall conditions
-4. Record operator-facing defects and follow-up work.
-
-## Acceptance Checklist
-
-- TUI remains usable across common terminal sizes.
-- Core monitoring data stays current with low latency.
-- Empty/loading/error states are clear and actionable.
+1. Confirm snapshot/event data contract used by the TUI.
+2. Validate panel rendering for loading/empty/error states.
+3. Validate keyboard interactions and filter performance.
+4. Run live scenarios (active runs, retries, failures, stalls).
+5. Capture operator-facing defects and follow-ups.
+6. Run `make check` plus TUI-specific tests.
 
 ## Output
 
-Provide a TUI ops verification report with evidence and unresolved gaps.
+- TUI behavior verification report
+- Defect list with repro notes
+- Evidence for pass/fail criteria

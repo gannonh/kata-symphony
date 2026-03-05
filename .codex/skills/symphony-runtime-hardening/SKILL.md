@@ -5,29 +5,35 @@ description: Harden Symphony runtime safety posture and policy defaults. Use whe
 
 # Symphony Runtime Hardening
 
-## Overview
+## Purpose
 
-Apply and validate runtime safety controls without breaking orchestration correctness.
+Apply runtime safety changes without regressing orchestration behavior.
+
+## Use This For
+
+- Approval/sandbox default changes
+- Hook isolation, timeout, and failure semantics
+- Secret handling and redaction policies
+- Workspace containment/safety invariants
+
+## Do Not Use This For
+
+- Ticket lifecycle/state transitions
+- Generic implementation planning/execution workflow
+- PR/merge automation
 
 ## Workflow
 
-1. Identify safety surface being changed:
-   - codex approval/sandbox policy
-   - workspace hooks and containment
-   - secrets/logging behavior
-   - operator intervention paths
-2. Validate against:
-   - `SECURITY.md`
-   - `RELIABILITY.md`
-   - `SPEC.md` Sections 10.5, 14, and 15
-3. Implement hardening change with clear defaults.
-4. Add/adjust tests and run `make check`.
-5. Document tradeoffs and deferred controls.
+1. Identify safety surface and blast radius.
+2. Validate against `SECURITY.md`, `RELIABILITY.md`, and relevant `SPEC.md` sections.
+3. Implement minimal hardening delta.
+4. Add/adjust tests for changed invariants.
+5. Run `make check` and targeted tests.
+6. Record residual risks and deferred controls.
 
 ## Output
 
-Provide:
-- hardening delta
-- compatibility impact
-- test evidence
-- deferred risk register updates
+- Hardening delta summary
+- Compatibility impact
+- Verification evidence
+- Deferred risk items

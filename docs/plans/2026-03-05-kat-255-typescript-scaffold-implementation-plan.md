@@ -10,7 +10,7 @@
 
 ---
 
-Related skills during execution: `@symphony-implement-core`, `@symphony-verify-conformance`.
+Related skills during execution: `@executing-plans`, `@verification-before-completion`.
 
 ### Task 1: Initialize package/tooling skeleton via TDD
 
