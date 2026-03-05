@@ -1,8 +1,15 @@
+import { Liquid } from 'liquidjs'
+
 import type { PromptBuilder, PromptBuildInput, PromptBuildResult } from './contracts.js'
 
 const DEFAULT_PROMPT = 'You are working on an issue from Linear.'
 
 export function createPromptBuilder(): PromptBuilder {
+  const engine = new Liquid({
+    strictVariables: true,
+    strictFilters: true,
+  })
+
   return {
     async build(input: PromptBuildInput): Promise<PromptBuildResult> {
       const trimmedTemplate = input.template.trim()
@@ -14,7 +21,10 @@ export function createPromptBuilder(): PromptBuilder {
       }
 
       try {
-        const prompt = renderTemplate(input)
+        const prompt = await engine.parseAndRender(input.template, {
+          issue: input.issue,
+          attempt: input.attempt,
+        })
         return {
           ok: true,
           prompt,
@@ -31,10 +41,4 @@ export function createPromptBuilder(): PromptBuilder {
       }
     },
   }
-}
-
-function renderTemplate(input: PromptBuildInput): string {
-  return input.template
-    .replace(/\{\{\s*issue\.identifier\s*\}\}/g, input.issue.identifier)
-    .replace(/\{\{\s*attempt\s*\}\}/g, String(input.attempt))
 }
