@@ -1,38 +1,44 @@
 ---
 name: symphony-ship-gate
-description: Evaluate Symphony release readiness and produce a go/no-go decision. Use when preparing milestone closure, pre-release checks, or production promotion decisions.
+description: Evaluate Symphony release readiness and produce explicit go/no-go decisions with blockers, mitigations, and residual-risk posture.
 ---
 
 # Symphony Ship Gate
 
-## Overview
+## Purpose
 
-Run final release readiness checks with explicit decision criteria.
+Perform release checkpoint decisions with explicit criteria and evidence.
+
+## Use This For
+
+- Milestone release readiness checks
+- Go/no-go decisions for promotion
+- Final blocker/risk review
+
+## Do Not Use This For
+
+- Ticket lifecycle/state transitions
+- Generic feature implementation workflow
+- Replacing test execution with judgment-only assessments
 
 ## Workflow
 
-1. Confirm target scope and release candidate commit.
-2. Validate readiness inputs:
-   - conformance status (Sections 17/18)
-   - harness checks (`make check`)
-   - open blocker review
-   - reliability/security posture
-3. Classify remaining risks:
+1. Confirm release candidate scope/commit.
+2. Review evidence:
+   - conformance status
+   - `make check` and required tests
+   - open blockers and known risks
+   - security/reliability posture
+3. Classify remaining issues:
    - must-fix
    - acceptable with mitigation
    - defer
-4. Produce go/no-go recommendation.
-
-## Decision Rules
-
-- `No-Go` if required conformance requirements are unmet.
-- `No-Go` if critical safety risks lack mitigation.
-- `Go` only with explicit residual-risk acknowledgment.
+4. Issue explicit decision: `Go` or `No-Go`.
+5. List mitigation and monitoring actions.
 
 ## Output
 
-Provide:
-- decision (`Go` or `No-Go`)
-- blocking gaps
-- mitigation actions
-- post-release monitoring focus
+- Decision (`Go`/`No-Go`)
+- Blocking gaps
+- Required mitigations
+- Post-release monitoring focus

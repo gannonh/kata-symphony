@@ -1,4 +1,0 @@
-interface:
-  display_name: "Symphony TUI Ops"
-  short_description: "Operate and validate Symphony TUI flows"
-  default_prompt: "Use $symphony-tui-ops to operate, test, and validate Symphony TUI monitoring workflows."

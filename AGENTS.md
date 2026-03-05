@@ -26,50 +26,38 @@ Build and operate `Symphony` from `SPEC.md` with an agent-first workflow.
 5. Run harness checks before claiming completion:
    - `make check`
 
-## Ticket Workflow
+## Commands
 
-Use this flow for every Linear implementation ticket.
+Use this single workflow in this repo.
 
-1. Pick ticket
-   - Move ticket to `In Progress`.
-   - Read scope, acceptance criteria, dependencies, and `gitBranchName`.
-2. Create branch
-   - Create/switch to the ticket branch using Linear `gitBranchName`.
-   - Do not work on `main`.
-3. Design first (required for feature/behavior changes)
-   - Use `superpowers` + `brainstorming`.
-   - Get design approval before implementation.
-4. Plan implementation
-   - Use planning workflow (`writing-plans` or repo planning docs).
-   - Define tests first (TDD: red -> green -> refactor).
-5. Implement
-   - Keep changes scoped to ticket acceptance criteria.
-   - Update docs alongside behavior changes.
-6. Verify
-   - Run `make check`.
-   - Run ticket-specific tests and record evidence.
-7. Open PR
-   - Include: scope summary, changed files, test evidence, conformance notes, residual risks.
-8. Review and fix
-   - Address review comments.
-   - Re-run checks after fixes.
-9. Merge gate
-   - CI required checks pass.
-   - At least one approval.
-   - No unresolved blocking comments.
-10. Closeout
-   - Merge PR.
-   - Move Linear ticket to the next workflow state (`In Review`/`Done` per team policy).
+1. Start ticket lifecycle
+   - `kata-linear start KAT-<number>`
+2. Design
+   - `brainstorming`
+3. Plan
+   - `writing-plans`
+4. Execute implementation
+   - `executing-plans`
+5. Verify before claiming completion
+   - `verification-before-completion`
+6. PR workflow
+   - `pull-requests`
+7. Close ticket lifecycle
+   - `kata-linear end KAT-<number>`
 
-## Local Symphony Skills
+## Optional Domain Skills
 
-- `symphony-start-work`: Use when starting a Symphony Linear issue to map scope to `SPEC.md` and establish verification boundaries.
-- `symphony-implement-core`: Use when implementing core service behavior with required harness gates and docs updates.
-- `symphony-verify-conformance`: Use before review/merge to map evidence to `SPEC.md` Sections 17 and 18.
-- `symphony-runtime-hardening`: Use when changing runtime safety defaults (approval/sandbox/hooks/logging/security posture).
-- `symphony-dogfood`: Use for controlled “Symphony builds Symphony” execution cycles and outcome reporting.
-- `symphony-ship-gate`: Use at release checkpoints to produce explicit go/no-go decisions with blocker/risk summaries.
-- `symphony-tui-ops`: Use when building or validating the TUI monitoring surface and operator workflows.
+Use these only when needed for domain-specific work.
+They do not replace `kata-linear`, `brainstorming`, `writing-plans`, or `executing-plans`.
+
+1. Runtime safety posture changes
+   - `symphony-runtime-hardening`
+2. TUI monitoring surface work
+   - `symphony-tui-ops`
+3. Symphony-on-Symphony dogfood runs
+   - `symphony-dogfood`
+4. Release go/no-go checkpoints
+   - `symphony-ship-gate`
 
 ## Documentation Layout
 
