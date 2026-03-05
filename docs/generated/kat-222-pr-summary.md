@@ -20,6 +20,12 @@ Implemented deterministic `WORKFLOW.md` discovery and parser contracts, includin
 - Added contract integration coverage:
   - `tests/contracts/layer-contracts.test.ts`
   - `tests/contracts/runtime-modules.test.ts`
+- Added post-review test hardening:
+  - explicit `workflowPath` read-failure mapping assertion
+  - non-map YAML root assertions for scalar and null front matter
+  - default fs-reader path coverage (no injected `readFile`)
+  - runtime contract assertions strengthened for tracker/execution/observability modules
+  - coverage parity annotation on type-only `src/workflow/contracts.ts`
 - Added design artifact:
   - `docs/plans/2026-03-05-kat-222-workflow-discovery-parser-design.md`
 
@@ -36,13 +42,14 @@ Executed commands and results:
 - `pnpm vitest run tests/workflow tests/contracts` -> PASS (`5` files, `22` tests)
 - `pnpm run lint` -> PASS
 - `pnpm run typecheck` -> PASS
-- `pnpm test` -> PASS (`24` files, `75` tests)
+- `pnpm test` -> PASS (`24` files, `81` tests)
 - `pnpm run lint && pnpm run typecheck && pnpm test` -> PASS
 - `make check` -> PASS
+- `pnpm run test:coverage` -> PASS (`100%` lines/branches/functions/statements)
 
 Additional note:
 - During verification, strict typecheck surfaced a safe-indexing issue in front matter scanning (`src/workflow/loader.ts`). Fixed by guarding indexed line access before `.trim()`.
 
 ## Risks / Follow-ups
 
-- Non-blocking: contract/runtime tests can be strengthened further for stricter export assertions across non-workflow modules.
+- None blocking for KAT-222 scope.
