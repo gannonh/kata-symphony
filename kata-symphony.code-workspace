@@ -2,6 +2,18 @@
 	"folders": [
 		{
 			"path": "."
+		},
+		{
+			"path": "../kata-symphony.worktrees/wt-a"
+		},
+		{
+			"path": "../kata-symphony.worktrees/wt-b"
+		},
+		{
+			"path": "../kata-symphony.worktrees/wt-c"
+		},
+		{
+			"path": "../kata-symphony.worktrees/wt-d"
 		}
 	],
 	"settings": {}
