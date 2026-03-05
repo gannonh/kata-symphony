@@ -21,7 +21,15 @@ targets=(
 
 failed=0
 for file in "${targets[@]}"; do
-  if ! rg -q "^Last reviewed: " "$file"; then
+  if command -v rg >/dev/null 2>&1; then
+    has_header=0
+    rg -q "^Last reviewed: " "$file" || has_header=1
+  else
+    has_header=0
+    grep -Eq "^Last reviewed: " "$file" || has_header=1
+  fi
+
+  if [[ "$has_header" -ne 0 ]]; then
     echo "Missing 'Last reviewed:' header in $file"
     failed=1
   fi
@@ -32,4 +40,3 @@ if [[ "$failed" -ne 0 ]]; then
 fi
 
 echo "Markdown freshness metadata check passed."
-
