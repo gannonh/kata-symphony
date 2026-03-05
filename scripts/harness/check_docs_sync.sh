@@ -23,7 +23,7 @@ if [[ -n "$BASE_REF" ]]; then
   changed_files="$(git diff --name-only "${BASE_REF}"...HEAD)"
 else
   if git rev-parse --verify HEAD >/dev/null 2>&1; then
-    changed_files="$(printf '%s\n%s' \
+    changed_files="$(printf '%s\n' \
       "$(git diff --name-only HEAD)" \
       "$(git diff --name-only --cached)" \
       "$(git ls-files --others --exclude-standard)" | sed '/^$/d' | sort -u)"
