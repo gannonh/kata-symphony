@@ -33,7 +33,7 @@ export function createService(): ServiceBootstrap {
     async fetchCandidates() {
       return []
     },
-    async fetchIssueStatesByIds() {
+    async fetchIssuesByIds() {
       return []
     },
     async fetchTerminalIssues() {

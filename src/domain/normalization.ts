@@ -19,5 +19,5 @@ export function normalizeIssueState(state: string): string {
 }
 
 export function makeSessionId(threadId: string, turnId: string): string {
-  return `${threadId}-${turnId}`
+  return `${threadId}::${turnId}`
 }

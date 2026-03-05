@@ -6,7 +6,7 @@ describe('bootstrap service internals', () => {
     const service = createService()
 
     await expect(service.tracker.fetchCandidates()).resolves.toEqual([])
-    await expect(service.tracker.fetchIssueStatesByIds(['id-1'])).resolves.toEqual(
+    await expect(service.tracker.fetchIssuesByIds(['id-1'])).resolves.toEqual(
       [],
     )
     await expect(service.tracker.fetchTerminalIssues()).resolves.toEqual([])

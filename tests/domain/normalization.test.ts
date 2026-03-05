@@ -14,8 +14,8 @@ describe('domain normalization rules', () => {
     expect(normalizeIssueState('  In Progress  ')).toBe('in progress')
   })
 
-  it('builds session id as <thread_id>-<turn_id>', () => {
-    expect(makeSessionId('thread-1', 'turn-3')).toBe('thread-1-turn-3')
+  it('builds session id as <thread_id>::<turn_id>', () => {
+    expect(makeSessionId('thread-1', 'turn-3')).toBe('thread-1::turn-3')
   })
 
   it('guards dot-segment workspace keys used for pathing', () => {

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MAIN_DIR="${MAIN_DIR:-/Users/gannonhall/dev/kata/kata-symphony}"
-WT_DIR="${WT_DIR:-/Users/gannonhall/dev/kata/kata-symphony.worktrees}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MAIN_DIR="${MAIN_DIR:-$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)}"
+WT_DIR="${WT_DIR:-$(dirname "$MAIN_DIR")/$(basename "$MAIN_DIR").worktrees}"
 
 # Discover all worktree directories automatically (bash 3.2 compatible)
 WORKTREES=()

@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { resolve, dirname } from 'node:path'
 
 import { createStaticConfigProvider } from '../../src/config/contracts.js'
 import type { TrackerClient } from '../../src/tracker/contracts.js'
@@ -12,19 +14,36 @@ describe('layer contract surface', () => {
     expect(typeof createStaticConfigProvider).toBe('function')
     expect(typeof createNoopOrchestrator).toBe('function')
 
-    const tracker: TrackerClient | null = null
-    const workspace: WorkspaceManager | null = null
-    const agent: AgentRunner | null = null
-    const logger: Logger | null = null
+    const tracker: TrackerClient = {
+      async fetchCandidates() { return [] },
+      async fetchIssuesByIds() { return [] },
+      async fetchTerminalIssues() { return [] },
+    }
 
-    expect(tracker).toBeNull()
-    expect(workspace).toBeNull()
-    expect(agent).toBeNull()
-    expect(logger).toBeNull()
+    const workspace: WorkspaceManager = {
+      async ensureWorkspace(id: string) {
+        return { path: `/tmp/${id}`, workspace_key: id, created_now: false }
+      },
+    }
+
+    const agent: AgentRunner = {
+      async runAttempt() { throw new Error('not implemented') },
+    }
+
+    const logger: Logger = {
+      info() {},
+      error() {},
+    }
+
+    expect(tracker.fetchCandidates).toBeTypeOf('function')
+    expect(workspace.ensureWorkspace).toBeTypeOf('function')
+    expect(agent.runAttempt).toBeTypeOf('function')
+    expect(logger.info).toBeTypeOf('function')
   })
 
   it('keeps domain model free of layer imports', () => {
-    const source = readFileSync('src/domain/models.ts', 'utf8')
+    const testDir = dirname(fileURLToPath(import.meta.url))
+    const source = readFileSync(resolve(testDir, '../../src/domain/models.ts'), 'utf8')
     expect(source).not.toMatch(/from '..\/config/)
     expect(source).not.toMatch(/from '..\/tracker/)
     expect(source).not.toMatch(/from '..\/orchestrator/)
