@@ -8,3 +8,4 @@ export {
   validateDispatchPreflight,
   type ValidateDispatchPreflightOptions,
 } from './validate-dispatch-preflight.js'
+export { logPreflightFailure } from './log-preflight-failure.js'
