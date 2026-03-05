@@ -19,11 +19,25 @@ describe('config contracts', () => {
     const mod = await import('../../src/config/contracts.js')
     const provider = mod.createStaticConfigProvider({
       tracker: { kind: 'linear' },
-    } as EffectiveConfig)
+    })
 
     const snapshot = provider.getSnapshot()
     ;(snapshot.tracker as { kind: string }).kind = 'changed'
 
     expect((provider.getSnapshot().tracker as { kind: string }).kind).toBe('linear')
+  })
+
+  it('preserves nested defaults when applying partial section overrides', async () => {
+    const mod = await import('../../src/config/contracts.js')
+    const snapshot = mod.createStaticConfigProvider({
+      tracker: { kind: 'linear' },
+      codex: { command: 'codex run' },
+    }).getSnapshot()
+
+    expect(snapshot.tracker.kind).toBe('linear')
+    expect(snapshot.tracker.endpoint).toBe('')
+    expect(snapshot.tracker.active_states).toEqual([])
+    expect(snapshot.codex.command).toBe('codex run')
+    expect(snapshot.codex.turn_timeout_ms).toBe(0)
   })
 })
