@@ -1,7 +1,17 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { runMain } from '../../src/bootstrap/main-entry.js'
 
 describe('main entry bootstrap guard', () => {
+  it('returns cleanly on successful startup', async () => {
+    const previousExitCode = process.exitCode
+    process.exitCode = undefined
+
+    await expect(runMain(async () => {})).resolves.toBeUndefined()
+    expect(process.exitCode).toBeUndefined()
+
+    process.exitCode = previousExitCode
+  })
+
   it('handles startup failure without unhandled rejection', async () => {
     const previousExitCode = process.exitCode
     process.exitCode = undefined
@@ -45,5 +55,26 @@ describe('main entry bootstrap guard', () => {
 
     expect(process.exitCode).toBe(1)
     process.exitCode = previousExitCode
+  })
+
+  it('uses default error reporter when none is provided', async () => {
+    const previousExitCode = process.exitCode
+    process.exitCode = undefined
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      await runMain(async () => {
+        throw new Error('startup failure')
+      })
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        'Symphony startup failed',
+        expect.any(Error),
+      )
+      expect(process.exitCode).toBe(1)
+    } finally {
+      errorSpy.mockRestore()
+      process.exitCode = previousExitCode
+    }
   })
 })

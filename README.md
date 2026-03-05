@@ -48,11 +48,42 @@ Run tests:
 pnpm test
 ```
 
+Run unit and integration tests separately:
+
+```bash
+pnpm run test:unit
+pnpm run test:integration
+```
+
+Run coverage gate (100% threshold on `src/**/*.ts`):
+
+```bash
+pnpm run test:coverage
+```
+
+Run local CI (same lint/typecheck/test/coverage gates as CI):
+
+```bash
+pnpm run ci:local
+```
+
 Run bootstrap entrypoint:
 
 ```bash
 pnpm start
 ```
+
+## Git Hook Gate
+
+Install repository hooks and enforce local CI before push:
+
+```bash
+pnpm run hooks:install
+```
+
+This configures `core.hooksPath` to `.githooks`, including a `pre-push` hook that runs:
+
+- `pnpm run ci:local`
 
 ## What gets enforced
 
