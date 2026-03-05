@@ -1,0 +1,4 @@
+interface:
+  display_name: "Symphony Dogfood Loop"
+  short_description: "Run Symphony builds Symphony loop"
+  default_prompt: "Use $symphony-dogfood to run a dogfood cycle where Symphony executes Symphony tickets and reports outcomes."

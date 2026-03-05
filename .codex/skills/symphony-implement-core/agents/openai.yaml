@@ -1,0 +1,4 @@
+interface:
+  display_name: "Symphony Implement Core"
+  short_description: "Implement Symphony core with harness gates"
+  default_prompt: "Use $symphony-implement-core to implement a Symphony issue with required harness checks and docs updates."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Symphony Verify Conformance"
+  short_description: "Map work to SPEC section checks"
+  default_prompt: "Use $symphony-verify-conformance to verify changes against SPEC.md Sections 17 and 18 with evidence."

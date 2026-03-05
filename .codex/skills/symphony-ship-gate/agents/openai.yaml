@@ -1,0 +1,4 @@
+interface:
+  display_name: "Symphony Ship Gate"
+  short_description: "Evaluate release readiness and blockers"
+  default_prompt: "Use $symphony-ship-gate to evaluate Symphony release readiness and produce a go/no-go report."

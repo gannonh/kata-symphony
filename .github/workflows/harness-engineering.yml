@@ -1,0 +1,26 @@
+name: Harness Engineering Checks
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  harness-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run repo contract check
+        run: bash scripts/harness/check_repo_contract.sh
+
+      - name: Run repository lint
+        run: bash scripts/harness/lint_repo.sh
+
+      - name: Run markdown freshness check
+        run: bash scripts/harness/check_markdown_freshness.sh
+
+      - name: Run docs sync check
+        run: bash scripts/harness/check_docs_sync.sh

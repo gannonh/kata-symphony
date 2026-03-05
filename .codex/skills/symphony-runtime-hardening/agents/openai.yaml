@@ -1,0 +1,4 @@
+interface:
+  display_name: "Symphony Runtime Hardening"
+  short_description: "Harden runtime safety and policy defaults"
+  default_prompt: "Use $symphony-runtime-hardening to define and apply Symphony runtime safety defaults and hardening checks."
