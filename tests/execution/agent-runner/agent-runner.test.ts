@@ -39,4 +39,40 @@ describe('agent runner', () => {
     expect(result.session?.turn_id).toBe('turn-1')
     expect(result.session?.codex_total_tokens).toBe(12)
   })
+
+  it('maps read timeout to response_timeout', async () => {
+    const fixture = path.resolve('tests/fixtures/fake-codex-app-server.mjs')
+    const runner = createAgentRunner({
+      codex: {
+        command: `node ${fixture} no-initialize-response`,
+        turn_timeout_ms: 5000,
+        read_timeout_ms: 50,
+        stall_timeout_ms: 1000,
+      },
+      workspacePath: '/tmp',
+      buildPrompt: async () => ({ ok: true as const, prompt: 'hello' }),
+    })
+
+    const result = await runner.runAttempt(issue, null)
+    expect(result.attempt.status).toBe('failed')
+    expect(result.attempt.error).toContain('response_timeout')
+    expect(result.session).toBeNull()
+  })
+
+  it('does not treat stderr diagnostic lines as protocol JSON', async () => {
+    const fixture = path.resolve('tests/fixtures/fake-codex-app-server.mjs')
+    const runner = createAgentRunner({
+      codex: {
+        command: `node ${fixture} stderr-noise`,
+        turn_timeout_ms: 5000,
+        read_timeout_ms: 500,
+        stall_timeout_ms: 1000,
+      },
+      workspacePath: '/tmp',
+      buildPrompt: async () => ({ ok: true as const, prompt: 'hello' }),
+    })
+
+    const result = await runner.runAttempt(issue, null)
+    expect(result.attempt.status).toBe('succeeded')
+  })
 })

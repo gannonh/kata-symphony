@@ -556,3 +556,23 @@ Expected: PASS.
 git add tests/fixtures/fake-codex-app-server.mjs tests/execution/agent-runner/agent-runner.test.ts src/execution/agent-runner/runner.ts
 git commit -m "test(agent-runner): cover timeout and stderr protocol edge cases"
 ```
+
+## Implementation Notes (2026-03-05)
+
+- Implemented under `src/execution/agent-runner/`:
+  - `line-buffer.ts`
+  - `protocol-client.ts`
+  - `errors.ts`
+  - `index.ts`
+  - `runner.ts`
+  - `session-reducer.ts`
+  - `transport.ts`
+- Added test coverage:
+  - `tests/execution/agent-runner/line-buffer.test.ts`
+  - `tests/execution/agent-runner/protocol-client.test.ts`
+  - `tests/execution/agent-runner/agent-runner.test.ts`
+  - `tests/fixtures/fake-codex-app-server.mjs`
+- Added timeout/error/stderr handling:
+  - startup response timeout maps to `response_timeout`
+  - stderr diagnostics are ignored for protocol parsing
+  - protocol read timeout includes jitter tolerance for stable CI/full-suite execution

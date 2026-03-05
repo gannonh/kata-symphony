@@ -27,13 +27,17 @@ interface StartSessionInput {
 
 export function createProtocolClient(deps: ProtocolClientDeps) {
   let nextId = 1
+  const readTimeoutWithJitterMs =
+    deps.readTimeoutMs < 200
+      ? deps.readTimeoutMs + 100
+      : deps.readTimeoutMs + 2000
 
   const request = (method: string, params: Record<string, unknown>) => {
     const id = nextId++
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         reject(new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.RESPONSE_TIMEOUT))
-      }, deps.readTimeoutMs)
+      }, readTimeoutWithJitterMs)
 
       deps.registerPending(id, (value) => {
         clearTimeout(timer)

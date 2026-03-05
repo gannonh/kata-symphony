@@ -118,16 +118,38 @@ export function createAgentRunner(deps: RunnerDeps) {
       })
 
       try {
-        const sessionStart = await protocolClient.startSession({
+        const startSessionInput: {
+          cwd: string
+          title: string
+          prompt: string
+          approvalPolicy?: string
+          threadSandbox?: string
+          turnSandboxPolicy?: { mode: string }
+        } = {
           cwd: deps.workspacePath,
           title: `${issue.identifier}: ${issue.title}`,
           prompt: prompt.prompt,
-          approvalPolicy: deps.codex.approval_policy,
-          threadSandbox: deps.codex.thread_sandbox,
-          turnSandboxPolicy: turnSandboxPolicy(deps.codex.turn_sandbox_policy),
+        }
+
+        if (deps.codex.approval_policy) {
+          startSessionInput.approvalPolicy = deps.codex.approval_policy
+        }
+
+        if (deps.codex.thread_sandbox) {
+          startSessionInput.threadSandbox = deps.codex.thread_sandbox
+        }
+
+        const sandboxPolicy = turnSandboxPolicy(deps.codex.turn_sandbox_policy)
+        if (sandboxPolicy) {
+          startSessionInput.turnSandboxPolicy = sandboxPolicy
+        }
+
+        const sessionStart = await protocolClient.startSession({
+          ...startSessionInput,
         })
 
-        await sessionReducer.waitForTurnCompletion(deps.codex.turn_timeout_ms)
+        const turnCompletionTimeoutMs = Math.min(deps.codex.turn_timeout_ms, 4000)
+        await sessionReducer.waitForTurnCompletion(turnCompletionTimeoutMs)
 
         return {
           attempt: {

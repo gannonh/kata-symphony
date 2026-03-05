@@ -16,20 +16,17 @@ interface UsageTotals {
   total_tokens: number
 }
 
-interface TurnCompletedMessage {
-  method: string
-  params?: {
-    usage?: UsageTotals
-  }
-}
-
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
-function parseUsage(message: TurnCompletedMessage): UsageTotals {
-  const usage = message.params?.usage
-  if (!usage) {
+function parseUsage(params: unknown): UsageTotals {
+  if (!isObjectRecord(params)) {
+    return { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
+  }
+
+  const usage = params.usage
+  if (!isObjectRecord(usage)) {
     return { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
   }
 
@@ -70,8 +67,7 @@ export function createSessionReducer() {
         return
       }
 
-      const completedMessage = message as TurnCompletedMessage
-      usage = parseUsage(completedMessage)
+      usage = parseUsage(message.params)
       completed = true
       completionResolve?.()
     },
