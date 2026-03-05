@@ -40,6 +40,8 @@ Branch: `feature/kat-227-plan-build-workspace-manager-with-hooks-and-safety`
   - PASS (`6` files, `15` tests)
 - `pnpm run test`
   - PASS (`29` files, `97` tests)
+- `pnpm run test:coverage`
+  - PASS (`30` files, `115` tests, `100%` lines/branches/functions/statements)
 - `pnpm run lint && pnpm run typecheck`
   - PASS
 - `make check`
