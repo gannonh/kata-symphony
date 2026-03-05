@@ -7,6 +7,7 @@ import type {
   TrackerConfig,
   WorkspaceConfig,
 } from './types.js'
+import type { WorkflowDefinition } from '../domain/models.js'
 
 interface LegacyRuntimeConfig {
   poll_interval_ms: number
@@ -26,6 +27,12 @@ export interface ConfigInput extends Partial<LegacyRuntimeConfig> {
 
 export interface ConfigProvider {
   getSnapshot(): ConfigSnapshot
+}
+
+export type ReloadResult = { applied: true } | { applied: false; error: unknown }
+
+export interface ReloadableConfigProvider extends ConfigProvider {
+  reload(nextWorkflow: WorkflowDefinition): Promise<ReloadResult>
 }
 
 function createDefaultEffectiveConfig(): EffectiveConfig {
