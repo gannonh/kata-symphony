@@ -14,6 +14,7 @@ import {
   buildCandidatesVariables,
   buildIssuesByIdsVariables,
 } from './queries.js'
+import type { RunLinearGraphQLInput } from './http.js'
 import type { LinearIssueConnection } from './types.js'
 
 function readIssueConnection(data: unknown): LinearIssueConnection {
@@ -27,6 +28,20 @@ function readIssueConnection(data: unknown): LinearIssueConnection {
   }
 
   return connection as LinearIssueConnection
+}
+
+function withOptionalFetch(
+  input: Omit<RunLinearGraphQLInput, 'fetchImpl'>,
+  fetchImpl?: typeof fetch,
+): RunLinearGraphQLInput {
+  if (fetchImpl === undefined) {
+    return input
+  }
+
+  return {
+    ...input,
+    fetchImpl,
+  }
 }
 
 export function createLinearTrackerClient(
@@ -43,18 +58,22 @@ export function createLinearTrackerClient(
     let after: string | null = null
 
     while (true) {
-      const data = await runLinearGraphQL({
-        endpoint: snapshot.tracker.endpoint,
-        apiKey: snapshot.tracker.api_key,
-        query,
-        variables: buildCandidatesVariables(
-          snapshot.tracker.project_slug,
-          states,
-          after,
+      const data = await runLinearGraphQL(
+        withOptionalFetch(
+          {
+            endpoint: snapshot.tracker.endpoint,
+            apiKey: snapshot.tracker.api_key,
+            query,
+            variables: buildCandidatesVariables(
+              snapshot.tracker.project_slug,
+              states,
+              after,
+            ),
+            timeoutMs: 30_000,
+          },
+          fetchImpl,
         ),
-        timeoutMs: 30_000,
-        fetchImpl,
-      })
+      )
 
       const connection = readIssueConnection(data)
       const nodes = Array.isArray(connection.nodes) ? connection.nodes : []
@@ -92,14 +111,18 @@ export function createLinearTrackerClient(
       }
 
       const snapshot = config.getSnapshot()
-      const data = await runLinearGraphQL({
-        endpoint: snapshot.tracker.endpoint,
-        apiKey: snapshot.tracker.api_key,
-        query: LINEAR_ISSUES_BY_IDS_QUERY,
-        variables: buildIssuesByIdsVariables(issueIds),
-        timeoutMs: 30_000,
-        fetchImpl,
-      })
+      const data = await runLinearGraphQL(
+        withOptionalFetch(
+          {
+            endpoint: snapshot.tracker.endpoint,
+            apiKey: snapshot.tracker.api_key,
+            query: LINEAR_ISSUES_BY_IDS_QUERY,
+            variables: buildIssuesByIdsVariables(issueIds),
+            timeoutMs: 30_000,
+          },
+          fetchImpl,
+        ),
+      )
 
       const connection = readIssueConnection(data)
       const nodes = Array.isArray(connection.nodes) ? connection.nodes : []
