@@ -42,20 +42,22 @@ function readSnapshotLookup(getSnapshot: () => ConfigSnapshot): SnapshotLookup {
   const tracker = readSection(raw, 'tracker')
   const codex = readSection(raw, 'codex')
 
-  return {
-    tracker: tracker
-      ? {
-          kind: tracker.kind,
-          api_key: tracker.api_key,
-          project_slug: tracker.project_slug,
-        }
-      : undefined,
-    codex: codex
-      ? {
-          command: codex.command,
-        }
-      : undefined,
+  const lookup: SnapshotLookup = {}
+  if (tracker) {
+    lookup.tracker = {
+      kind: tracker.kind,
+      api_key: tracker.api_key,
+      project_slug: tracker.project_slug,
+    }
   }
+
+  if (codex) {
+    lookup.codex = {
+      command: codex.command,
+    }
+  }
+
+  return lookup
 }
 
 function readNonBlankString(value: unknown): string | null {

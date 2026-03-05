@@ -1,5 +1,25 @@
 import { describe, expect, it } from 'vitest'
-import { validateDispatchPreflight } from '../../src/orchestrator/preflight/index.js'
+import type { ConfigSnapshot } from '../../src/config/contracts.js'
+import type { DispatchPreflightResult } from '../../src/orchestrator/preflight/index.js'
+import {
+  isDispatchPreflightFailure,
+  validateDispatchPreflight,
+} from '../../src/orchestrator/preflight/index.js'
+
+function asSnapshot(value: unknown): ConfigSnapshot {
+  return value as ConfigSnapshot
+}
+
+function expectPreflightFailure(
+  result: DispatchPreflightResult,
+): Extract<DispatchPreflightResult, { ok: false }> {
+  expect(result.ok).toBe(false)
+  if (isDispatchPreflightFailure(result)) {
+    return result
+  }
+
+  expect.unreachable('expected preflight failure result')
+}
 
 describe('validateDispatchPreflight', () => {
   it('maps workflow loader failure to workflow_invalid', async () => {
@@ -8,10 +28,10 @@ describe('validateDispatchPreflight', () => {
         throw new Error('bad yaml')
       },
       getSnapshot: () =>
-        ({
+        asSnapshot({
           tracker: { kind: 'linear', api_key: 'k', project_slug: 'proj' },
           codex: { command: 'codex app-server' },
-        }) as never,
+        }),
     })
 
     expect(result).toEqual({
@@ -31,15 +51,14 @@ describe('validateDispatchPreflight', () => {
     const result = await validateDispatchPreflight({
       loadWorkflow: async () => ({ config: {}, prompt_template: 'ok' }),
       getSnapshot: () =>
-        ({
-          tracker: { kind: '' as never, api_key: ' ', project_slug: ' ' },
+        asSnapshot({
+          tracker: { kind: '', api_key: ' ', project_slug: ' ' },
           codex: { command: '   ' },
-        }) as never,
+        }),
     })
 
-    expect(result).toMatchObject({ ok: false })
-    expect(result.ok).toBe(false)
-    expect(result.errors.map((error) => error.code)).toEqual([
+    const failure = expectPreflightFailure(result)
+    expect(failure.errors.map((error) => error.code)).toEqual([
       'tracker_kind_missing',
       'tracker_api_key_missing',
       'tracker_project_slug_missing',
@@ -55,9 +74,8 @@ describe('validateDispatchPreflight', () => {
       },
     })
 
-    expect(result).toMatchObject({ ok: false })
-    expect(result.ok).toBe(false)
-    expect(result.errors.map((error) => error.code)).toEqual([
+    const failure = expectPreflightFailure(result)
+    expect(failure.errors.map((error) => error.code)).toEqual([
       'tracker_kind_missing',
       'tracker_api_key_missing',
       'tracker_project_slug_missing',
@@ -69,15 +87,14 @@ describe('validateDispatchPreflight', () => {
     const result = await validateDispatchPreflight({
       loadWorkflow: async () => ({ config: {}, prompt_template: 'ok' }),
       getSnapshot: () =>
-        ({
+        asSnapshot({
           tracker: { kind: 'jira', api_key: 'k', project_slug: '' },
           codex: { command: 'codex app-server' },
-        }) as never,
+        }),
     })
 
-    expect(result).toMatchObject({ ok: false })
-    expect(result.ok).toBe(false)
-    expect(result.errors.map((error) => error.code)).toEqual([
+    const failure = expectPreflightFailure(result)
+    expect(failure.errors.map((error) => error.code)).toEqual([
       'tracker_kind_unsupported',
     ])
   })
