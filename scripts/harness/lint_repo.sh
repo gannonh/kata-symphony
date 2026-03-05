@@ -11,7 +11,9 @@ done < <(find scripts -type f -name '*.sh' | sort)
 
 if command -v shellcheck >/dev/null 2>&1; then
   echo "[lint] Running shellcheck..."
-  shellcheck $(find scripts -type f -name '*.sh' | sort)
+  while IFS= read -r script; do
+    shellcheck "$script"
+  done < <(find scripts -type f -name '*.sh' | sort)
 else
   echo "[lint] shellcheck not installed; skipping semantic shell lint."
 fi
@@ -39,4 +41,3 @@ else
 fi
 
 echo "[lint] Repository lint passed."
-

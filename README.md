@@ -2,6 +2,12 @@
 
 Symphony specification and implementation workspace.
 
+## Local Setup
+
+```bash
+pnpm install
+```
+
 ## Required Environment
 
 Copy `.env.example` and set:
@@ -21,12 +27,31 @@ Run only lint:
 
 ```bash
 make lint
+pnpm run lint
 ```
 
 Run only harness docs/contract checks:
 
 ```bash
 make harness
+```
+
+Run TypeScript checks:
+
+```bash
+pnpm run typecheck
+```
+
+Run tests:
+
+```bash
+pnpm test
+```
+
+Run bootstrap entrypoint:
+
+```bash
+pnpm start
 ```
 
 ## What gets enforced
@@ -49,4 +74,3 @@ GitHub Actions workflow:
 - `.github/workflows/harness-engineering.yml`
 
 Runs on pull requests and pushes to `main`.
-
