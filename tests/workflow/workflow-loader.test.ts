@@ -45,6 +45,21 @@ describe('workflow loader path precedence', () => {
     })
   })
 
+  it('maps explicit workflow path read failure to missing_workflow_file', async () => {
+    await expect(
+      loadWorkflowDefinition({
+        cwd: '/repo',
+        workflowPath: './config/custom-workflow.md',
+        readFile: async (): Promise<string> => {
+          throw new Error('ENOENT')
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'missing_workflow_file',
+      workflowPath: '/repo/config/custom-workflow.md',
+    })
+  })
+
   it('parses yaml front matter and trims prompt body', async () => {
     const result = await loadWorkflowDefinition({
       cwd: '/repo',
@@ -118,6 +133,36 @@ Prompt without delimiter`,
         cwd: '/repo',
         readFile: async () => `---
 - item
+---
+Prompt`,
+      }),
+    ).rejects.toMatchObject({
+      code: 'workflow_front_matter_not_a_map',
+      workflowPath: '/repo/WORKFLOW.md',
+    })
+  })
+
+  it('returns workflow_front_matter_not_a_map when yaml root is scalar', async () => {
+    await expect(
+      loadWorkflowDefinition({
+        cwd: '/repo',
+        readFile: async () => `---
+hello
+---
+Prompt`,
+      }),
+    ).rejects.toMatchObject({
+      code: 'workflow_front_matter_not_a_map',
+      workflowPath: '/repo/WORKFLOW.md',
+    })
+  })
+
+  it('returns workflow_front_matter_not_a_map when yaml root is null', async () => {
+    await expect(
+      loadWorkflowDefinition({
+        cwd: '/repo',
+        readFile: async () => `---
+# comment-only front matter
 ---
 Prompt`,
       }),

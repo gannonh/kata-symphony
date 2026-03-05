@@ -10,8 +10,11 @@ describe('runtime-loadable contract modules', () => {
     const workflow = await import('../../src/workflow/index.js')
 
     expect(trackerContracts).toBeTypeOf('object')
+    expect(Object.keys(trackerContracts)).toEqual([])
     expect(executionContracts).toBeTypeOf('object')
+    expect(executionContracts.PROMPT_ERROR_KINDS).toBeDefined()
     expect(observabilityContracts).toBeTypeOf('object')
+    expect(Object.keys(observabilityContracts)).toEqual([])
     expect(workflow).toBeTypeOf('object')
   })
 
