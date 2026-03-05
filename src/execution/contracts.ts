@@ -29,3 +29,5 @@ export interface AgentRunner {
     attempt: number | null,
   ): Promise<{ attempt: RunAttempt; session: LiveSession | null }>
 }
+
+export { createAgentRunner } from './agent-runner/index.js'
