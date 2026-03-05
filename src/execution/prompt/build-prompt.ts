@@ -22,7 +22,7 @@ export function createPromptBuilder(): PromptBuilder {
 
       try {
         const context = {
-          issue: { ...input.issue },
+          issue: input.issue,
           attempt: input.attempt,
         }
         const prompt = await engine.parseAndRender(input.template, context)
@@ -46,8 +46,9 @@ export function createPromptBuilder(): PromptBuilder {
 }
 
 function classifyPromptError(error: unknown): 'template_parse_error' | 'template_render_error' {
-  const name = error instanceof Error ? error.name : ''
-  const message = error instanceof Error ? error.message : String(error)
+  const isErr = error instanceof Error
+  const name = isErr ? error.name : ''
+  const message = isErr ? error.message : String(error)
   const lowerMessage = message.toLowerCase()
 
   if (lowerMessage.includes('undefined variable') || lowerMessage.includes('undefined filter')) {

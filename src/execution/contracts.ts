@@ -1,4 +1,4 @@
-/* c8 ignore file -- type-only contract surface */
+/* c8 ignore file -- contract surface with minimal runtime re-exports */
 import type { Issue, LiveSession, RunAttempt, Workspace } from '../domain/models.js'
 export type {
   PromptBuildError,
