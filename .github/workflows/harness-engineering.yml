@@ -29,6 +29,21 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Run lint
+        run: pnpm run lint
+
+      - name: Run typecheck
+        run: pnpm run typecheck
+
+      - name: Run unit tests
+        run: pnpm run test:unit
+
+      - name: Run integration tests
+        run: pnpm run test:integration
+
+      - name: Run coverage gate
+        run: pnpm run test:coverage
+
       - name: Run repo contract check
         run: bash scripts/harness/check_repo_contract.sh
 
