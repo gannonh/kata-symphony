@@ -21,7 +21,8 @@
     "dev": "tsx watch src/main.ts"
   },
   "dependencies": {
-    "liquidjs": "^10.19.1"
+    "liquidjs": "^10.19.1",
+    "yaml": "^2.8.2"
   },
   "devDependencies": {
     "@eslint/js": "^9.22.0",

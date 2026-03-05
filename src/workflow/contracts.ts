@@ -1,6 +1,6 @@
 import type { WorkflowDefinition } from '../domain/models.js'
 
-export type WorkflowLoaderErrorCode = 'missing_workflow_file'
+export type WorkflowLoaderErrorCode = 'missing_workflow_file' | 'workflow_parse_error'
 
 export interface WorkflowLoaderError extends Error {
   code: WorkflowLoaderErrorCode
