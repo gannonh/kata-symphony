@@ -18,6 +18,46 @@ export interface ValidateDispatchPreflightOptions {
   getSnapshot: () => ConfigSnapshot
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function readSection(record: Record<string, unknown>, key: string): Record<string, unknown> | undefined {
+  const value = record[key]
+  return isRecord(value) ? value : undefined
+}
+
+function readSnapshotLookup(getSnapshot: () => ConfigSnapshot): SnapshotLookup {
+  let raw: unknown
+  try {
+    raw = getSnapshot()
+  } catch {
+    return {}
+  }
+
+  if (!isRecord(raw)) {
+    return {}
+  }
+
+  const tracker = readSection(raw, 'tracker')
+  const codex = readSection(raw, 'codex')
+
+  return {
+    tracker: tracker
+      ? {
+          kind: tracker.kind,
+          api_key: tracker.api_key,
+          project_slug: tracker.project_slug,
+        }
+      : undefined,
+    codex: codex
+      ? {
+          command: codex.command,
+        }
+      : undefined,
+  }
+}
+
 function readNonBlankString(value: unknown): string | null {
   if (typeof value !== 'string') {
     return null
@@ -57,7 +97,7 @@ export async function validateDispatchPreflight(
     })
   }
 
-  const snapshot = options.getSnapshot() as unknown as SnapshotLookup
+  const snapshot = readSnapshotLookup(options.getSnapshot)
   const trackerKind = readNonBlankString(snapshot.tracker?.kind)
   const trackerApiKey = readNonBlankString(snapshot.tracker?.api_key)
   const trackerProjectSlug = readNonBlankString(snapshot.tracker?.project_slug)

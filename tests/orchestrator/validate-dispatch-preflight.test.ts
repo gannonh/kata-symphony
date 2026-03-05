@@ -14,9 +14,16 @@ describe('validateDispatchPreflight', () => {
         }) as never,
     })
 
-    expect(result).toMatchObject({
+    expect(result).toEqual({
       ok: false,
-      errors: [{ code: 'workflow_invalid', source: 'workflow' }],
+      errors: [
+        {
+          code: 'workflow_invalid',
+          message: 'Workflow file cannot be loaded or parsed',
+          source: 'workflow',
+          field: 'workflow',
+        },
+      ],
     })
   })
 
@@ -30,14 +37,48 @@ describe('validateDispatchPreflight', () => {
         }) as never,
     })
 
-    expect(result).toMatchObject({
-      ok: false,
-      errors: [
-        { code: 'tracker_kind_missing' },
-        { code: 'tracker_api_key_missing' },
-        { code: 'tracker_project_slug_missing' },
-        { code: 'codex_command_missing' },
-      ],
+    expect(result).toMatchObject({ ok: false })
+    expect(result.ok).toBe(false)
+    expect(result.errors.map((error) => error.code)).toEqual([
+      'tracker_kind_missing',
+      'tracker_api_key_missing',
+      'tracker_project_slug_missing',
+      'codex_command_missing',
+    ])
+  })
+
+  it('returns config validation errors instead of throwing when getSnapshot fails', async () => {
+    const result = await validateDispatchPreflight({
+      loadWorkflow: async () => ({ config: {}, prompt_template: 'ok' }),
+      getSnapshot: () => {
+        throw new Error('snapshot unavailable')
+      },
     })
+
+    expect(result).toMatchObject({ ok: false })
+    expect(result.ok).toBe(false)
+    expect(result.errors.map((error) => error.code)).toEqual([
+      'tracker_kind_missing',
+      'tracker_api_key_missing',
+      'tracker_project_slug_missing',
+      'codex_command_missing',
+    ])
+  })
+
+  it('returns tracker_kind_unsupported for non-linear trackers', async () => {
+    const result = await validateDispatchPreflight({
+      loadWorkflow: async () => ({ config: {}, prompt_template: 'ok' }),
+      getSnapshot: () =>
+        ({
+          tracker: { kind: 'jira', api_key: 'k', project_slug: '' },
+          codex: { command: 'codex app-server' },
+        }) as never,
+    })
+
+    expect(result).toMatchObject({ ok: false })
+    expect(result.ok).toBe(false)
+    expect(result.errors.map((error) => error.code)).toEqual([
+      'tracker_kind_unsupported',
+    ])
   })
 })
