@@ -2,5 +2,4 @@
 
 Last reviewed: 2026-03-05
 
-No design docs yet. Add records here as implementation decisions are made.
-
+- `2026-03-05-kat-224-strict-prompt-template-rendering-design.md` — strict prompt template rendering contract design.
