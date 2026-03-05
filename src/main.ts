@@ -1,2 +1,3 @@
-console.log('Symphony bootstrap ok')
+import { runMain } from './bootstrap/main-entry.js'
 
+void runMain()
