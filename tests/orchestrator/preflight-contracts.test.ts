@@ -4,9 +4,12 @@ import type {
   DispatchPreflightResult,
 } from '../../src/orchestrator/preflight/index.js'
 import { isDispatchPreflightFailure } from '../../src/orchestrator/preflight/index.js'
+import * as orchestratorContracts from '../../src/orchestrator/contracts.js'
 
 describe('dispatch preflight contracts', () => {
   it('exposes stable error codes and narrowing helper', () => {
+    expect(typeof orchestratorContracts.isDispatchPreflightFailure).toBe('function')
+
     const codeMap: Record<DispatchPreflightErrorCode, true> = {
       workflow_invalid: true,
       tracker_kind_missing: true,

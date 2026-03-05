@@ -19,6 +19,6 @@ export type DispatchPreflightResult =
 
 export function isDispatchPreflightFailure(
   result: DispatchPreflightResult,
-): result is { ok: false; errors: DispatchPreflightError[] } {
+): result is Extract<DispatchPreflightResult, { ok: false }> {
   return result.ok === false
 }
