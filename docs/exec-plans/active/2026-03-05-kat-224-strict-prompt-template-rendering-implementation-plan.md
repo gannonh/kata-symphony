@@ -422,7 +422,7 @@ git commit -m "test(execution): cover prompt iteration and continuation semantic
 **Files:**
 - Modify: `package.json`
 - Modify: `pnpm-lock.yaml`
-- Modify: `docs/plans/2026-03-05-kat-224-strict-prompt-template-rendering-design.md`
+- Modify: `docs/design-docs/2026-03-05-kat-224-strict-prompt-template-rendering-design.md`
 - Optional note: `docs/generated/kat-224-pr-summary.md`
 
 **Step 1: Write the failing test/check**
@@ -435,7 +435,7 @@ Expected: FAIL if `liquidjs` dependency is not declared.
 ```json
 {
   "dependencies": {
-    "liquidjs": "^10.19.0"
+    "liquidjs": "^10.19.1"
   }
 }
 ```
@@ -457,7 +457,7 @@ Add a short “Implementation Notes” section to the design doc linking key fil
 **Step 5: Commit**
 
 ```bash
-git add package.json pnpm-lock.yaml src/execution/prompt tests/execution/prompt tests/contracts/execution-prompt-contracts.test.ts docs/plans/2026-03-05-kat-224-strict-prompt-template-rendering-design.md
+git add package.json pnpm-lock.yaml src/execution/prompt tests/execution/prompt tests/contracts/execution-prompt-contracts.test.ts docs/design-docs/2026-03-05-kat-224-strict-prompt-template-rendering-design.md
 git commit -m "feat(execution): implement strict prompt template rendering contract"
 ```
 

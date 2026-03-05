@@ -1,5 +1,5 @@
 import { Liquid } from 'liquidjs'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { Issue } from '../../../src/domain/models.js'
 import { createPromptBuilder } from '../../../src/execution/prompt/build-prompt.js'
@@ -20,6 +20,10 @@ const issue = {
 } satisfies Issue
 
 describe('createPromptBuilder error mapping', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
   it('returns template_render_error on unknown variable', async () => {
     const builder = createPromptBuilder()
 
@@ -66,7 +70,7 @@ describe('createPromptBuilder error mapping', () => {
   })
 
   it('uses message regex fallback to classify parse errors', async () => {
-    const parseAndRenderSpy = vi
+    vi
       .spyOn(Liquid.prototype, 'parseAndRender')
       .mockRejectedValueOnce(new Error('syntax mismatch in template'))
 
@@ -82,12 +86,10 @@ describe('createPromptBuilder error mapping', () => {
       expect(result.error.kind).toBe('template_parse_error')
       expect(result.error.message).toContain('syntax mismatch')
     }
-
-    parseAndRenderSpy.mockRestore()
   })
 
   it('falls back to template_render_error for non-error throwables', async () => {
-    const parseAndRenderSpy = vi
+    vi
       .spyOn(Liquid.prototype, 'parseAndRender')
       .mockRejectedValueOnce('totally unexpected throwable')
 
@@ -103,7 +105,24 @@ describe('createPromptBuilder error mapping', () => {
       expect(result.error.kind).toBe('template_render_error')
       expect(result.error.message).toContain('totally unexpected throwable')
     }
+  })
 
-    parseAndRenderSpy.mockRestore()
+  it('classifies lowercase parse-like error names as template_parse_error', async () => {
+    const parseError = new Error('unexpected failure while rendering')
+    parseError.name = 'parseerror'
+
+    vi.spyOn(Liquid.prototype, 'parseAndRender').mockRejectedValueOnce(parseError)
+
+    const builder = createPromptBuilder()
+    const result = await builder.build({
+      template: 'any',
+      issue,
+      attempt: null,
+    })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error.kind).toBe('template_parse_error')
+    }
   })
 })

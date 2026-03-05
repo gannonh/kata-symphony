@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  PROMPT_ERROR_KINDS as PROMPT_ERROR_KINDS_FROM_EXECUTION,
+  type PromptBuildError as PromptBuildErrorFromExecution,
+} from '../../src/execution/contracts.js'
+import {
   PROMPT_ERROR_KINDS,
   type PromptBuildError,
   type PromptBuildResult,
@@ -52,6 +56,16 @@ describe('execution prompt contracts', () => {
 
   it('exports prompt contracts from prompt index barrel', () => {
     expect(PROMPT_ERROR_KINDS_FROM_INDEX).toEqual(PROMPT_ERROR_KINDS)
+  })
+
+  it('exports prompt error contracts from execution barrel', () => {
+    const typedError: PromptBuildErrorFromExecution = {
+      kind: 'template_parse_error',
+      message: 'bad template',
+    }
+
+    expect(typedError.kind).toBe('template_parse_error')
+    expect(PROMPT_ERROR_KINDS_FROM_EXECUTION).toEqual(PROMPT_ERROR_KINDS)
   })
 
   it('supports compile-time PromptBuildInput and PromptBuilder usage via re-exports', async () => {

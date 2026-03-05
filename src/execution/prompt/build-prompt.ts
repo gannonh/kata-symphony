@@ -55,8 +55,7 @@ function classifyPromptError(error: unknown): 'template_parse_error' | 'template
   }
 
   if (
-    name.includes('Parse') ||
-    name.includes('Tokenization') ||
+    /parse|tokenization/i.test(name) ||
     /parse|token|syntax|not closed/i.test(message)
   ) {
     return 'template_parse_error'
