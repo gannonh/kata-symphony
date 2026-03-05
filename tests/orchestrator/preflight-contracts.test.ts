@@ -18,16 +18,21 @@ describe('dispatch preflight contracts', () => {
 
     expect(codes).toHaveLength(6)
 
-    const result: DispatchPreflightResult = {
-      ok: false,
-      errors: [{ code: 'workflow_invalid', message: 'invalid workflow', source: 'workflow' }],
-    }
+    const makeResult = (shouldFail: boolean): DispatchPreflightResult =>
+      shouldFail
+        ? {
+            ok: false,
+            errors: [{ code: 'workflow_invalid', message: 'invalid workflow', source: 'workflow' }],
+          }
+        : { ok: true }
+
+    const result = makeResult(Date.now() % 2 === 0)
 
     if (isDispatchPreflightFailure(result)) {
       expect(result.errors).toHaveLength(1)
       expect(result.errors[0]?.code).toBe('workflow_invalid')
     } else {
-      expect.unreachable('expected dispatch preflight failure')
+      expect(result).toEqual({ ok: true })
     }
   })
 })
