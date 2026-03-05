@@ -47,4 +47,24 @@ describe('createPromptBuilder', () => {
       prompt: 'You are working on an issue from Linear.',
     })
   })
+
+  it('preserves nested arrays/maps for Liquid iteration', async () => {
+    const builder = createPromptBuilder()
+
+    const result = await builder.build({
+      template:
+        '{% for label in issue.labels %}[{{ label }}]{% endfor %}|{% for b in issue.blocked_by %}{{ b.identifier }}{% endfor %}|{{ attempt }}',
+      issue: {
+        ...issue,
+        labels: ['area:symphony', 'type:feature'],
+        blocked_by: [{ id: '2', identifier: 'KAT-221', state: 'Done' }],
+      },
+      attempt: 2,
+    })
+
+    expect(result).toEqual({
+      ok: true,
+      prompt: '[area:symphony][type:feature]|KAT-221|2',
+    })
+  })
 })

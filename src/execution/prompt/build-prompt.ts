@@ -21,10 +21,11 @@ export function createPromptBuilder(): PromptBuilder {
       }
 
       try {
-        const prompt = await engine.parseAndRender(input.template, {
-          issue: input.issue,
+        const context = {
+          issue: { ...input.issue },
           attempt: input.attempt,
-        })
+        }
+        const prompt = await engine.parseAndRender(input.template, context)
         return {
           ok: true,
           prompt,
@@ -33,12 +34,33 @@ export function createPromptBuilder(): PromptBuilder {
         return {
           ok: false,
           error: {
-            kind: 'template_render_error',
-            message: 'Failed to render prompt template.',
+            kind: classifyPromptError(error),
+            message: error instanceof Error ? error.message : String(error),
+            template_excerpt: input.template.slice(0, 200),
             cause: error,
           },
         }
       }
     },
   }
+}
+
+function classifyPromptError(error: unknown): 'template_parse_error' | 'template_render_error' {
+  const name = error instanceof Error ? error.name : ''
+  const message = error instanceof Error ? error.message : String(error)
+  const lowerMessage = message.toLowerCase()
+
+  if (lowerMessage.includes('undefined variable') || lowerMessage.includes('undefined filter')) {
+    return 'template_render_error'
+  }
+
+  if (
+    name.includes('Parse') ||
+    name.includes('Tokenization') ||
+    /parse|token|syntax|not closed|unexpected/i.test(message)
+  ) {
+    return 'template_parse_error'
+  }
+
+  return 'template_render_error'
 }
