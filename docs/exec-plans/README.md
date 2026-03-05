@@ -8,3 +8,6 @@ Last reviewed: 2026-03-05
 - Move completed plan docs to `completed/`
 - Filename format: `YYYY-MM-DD-<topic>.md`
 
+## Active Plans
+
+- `active/2026-03-05-kat-224-strict-prompt-template-rendering-implementation-plan.md`

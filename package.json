@@ -20,6 +20,9 @@
     "start": "tsx src/main.ts",
     "dev": "tsx watch src/main.ts"
   },
+  "dependencies": {
+    "liquidjs": "^10.19.1"
+  },
   "devDependencies": {
     "@eslint/js": "^9.22.0",
     "@types/node": "^22.13.10",
