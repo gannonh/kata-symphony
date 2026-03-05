@@ -3,10 +3,7 @@ import type { DispatchPreflightError } from './contracts.js'
 
 type DispatchPreflightPhase = 'startup' | 'tick'
 
-type PreflightLogContext = {
-  workflowPath?: unknown
-  workflow_path?: unknown
-}
+type PreflightLogContext = Record<string, unknown>
 
 function readNonBlankString(value: unknown): string | undefined {
   if (typeof value !== 'string') {
@@ -24,8 +21,8 @@ export function logPreflightFailure(
   context?: PreflightLogContext,
 ): void {
   const safeWorkflowPath =
-    readNonBlankString(context?.workflowPath) ??
-    readNonBlankString(context?.workflow_path)
+    readNonBlankString(context?.['workflowPath']) ??
+    readNonBlankString(context?.['workflow_path'])
 
   logger.error('Dispatch preflight validation failed', {
     phase,

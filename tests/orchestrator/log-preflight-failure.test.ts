@@ -97,4 +97,85 @@ describe('logPreflightFailure', () => {
     const [, payload] = errorSpy.mock.calls.at(-1) ?? []
     expect(JSON.stringify(payload)).not.toContain(secret)
   })
+
+  it('uses snake_case workflow_path when workflowPath is absent', () => {
+    const errorSpy = vi.fn<Logger['error']>()
+    const logger: Logger = {
+      info: vi.fn(),
+      error: errorSpy,
+    }
+
+    logPreflightFailure(
+      logger,
+      'tick',
+      [
+        {
+          code: 'workflow_invalid',
+          source: 'workflow',
+          field: 'workflow',
+          message: 'Workflow file cannot be loaded or parsed',
+        },
+      ],
+      {
+        workflow_path: '/tmp/fallback-workflow.yml',
+      },
+    )
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      'Dispatch preflight validation failed',
+      {
+        phase: 'tick',
+        error_codes: ['workflow_invalid'],
+        errors: [
+          {
+            code: 'workflow_invalid',
+            field: 'workflow',
+            source: 'workflow',
+            message: 'Workflow file cannot be loaded or parsed',
+          },
+        ],
+        workflow_path: '/tmp/fallback-workflow.yml',
+      },
+    )
+  })
+
+  it('omits workflow_path when provided value is blank', () => {
+    const errorSpy = vi.fn<Logger['error']>()
+    const logger: Logger = {
+      info: vi.fn(),
+      error: errorSpy,
+    }
+
+    logPreflightFailure(
+      logger,
+      'tick',
+      [
+        {
+          code: 'workflow_invalid',
+          source: 'workflow',
+          field: 'workflow',
+          message: 'Workflow file cannot be loaded or parsed',
+        },
+      ],
+      {
+        workflowPath: '   ',
+      },
+    )
+
+    expect(errorSpy).toHaveBeenCalledWith(
+      'Dispatch preflight validation failed',
+      {
+        phase: 'tick',
+        error_codes: ['workflow_invalid'],
+        errors: [
+          {
+            code: 'workflow_invalid',
+            field: 'workflow',
+            source: 'workflow',
+            message: 'Workflow file cannot be loaded or parsed',
+          },
+        ],
+      },
+    )
+  })
 })
