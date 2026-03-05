@@ -1,4 +1,9 @@
 import type { Issue, LiveSession, RunAttempt, Workspace } from '../domain/models.js'
+export type {
+  PromptBuildInput,
+  PromptBuildResult,
+  PromptBuilder,
+} from './prompt/contracts.js'
 
 export interface WorkspaceManager {
   ensureWorkspace(issueIdentifier: string): Promise<Workspace>
