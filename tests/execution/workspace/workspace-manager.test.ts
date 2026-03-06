@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -263,6 +263,61 @@ describe('workspace manager ensureWorkspace', () => {
         created_now: false,
       }),
     ).rejects.toMatchObject({ code: 'workspace_hook_failed' })
+  })
+
+  it('rolls back directory when after_create hook fails', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'kat-227-'))
+    dirs.push(root)
+    const runCommand = vi.fn().mockResolvedValue({
+      timed_out: false,
+      exit_code: 1,
+      stderr: 'hook failed',
+    })
+
+    const manager = createWorkspaceManager({
+      workspaceRoot: root,
+      hooks: {
+        after_create: 'exit 1',
+        before_run: null,
+        after_run: null,
+        before_remove: null,
+        timeout_ms: 1000,
+      },
+      runCommand,
+    })
+
+    await expect(manager.ensureWorkspace('KAT-227')).rejects.toMatchObject({
+      code: 'workspace_hook_failed',
+    })
+
+    // Directory should have been rolled back
+    await expect(stat(path.join(root, 'KAT-227'))).rejects.toMatchObject({
+      code: 'ENOENT',
+    })
+  })
+
+  it('rejects symlinked workspace directories', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'kat-227-'))
+    dirs.push(root)
+    const target = await mkdtemp(path.join(os.tmpdir(), 'kat-227-target-'))
+    dirs.push(target)
+
+    await symlink(target, path.join(root, 'KAT-227'))
+
+    const manager = createWorkspaceManager({
+      workspaceRoot: root,
+      hooks: {
+        after_create: null,
+        before_run: null,
+        after_run: null,
+        before_remove: null,
+        timeout_ms: 1000,
+      },
+    })
+
+    await expect(manager.ensureWorkspace('KAT-227')).rejects.toMatchObject({
+      code: 'workspace_path_symlink',
+    })
   })
 
   it('maps null exit code to nonfatal after_run ignored failure with default command', async () => {

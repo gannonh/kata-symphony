@@ -21,9 +21,9 @@ describe('workspace manager filesystem error mapping', () => {
   })
 
   it('maps rm failures to workspace_fs_error during removeWorkspace', async () => {
-    const stat = vi.fn().mockResolvedValue({ isDirectory: () => true })
+    const lstat = vi.fn().mockResolvedValue({ isDirectory: () => true, isSymbolicLink: () => false })
     const rm = vi.fn().mockRejectedValue(new Error('rm denied'))
-    const { createWorkspaceManager } = await loadManagerWithFsMocks({ stat, rm })
+    const { createWorkspaceManager } = await loadManagerWithFsMocks({ lstat, rm })
 
     const manager = createWorkspaceManager({
       workspaceRoot: '/tmp',
@@ -46,10 +46,10 @@ describe('workspace manager filesystem error mapping', () => {
     })
   })
 
-  it('maps non-ENOENT stat errors to workspace_fs_error during ensureWorkspace', async () => {
+  it('maps non-ENOENT lstat errors to workspace_fs_error during ensureWorkspace', async () => {
     const statError = Object.assign(new Error('permission denied'), { code: 'EACCES' })
-    const stat = vi.fn().mockRejectedValue(statError)
-    const { createWorkspaceManager } = await loadManagerWithFsMocks({ stat })
+    const lstat = vi.fn().mockRejectedValue(statError)
+    const { createWorkspaceManager } = await loadManagerWithFsMocks({ lstat })
 
     const manager = createWorkspaceManager({
       workspaceRoot: '/tmp',
@@ -69,9 +69,9 @@ describe('workspace manager filesystem error mapping', () => {
 
   it('maps mkdir failures to workspace_fs_error during ensureWorkspace create path', async () => {
     const statError = Object.assign(new Error('missing'), { code: 'ENOENT' })
-    const stat = vi.fn().mockRejectedValue(statError)
+    const lstat = vi.fn().mockRejectedValue(statError)
     const mkdir = vi.fn().mockRejectedValue(new Error('mkdir denied'))
-    const { createWorkspaceManager } = await loadManagerWithFsMocks({ stat, mkdir })
+    const { createWorkspaceManager } = await loadManagerWithFsMocks({ lstat, mkdir })
 
     const manager = createWorkspaceManager({
       workspaceRoot: '/tmp',
@@ -89,10 +89,10 @@ describe('workspace manager filesystem error mapping', () => {
     })
   })
 
-  it('maps non-ENOENT stat errors to workspace_fs_error during removeWorkspace lookup', async () => {
+  it('maps non-ENOENT lstat errors to workspace_fs_error during removeWorkspace lookup', async () => {
     const statError = Object.assign(new Error('permission denied'), { code: 'EACCES' })
-    const stat = vi.fn().mockRejectedValue(statError)
-    const { createWorkspaceManager } = await loadManagerWithFsMocks({ stat })
+    const lstat = vi.fn().mockRejectedValue(statError)
+    const { createWorkspaceManager } = await loadManagerWithFsMocks({ lstat })
 
     const manager = createWorkspaceManager({
       workspaceRoot: '/tmp',

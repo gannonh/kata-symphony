@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
-import { mkdir, rm, stat } from 'node:fs/promises'
+import { lstat, mkdir, realpath, rm } from 'node:fs/promises'
+import path from 'node:path'
 
 import type { Workspace } from '../../domain/models.js'
 import type { WorkspaceManager } from '../contracts.js'
@@ -26,7 +27,7 @@ const DEFAULT_RUN_COMMAND: RunWorkspaceHookCommand = async ({
   cwd,
   timeout_ms,
 }) => new Promise((resolve) => {
-  const child = spawn('sh', ['-lc', script], {
+  const child = spawn('sh', ['-c', script], {
     cwd,
     stdio: ['ignore', 'ignore', 'pipe'],
   })
@@ -91,16 +92,25 @@ export function createWorkspaceManager(input: CreateWorkspaceManagerInput): Work
   return {
     async ensureWorkspace(issueIdentifier: string): Promise<Workspace> {
       const resolved = createWorkspacePathForIssue(input.workspaceRoot, issueIdentifier)
-      const created_now = await ensureDirectory(resolved.path)
+      const created_now = await ensureDirectory(resolved.path, input.workspaceRoot)
 
       if (created_now) {
-        await runWorkspaceHook({
-          hook: 'after_create',
-          script: input.hooks.after_create,
-          timeout_ms: input.hooks.timeout_ms,
-          cwd: resolved.path,
-          runCommand,
-        })
+        try {
+          await runWorkspaceHook({
+            hook: 'after_create',
+            script: input.hooks.after_create,
+            timeout_ms: input.hooks.timeout_ms,
+            cwd: resolved.path,
+            runCommand,
+          })
+        } catch (hookError) {
+          try {
+            await rm(resolved.path, { recursive: true, force: true })
+          } catch {
+            // best-effort rollback; ignore cleanup errors
+          }
+          throw hookError
+        }
       }
 
       return {
@@ -173,9 +183,17 @@ export function createWorkspaceManager(input: CreateWorkspaceManagerInput): Work
   }
 }
 
-async function ensureDirectory(pathAbs: string): Promise<boolean> {
+async function ensureDirectory(pathAbs: string, workspaceRoot: string): Promise<boolean> {
   try {
-    const entry = await stat(pathAbs)
+    const entry = await lstat(pathAbs)
+
+    if (entry.isSymbolicLink()) {
+      throw new WorkspaceExecutionError(
+        'workspace_path_symlink',
+        'workspace path is a symlink, which bypasses containment',
+        { workspacePath: pathAbs, fatal: true },
+      )
+    }
 
     if (!entry.isDirectory()) {
       throw new WorkspaceExecutionError(
@@ -184,6 +202,8 @@ async function ensureDirectory(pathAbs: string): Promise<boolean> {
         { workspacePath: pathAbs, fatal: true },
       )
     }
+
+    await assertRealpathContainment(pathAbs, workspaceRoot)
 
     return false
   } catch (error) {
@@ -218,13 +238,27 @@ async function ensureDirectory(pathAbs: string): Promise<boolean> {
   }
 }
 
+async function assertRealpathContainment(pathAbs: string, workspaceRoot: string): Promise<void> {
+  const real = await realpath(pathAbs)
+  const rootReal = await realpath(path.resolve(workspaceRoot))
+  const relative = path.relative(rootReal, real)
+
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new WorkspaceExecutionError(
+      'workspace_path_outside_root',
+      'workspace realpath escaped root',
+      { workspaceRoot: rootReal, workspacePath: real, fatal: true },
+    )
+  }
+}
+
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return typeof error === 'object' && error !== null && 'code' in error
 }
 
 async function getDirectoryState(pathAbs: string): Promise<'directory' | 'not_directory' | 'missing'> {
   try {
-    const entry = await stat(pathAbs)
+    const entry = await lstat(pathAbs)
     return entry.isDirectory() ? 'directory' : 'not_directory'
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') {

@@ -12,6 +12,7 @@ describe('workspace execution contracts', () => {
     expect(WORKSPACE_EXECUTION_ERROR_CODES).toEqual([
       'workspace_path_outside_root',
       'workspace_path_not_directory',
+      'workspace_path_symlink',
       'workspace_fs_error',
       'workspace_hook_failed',
       'workspace_hook_timeout',
