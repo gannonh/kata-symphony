@@ -7,4 +7,11 @@ echo "[pre-push] running local CI gate with evidence checks..."
 source "${ROOT_DIR}/scripts/harness/common.sh"
 HARNESS_BASE_REF="${HARNESS_BASE_REF:-$(harness_resolve_base_ref || true)}"
 export HARNESS_BASE_REF
-pnpm run ci:local
+env -i \
+  PATH="${PATH}" \
+  HOME="${HOME}" \
+  SHELL="${SHELL:-/bin/bash}" \
+  TERM="${TERM:-}" \
+  TMPDIR="${TMPDIR:-/tmp}" \
+  HARNESS_BASE_REF="${HARNESS_BASE_REF}" \
+  pnpm run ci:local
