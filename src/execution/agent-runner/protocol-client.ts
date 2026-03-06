@@ -1,3 +1,4 @@
+import { makeSessionId } from '../../domain/normalization.js'
 import {
   AGENT_RUNNER_ERROR_CODES,
   AgentRunnerError,
@@ -108,7 +109,7 @@ export function createProtocolClient(deps: ProtocolClientDeps) {
         throw new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.RESPONSE_ERROR)
       }
 
-      return { threadId: input.threadId, turnId, sessionId: `${input.threadId}-${turnId}` }
+      return { threadId: input.threadId, turnId, sessionId: makeSessionId(input.threadId, turnId) }
     },
 
     async startSession(input: StartSessionInput): Promise<SessionStartResult> {

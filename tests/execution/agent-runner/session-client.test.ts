@@ -130,7 +130,7 @@ describe('agent session client', () => {
     expect(firstTurn).toEqual({
       threadId: 'thread-1',
       turnId: 'turn-1',
-      sessionId: 'thread-1-turn-1',
+      sessionId: 'thread-1::turn-1',
     })
 
     expect(client.getLatestSession()).toMatchObject({
@@ -149,7 +149,7 @@ describe('agent session client', () => {
     expect(secondTurn).toEqual({
       threadId: 'thread-1',
       turnId: 'turn-2',
-      sessionId: 'thread-1-turn-2',
+      sessionId: 'thread-1::turn-2',
     })
     expect(client.getLatestSession()).toMatchObject({
       thread_id: 'thread-1',
@@ -167,7 +167,7 @@ describe('agent session client', () => {
     expect(thirdTurn).toEqual({
       threadId: 'thread-1',
       turnId: 'turn-3',
-      sessionId: 'thread-1-turn-3',
+      sessionId: 'thread-1::turn-3',
     })
     expect(client.getLatestSession()).toMatchObject({
       thread_id: 'thread-1',

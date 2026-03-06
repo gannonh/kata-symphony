@@ -25,7 +25,6 @@ interface SessionClientDeps {
     turn_sandbox_policy?: string
     turn_timeout_ms: number
     read_timeout_ms: number
-    stall_timeout_ms: number
   }
   workspacePath: string
   spawnChild?: (input: {

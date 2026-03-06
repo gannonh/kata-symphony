@@ -65,7 +65,7 @@ describe('protocol client handshake', () => {
 
     expect(thread.threadId).toBe('thread-1')
     expect(result.turnId).toBe('turn-1')
-    expect(result.sessionId).toBe('thread-1-turn-1')
+    expect(result.sessionId).toBe('thread-1::turn-1')
 
     const methods = transport.writes.map((line) => (JSON.parse(line) as { method: string }).method)
     expect(methods).toEqual(['initialize', 'initialized', 'thread/start', 'turn/start'])

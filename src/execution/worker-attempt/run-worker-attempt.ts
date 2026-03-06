@@ -1,4 +1,5 @@
 import type { LiveSession, RunAttempt, Workspace, Issue } from '../../domain/models.js'
+import { normalizeIssueState } from '../../domain/normalization.js'
 import type { TrackerClient } from '../../tracker/contracts.js'
 import type { WorkspaceManager } from '../contracts.js'
 import type { AgentSessionClient } from '../agent-runner/session-client.js'
@@ -67,20 +68,17 @@ function createNormalOutcome(
   }
 }
 
-function normalizeState(state: string | null): string {
-  return state?.trim().toLowerCase() ?? ''
-}
-
 export function createWorkerAttemptRunner(
   deps: WorkerAttemptRunnerDeps,
 ): WorkerAttemptRunner {
+  const activeStates = new Set(
+    deps.activeStates.filter(Boolean).map((state) => normalizeIssueState(state)),
+  )
+
   return {
     async run(issue, attempt) {
       const startedAt = new Date().toISOString()
       const title = `${issue.identifier}: ${issue.title}`
-      const activeStates = new Set(
-        deps.activeStates.map((state) => normalizeState(state)),
-      )
 
       const runtimeState: {
         workspace: Workspace | null
@@ -191,7 +189,7 @@ export function createWorkerAttemptRunner(
               return
             }
 
-            if (!activeStates.has(normalizeState(currentIssue.state))) {
+            if (!activeStates.has(currentIssue.state ? normalizeIssueState(currentIssue.state) : '')) {
               attemptStatus = 'succeeded'
               outcome = createNormalOutcome(
                 'stopped_non_active_state',
