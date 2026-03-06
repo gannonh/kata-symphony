@@ -102,12 +102,10 @@ function runScript(
   root: string,
   options: { evidencePath?: string; refOrFlag?: string } = {},
 ): { ok: boolean; output: string } {
-  const {
-    HARNESS_BASE_REF: _ignoredBaseRef,
-    HARNESS_EVIDENCE_PATH: _ignoredEvidencePath,
-    REPO_ROOT: _ignoredRepoRoot,
-    ...cleanEnv
-  } = process.env
+  const cleanEnv = { ...process.env }
+  delete cleanEnv.HARNESS_BASE_REF
+  delete cleanEnv.HARNESS_EVIDENCE_PATH
+  delete cleanEnv.REPO_ROOT
 
   const ref = options.refOrFlag ?? 'HEAD~1'
   try {
