@@ -3,7 +3,7 @@ import type { DispatchPreflightError, DispatchPreflightResult } from './contract
 export interface RunTickPreflightGateOptions {
   reconcile: () => Promise<void>
   validate: () => Promise<DispatchPreflightResult>
-  logFailure: (errors: DispatchPreflightError[]) => void
+  logFailure: (errors: DispatchPreflightError[]) => void | Promise<void>
 }
 
 export interface RunTickPreflightGateResult {
@@ -17,7 +17,7 @@ export async function runTickPreflightGate(
 
   const result = await options.validate()
   if (result.ok === false) {
-    options.logFailure(result.errors)
+    await options.logFailure(result.errors)
     return { dispatchAllowed: false }
   }
 
