@@ -39,6 +39,7 @@ jobs:
 
       - name: Run Claude Code Review
         id: claude-review
+        continue-on-error: true
         # Work around upstream SDK regression in anthropics/claude-code-action@v1.
         # See: https://github.com/anthropics/claude-code-action/issues/892
         uses: anthropics/claude-code-action@01e756b34ef7a1447e9508f674143b07d20c2631
@@ -54,3 +55,8 @@ jobs:
           prompt: '/code-review'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
+
+      - name: Warn on Claude review instability
+        if: steps.claude-review.outcome == 'failure'
+        run: |
+          echo "::warning::Claude Code review failed due upstream action instability; not blocking this PR."
