@@ -48,6 +48,7 @@ jobs:
           # Use workflow token directly so PRs that modify this workflow don't fail
           # app-token exchange validation against default branch.
           github_token: ${{ github.token }}
+          settings: '{}'
           path_to_claude_code_executable: ${{ env.CLAUDE_PATH }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
