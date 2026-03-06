@@ -20,6 +20,8 @@ branch-base validation.
 - `docs/generated/change-evidence/2026-03-06-build-time-harness.md`
 - `docs/generated/change-evidence/2026-03-06-harness-contract-task-4.json`
 - `docs/generated/change-evidence/2026-03-06-harness-contract-task-4.md`
+- `docs/generated/change-evidence/2026-03-06-harness-review-fixes.json`
+- `docs/generated/change-evidence/2026-03-06-harness-review-fixes.md`
 - `docs/generated/change-evidence/2026-03-06-harness-skill-task-6.json`
 - `docs/generated/change-evidence/2026-03-06-harness-skill-task-6.md`
 - `docs/generated/change-evidence/2026-03-06-stale-context-task-7.json`
