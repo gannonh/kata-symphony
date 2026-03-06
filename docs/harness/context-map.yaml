@@ -82,3 +82,23 @@ rules:
       - "documentation"
       - "harness"
     notes: "Agent routing changes should stay aligned with the harness guide and context map."
+
+  - pattern: "QUALITY_SCORE.md"
+    owned_by:
+      - "QUALITY_SCORE.md"
+      - "docs/harness/context-map.yaml"
+    impacted_areas:
+      - "documentation"
+      - "quality"
+      - "harness"
+    notes: "Quality score updates should remain aligned with the harness capabilities they describe."
+
+  - pattern: "PLANS.md"
+    owned_by:
+      - "PLANS.md"
+      - "docs/harness/context-map.yaml"
+    impacted_areas:
+      - "documentation"
+      - "planning"
+      - "harness"
+    notes: "Plan index changes should stay aligned with the active harness rollout tracks."
