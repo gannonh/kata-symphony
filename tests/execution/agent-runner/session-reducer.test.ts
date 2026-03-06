@@ -117,4 +117,18 @@ describe('session reducer', () => {
     expect(session.codex_output_tokens).toBe(0)
     expect(session.codex_total_tokens).toBe(0)
   })
+
+  it('resolves when completion arrives after waiting has started', async () => {
+    const reducer = createSessionReducer()
+    const waiting = reducer.waitForTurnCompletion(50)
+
+    setTimeout(() => {
+      reducer.acceptMessage({
+        method: 'turn/completed',
+        params: { usage: { input_tokens: 1, output_tokens: 2, total_tokens: 3 } },
+      })
+    }, 0)
+
+    await expect(waiting).resolves.toBeUndefined()
+  })
 })
