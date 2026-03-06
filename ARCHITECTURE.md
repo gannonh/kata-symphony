@@ -44,10 +44,26 @@ Language-agnostic architecture reference for implementing `SPEC.md`.
 ## Canonical Runtime Flow
 
 1. Load and validate workflow/config.
-2. Reconcile in-flight runs.
-3. Poll active issues from tracker.
-4. Select eligible issues with concurrency bounds.
-5. Dispatch worker attempts in isolated workspaces.
-6. Stream agent runtime events into orchestrator state.
-7. Retry or release issues based on exit reason and tracker state.
-8. Surface state via logs/status.
+2. Run startup dispatch preflight before orchestrator boot.
+3. Reconcile in-flight runs.
+4. Poll active issues from tracker.
+5. Run tick dispatch preflight gate before any dispatch.
+6. Select eligible issues with concurrency bounds.
+7. Dispatch worker attempts in isolated workspaces.
+8. Stream agent runtime events into orchestrator state.
+9. Retry or release issues based on exit reason and tracker state.
+10. Surface state via logs/status.
+
+## Dispatch Preflight Gating Semantics
+
+1. Startup fail-fast gate
+   - `startService` runs `validateDispatchPreflight` before starting the orchestrator.
+   - On failure it logs structured preflight errors for `phase: "startup"` and throws `StartupPreflightError`.
+   - `runMain` catches startup errors, reports `Symphony startup failed`, and sets `process.exitCode = 1`.
+2. Per-tick dispatch gate
+   - `runTickPreflightGate` runs reconcile first, then preflight validation.
+   - If validation fails, it logs failure for `phase: "tick"` and returns `dispatchAllowed: false`.
+   - Dispatch is skipped for that tick; reconciliation still completes.
+3. Redacted preflight logging
+   - `logPreflightFailure` emits only safe, structured metadata: `phase`, `error_codes`, and sanitized `errors` entries (`code`, `field`, `source`, `message`), plus optional `workflow_path`.
+   - Arbitrary context (including secrets like tracker API keys) is not logged.
