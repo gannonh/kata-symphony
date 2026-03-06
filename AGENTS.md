@@ -29,22 +29,36 @@ Build and operate `Symphony` from `SPEC.md` with an agent-first workflow.
 6. Never bypass git hooks with `--no-verify`.
    - If pre-push fails, fix the underlying issue (including coverage thresholds) and rerun normally.
 
-## Commands
+## Workflow
 
 Use this single workflow in this repo.
 
 1. Start ticket lifecycle
    - `kata-linear start KAT-<number>`
+
 2. Design
-   - `brainstorming`
+   - `superpowers:brainstorming`
+
 3. Plan
-   - `writing-plans`
+   - `superpowers:writing-plans`
+
 4. Execute implementation
-   - `executing-plans`
+   - `superpowers:subagent-driven-development`
+   - `superpowers:test-driven-development`
+   - `superpowers:requesting-code-review`
+
 5. Verify before claiming completion
-   - `verification-before-completion`
+   - `superpowers:verification-before-completion`
+   - `user-acceptance`
+   - `superpowers:finishing-a-development-branch`
+  
 6. PR workflow
-   - `pull-requests`
+   - `pull-requests` create PR
+   - `gh-address-comments` for PR comments
+   - `gh-fix-ci` for CI failures
+   - `pr-review-plugin:pr-review` for PR reviews
+   - `pull-requests` merge pr when approved and CI is green
+
 7. Close ticket lifecycle
    - `kata-linear end KAT-<number>`
 
