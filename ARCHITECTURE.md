@@ -68,3 +68,5 @@ Language-agnostic architecture reference for implementing `SPEC.md`.
 3. Redacted preflight logging
    - `logPreflightFailure` emits only safe, structured metadata: `phase`, `error_codes`, and sanitized `errors` entries (`code`, `field`, `source`, `message`), plus optional `workflow_path`.
    - Arbitrary context (including secrets like tracker API keys) is not logged.
+4. Defensive snapshot handling
+   - `validateDispatchPreflight` treats malformed or non-object config snapshot sections as missing config and returns stable preflight error codes instead of throwing.
