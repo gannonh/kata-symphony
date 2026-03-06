@@ -18,7 +18,7 @@ function initTempRepo(): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'evidence-contract-'))
   tempDirs.push(root)
 
-  execFileSync('git', ['init'], { cwd: root })
+  execFileSync('git', ['init', '-b', 'main'], { cwd: root })
   execFileSync('git', ['config', 'user.name', 'Codex Test'], { cwd: root })
   execFileSync('git', ['config', 'user.email', 'codex@example.com'], { cwd: root })
 
@@ -111,8 +111,10 @@ function runScript(scriptPath: string, root: string, evidencePath?: string): { o
     })
     return { ok: true, output }
   } catch (error) {
-    const stdout = error instanceof Error && 'stdout' in error ? String((error as { stdout?: string }).stdout ?? '') : ''
-    return { ok: false, output: stdout }
+    const output = error instanceof Error && 'stdout' in error
+      ? String((error as { stdout?: string; stderr?: string }).stdout ?? '') + String((error as { stdout?: string; stderr?: string }).stderr ?? '')
+      : ''
+    return { ok: false, output }
   }
 }
 
@@ -131,7 +133,7 @@ describe('evidence contract harness scripts', () => {
 
     const result = runScript(evidenceScript, root)
     expect(result.ok).toBe(false)
-    expect(result.output).toContain('Qualifying changes require a change-evidence JSON artifact.')
+    expect(result.output).toContain('Qualifying changes require a change-evidence JSON artifact that matches the current diff.')
   })
 
   it('fails when the evidence manifest is missing required fields', () => {
@@ -180,6 +182,67 @@ describe('evidence contract harness scripts', () => {
     const result = runScript(evidenceScript, root, evidencePath)
     expect(result.ok).toBe(false)
     expect(result.output).toContain('Verification entries must include concrete command evidence.')
+  })
+
+  it('fails when the evidence artifact changedFiles do not match the current diff', () => {
+    const root = initTempRepo()
+    writeFile(root, 'scripts/harness/example.sh', '#!/usr/bin/env bash\necho changed\n')
+    execFileSync('git', ['add', '.'], { cwd: root })
+    execFileSync('git', ['commit', '-m', 'change'], { cwd: root })
+
+    const evidencePath = writeEvidence(root, {
+      topic: 'task',
+      summary: 'task',
+      changedFiles: ['src/orchestrator/example.ts'],
+      contextLoaded: ['docs/harness/BUILDING-WITH-HARNESS.md'],
+      decisionArtifacts: ['docs/plans/task-design.md'],
+      canonicalDocsUpdated: ['docs/harness/BUILDING-WITH-HARNESS.md'],
+      waivers: [],
+      verification: [{ command: 'bash scripts/harness/example.sh', result: 'pass' }],
+      verificationArtifacts: ['docs/generated/task-verification.md'],
+      impactedAreas: ['harness'],
+    })
+
+    const result = runScript(evidenceScript, root, evidencePath)
+    expect(result.ok).toBe(false)
+    expect(result.output).toContain('Evidence artifact changedFiles do not match the current diff.')
+  })
+
+  it('auto-selects the evidence artifact that matches the current diff instead of the latest filename', () => {
+    const root = initTempRepo()
+    writeFile(root, 'scripts/harness/example.sh', '#!/usr/bin/env bash\necho changed\n')
+    execFileSync('git', ['add', '.'], { cwd: root })
+    execFileSync('git', ['commit', '-m', 'change'], { cwd: root })
+
+    writeEvidence(root, {
+      topic: 'task',
+      summary: 'task',
+      changedFiles: ['scripts/harness/example.sh'],
+      contextLoaded: ['docs/harness/BUILDING-WITH-HARNESS.md'],
+      decisionArtifacts: ['docs/plans/task-design.md'],
+      canonicalDocsUpdated: ['docs/harness/BUILDING-WITH-HARNESS.md'],
+      waivers: [],
+      verification: [{ command: 'bash scripts/harness/example.sh', result: 'pass' }],
+      verificationArtifacts: ['docs/generated/task-verification.md'],
+      impactedAreas: ['harness'],
+    })
+    writeFile(root, 'docs/generated/change-evidence/zzz.json', `${JSON.stringify({
+      topic: 'other',
+      summary: 'other',
+      changedFiles: ['src/orchestrator/example.ts'],
+      contextLoaded: ['ARCHITECTURE.md'],
+      decisionArtifacts: ['docs/plans/task-design.md'],
+      canonicalDocsUpdated: ['ARCHITECTURE.md'],
+      waivers: [],
+      verification: [{ command: 'pnpm vitest', result: 'pass' }],
+      verificationArtifacts: ['docs/generated/task-verification.md'],
+      impactedAreas: ['architecture'],
+    }, null, 2)}\n`)
+    writeFile(root, 'docs/generated/change-evidence/zzz.md', '# Change Evidence: other\n')
+
+    const result = runScript(evidenceScript, root)
+    expect(result.ok).toBe(true)
+    expect(result.output).toContain('Evidence contract check passed.')
   })
 
   it('passes with an explicit no-doc waiver that includes rationale', () => {

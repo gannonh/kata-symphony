@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "${ROOT_DIR}/scripts/harness/common.sh"
+
+HARNESS_BASE_REF="${HARNESS_BASE_REF:-$(harness_resolve_base_ref || true)}"
+export HARNESS_BASE_REF
+
 echo "[ci-local] lint"
 pnpm run lint
 

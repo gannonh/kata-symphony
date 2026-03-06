@@ -45,6 +45,8 @@ The markdown file is for human review. The JSON file is for scripts and hooks.
 - The file must list at least one decision artifact for architecture-sensitive changes.
 - A waiver entry must name the skipped doc and explain why no update was needed.
 - Verification must include concrete commands, not only a success claim.
+- Listing a doc under `Context Loaded` does not authorize editing it. Canonical
+  doc edits must appear under `Canonical Docs Updated` or under `Waivers`.
 
 ## JSON Artifact
 
@@ -82,7 +84,9 @@ The markdown file is for human review. The JSON file is for scripts and hooks.
 
 - `topic`: short identifier for the change.
 - `summary`: one-sentence description.
-- `changedFiles`: array of changed repo-relative paths.
+- `changedFiles`: array of changed repo-relative paths for the current diff
+  being validated. The harness compares this field to the actual diff and will
+  reject mismatches.
 - `contextLoaded`: array of source-of-truth files loaded for the work.
 - `decisionArtifacts`: array of linked design or plan docs.
 - `canonicalDocsUpdated`: array of durable docs updated by the change.
@@ -96,6 +100,10 @@ The markdown file is for human review. The JSON file is for scripts and hooks.
 
 `docs/harness/context-map.yaml` defines the ownership map the harness uses to
 connect changed paths to required context and durable docs.
+
+Local branch validation resolves the diff from the branch merge-base with
+`origin/main`, `main`, `origin/master`, `master`, or the configured upstream
+before falling back to `HEAD~1`.
 
 ### Required fields per rule
 

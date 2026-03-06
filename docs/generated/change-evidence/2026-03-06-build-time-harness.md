@@ -2,8 +2,9 @@
 
 ## Summary
 
-Roll up the evidence-backed build-time harness rollout across Tasks 1 through 7
-and record final verification for the branch.
+Roll up the evidence-backed build-time harness rollout and the follow-up review
+fixes for canonical-doc authorization, diff-scoped evidence selection, and
+branch-base validation.
 
 ## Changed Files
 
@@ -14,6 +15,7 @@ and record final verification for the branch.
 - `PLANS.md`
 - `QUALITY_SCORE.md`
 - `docs/generated/README.md`
+- `docs/generated/build-time-harness-verification.md`
 - `docs/generated/change-evidence/2026-03-06-build-time-harness.json`
 - `docs/generated/change-evidence/2026-03-06-build-time-harness.md`
 - `docs/generated/change-evidence/2026-03-06-harness-contract-task-4.json`
@@ -22,7 +24,6 @@ and record final verification for the branch.
 - `docs/generated/change-evidence/2026-03-06-harness-skill-task-6.md`
 - `docs/generated/change-evidence/2026-03-06-stale-context-task-7.json`
 - `docs/generated/change-evidence/2026-03-06-stale-context-task-7.md`
-- `docs/generated/build-time-harness-verification.md`
 - `docs/generated/harness-contract-task-4-verification.md`
 - `docs/generated/harness-skill-task-6-verification.md`
 - `docs/generated/stale-context-task-7-verification.md`
@@ -36,6 +37,7 @@ and record final verification for the branch.
 - `scripts/harness/check_evidence_contract.sh`
 - `scripts/harness/check_repo_contract.sh`
 - `scripts/harness/check_stale_context.sh`
+- `scripts/harness/common.sh`
 - `scripts/harness/generate_change_evidence.ts`
 - `scripts/install-githooks.sh`
 - `tests/harness/check-doc-relevance.test.ts`
@@ -72,21 +74,19 @@ and record final verification for the branch.
 
 ## Waivers
 
-- `SECURITY.md`: The rollout tightened build-time harness rules but did not change
-  the repository security posture itself.
-- `RELIABILITY.md`: The rollout added build-time drift auditing without changing
-  the runtime reliability objectives or failure model.
+- `SECURITY.md`: The rollout and review fixes tightened build-time harness rules
+  but did not change the repository security posture itself.
+- `RELIABILITY.md`: The review fixes tightened local branch validation without
+  changing the runtime reliability objectives or failure model.
 - `ARCHITECTURE.md`: No product architecture layer or module-boundary contract
   changed; this work stayed in the build-time harness.
 
 ## Verification
 
-- `pnpm run lint` -> pass
-- `pnpm run typecheck` -> pass
-- `pnpm test` -> pass
+- `pnpm vitest tests/harness/check-doc-relevance.test.ts` -> pass
+- `pnpm vitest tests/harness/check-evidence-contract.test.ts` -> pass
 - `bash scripts/ci-local.sh` -> pass
 - `make check` -> pass
-- `bash scripts/harness/check_stale_context.sh` -> pass
 
 ## Verification Artifacts
 

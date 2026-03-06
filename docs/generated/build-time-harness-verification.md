@@ -18,6 +18,11 @@ Last reviewed: 2026-03-06
 - `bash scripts/ci-local.sh` passed, including the doc relevance, evidence
   contract, decision-link, repo-contract, freshness, and docs-sync checks.
 - `make check` passed after the rollout changes.
+- Review-fix targeted harness tests now pass locally:
+  - `pnpm vitest tests/harness/check-doc-relevance.test.ts`
+  - `pnpm vitest tests/harness/check-evidence-contract.test.ts`
+- The final repair batch also passes `bash scripts/ci-local.sh` after the
+  evidence artifact was brought back into sync with the branch diff.
 
 ## Residual Risks
 

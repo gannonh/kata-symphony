@@ -1,28 +1,29 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 cd "$ROOT_DIR"
+source "${SCRIPT_DIR}/common.sh"
 
-find_evidence_path() {
-  if [[ -n "${HARNESS_EVIDENCE_PATH:-}" ]]; then
-    printf '%s\n' "${HARNESS_EVIDENCE_PATH}"
-    return 0
-  fi
+BASE_REF="${1:-}"
+if [[ -z "$BASE_REF" ]]; then
+  BASE_REF="$(harness_resolve_base_ref || true)"
+fi
 
-  local latest
-  if [[ ! -d docs/generated/change-evidence ]]; then
-    return 0
-  fi
-  latest="$(find docs/generated/change-evidence -maxdepth 1 -type f -name '*.json' | sort | tail -n 1)"
-  if [[ -n "$latest" ]]; then
-    printf '%s\n' "$latest"
-  fi
-}
+changed_files="$(harness_collect_changed_files 0 "$BASE_REF")"
+if [[ -z "${changed_files:-}" ]]; then
+  echo "No changed files; decision link check passed."
+  exit 0
+fi
 
-evidence_path="$(find_evidence_path || true)"
+evidence_path=""
+if evidence_path="$(harness_find_matching_evidence_path "$changed_files" 2>/dev/null)"; then
+  harness_assert_evidence_matches_changed_files "$evidence_path" "$changed_files"
+fi
+
 if [[ -z "${evidence_path:-}" || ! -f "${evidence_path}" ]]; then
-  echo "No evidence artifact found; skipping decision link checks."
+  echo "No matching evidence artifact found; skipping decision link checks."
   exit 0
 fi
 

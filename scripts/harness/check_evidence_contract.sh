@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 cd "$ROOT_DIR"
+source "${SCRIPT_DIR}/common.sh"
 
 STAGED_MODE=0
 if [[ "${1:-}" == "--staged" ]]; then
@@ -21,12 +23,7 @@ if [[ -z "$BASE_REF" ]]; then
   fi
 
   if [[ "$STAGED_MODE" -eq 0 ]]; then
-  if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
-    BASE_REF="origin/${GITHUB_BASE_REF}"
-    git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
-  else
-    BASE_REF="$(git rev-parse --verify HEAD~1 2>/dev/null || true)"
-  fi
+    BASE_REF="$(harness_resolve_base_ref || true)"
   fi
 fi
 
@@ -36,7 +33,7 @@ if [[ "$STAGED_MODE" -eq 0 && -z "$BASE_REF" ]]; then
 fi
 
 if [[ "$STAGED_MODE" -eq 0 ]]; then
-  changed_files="$(git diff --name-only "${BASE_REF}"...HEAD)"
+  changed_files="$(harness_collect_changed_files "$STAGED_MODE" "$BASE_REF")"
 fi
 
 if [[ -z "${changed_files:-}" ]]; then
@@ -83,25 +80,16 @@ if [[ "$architecture_sensitive" -eq 0 && "$non_doc_changes" -lt 2 ]]; then
   exit 0
 fi
 
-find_evidence_path() {
-  if [[ -n "${HARNESS_EVIDENCE_PATH:-}" ]]; then
-    printf '%s\n' "${HARNESS_EVIDENCE_PATH}"
-    return 0
-  fi
+evidence_path=""
+if ! evidence_path="$(harness_find_matching_evidence_path "$changed_files" 2>/dev/null)"; then
+  echo "Qualifying changes require a change-evidence JSON artifact that matches the current diff."
+  exit 1
+fi
 
-  local latest
-  if [[ ! -d docs/generated/change-evidence ]]; then
-    return 0
-  fi
-  latest="$(find docs/generated/change-evidence -maxdepth 1 -type f -name '*.json' | sort | tail -n 1)"
-  if [[ -n "$latest" ]]; then
-    printf '%s\n' "$latest"
-  fi
-}
+harness_assert_evidence_matches_changed_files "$evidence_path" "$changed_files"
 
-evidence_path="$(find_evidence_path || true)"
 if [[ -z "${evidence_path:-}" || ! -f "${evidence_path}" ]]; then
-  echo "Qualifying changes require a change-evidence JSON artifact."
+  echo "Qualifying changes require a change-evidence JSON artifact that matches the current diff."
   exit 1
 fi
 

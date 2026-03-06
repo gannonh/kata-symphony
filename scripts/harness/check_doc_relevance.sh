@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 cd "$ROOT_DIR"
+source "${SCRIPT_DIR}/common.sh"
 
 STAGED_MODE=0
 if [[ "${1:-}" == "--staged" ]]; then
@@ -36,12 +38,7 @@ if [[ -z "$BASE_REF" ]]; then
   fi
 
   if [[ "$STAGED_MODE" -eq 0 ]]; then
-  if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
-    BASE_REF="origin/${GITHUB_BASE_REF}"
-    git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
-  else
-    BASE_REF="$(git rev-parse --verify HEAD~1 2>/dev/null || true)"
-  fi
+    BASE_REF="$(harness_resolve_base_ref || true)"
   fi
 fi
 
@@ -51,7 +48,7 @@ if [[ "$STAGED_MODE" -eq 0 && -z "$BASE_REF" ]]; then
 fi
 
 if [[ "$STAGED_MODE" -eq 0 ]]; then
-  changed_files="$(git diff --name-only "${BASE_REF}"...HEAD)"
+  changed_files="$(harness_collect_changed_files "$STAGED_MODE" "$BASE_REF")"
 fi
 
 if [[ -z "${changed_files:-}" ]]; then
@@ -59,28 +56,20 @@ if [[ -z "${changed_files:-}" ]]; then
   exit 0
 fi
 
-find_evidence_path() {
-  if [[ -n "${HARNESS_EVIDENCE_PATH:-}" ]]; then
-    printf '%s\n' "${HARNESS_EVIDENCE_PATH}"
-    return 0
-  fi
+evidence_path=""
+if evidence_path="$(harness_find_matching_evidence_path "$changed_files" 2>/dev/null)"; then
+  harness_assert_evidence_matches_changed_files "$evidence_path" "$changed_files"
+fi
 
-  local latest
-  latest="$(find docs/generated/change-evidence -maxdepth 1 -type f -name '*.json' | sort | tail -n 1)"
-  if [[ -n "$latest" ]]; then
-    printf '%s\n' "$latest"
-  fi
-}
-
-evidence_path="$(find_evidence_path || true)"
 allowed_docs=""
+evidence_declared=0
 if [[ -n "${evidence_path:-}" && -f "${evidence_path}" ]]; then
+  evidence_declared=1
   allowed_docs="$(node - "${evidence_path}" <<'EOF'
 const fs = require('node:fs')
 const file = process.argv[2]
 const parsed = JSON.parse(fs.readFileSync(file, 'utf8'))
 const combined = [
-  ...(Array.isArray(parsed.contextLoaded) ? parsed.contextLoaded : []),
   ...(Array.isArray(parsed.canonicalDocsUpdated) ? parsed.canonicalDocsUpdated : []),
   ...((Array.isArray(parsed.waivers) ? parsed.waivers : []).flatMap((entry) =>
     entry && typeof entry.doc === 'string' ? [entry.doc] : [],
@@ -139,8 +128,8 @@ while IFS= read -r file; do
     continue
   fi
 
-  if [[ -n "$allowed_docs" ]] && ! contains_line "$file" "$allowed_docs"; then
-    echo "Canonical doc changed outside evidence-declared context: $file"
+  if [[ "$evidence_declared" -eq 1 ]] && ! contains_line "$file" "$allowed_docs"; then
+    echo "Canonical doc changed without declared update or waiver linkage: $file"
     failed=1
   fi
 done <<< "$changed_files"

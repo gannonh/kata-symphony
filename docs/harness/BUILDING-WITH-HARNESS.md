@@ -44,6 +44,10 @@ agents are expected to load. The evidence contract uses this map to determine:
 - which durable docs should have been updated,
 - when a waiver must be present.
 
+Loading a doc is context, not authorization. A canonical doc edit must still be
+declared under `canonicalDocsUpdated` or covered by an explicit waiver in the
+matching change-evidence artifact.
+
 ### What this prevents
 
 This contract is intended to make the following fail loudly:
@@ -51,7 +55,16 @@ This contract is intended to make the following fail loudly:
 - metadata-only doc updates such as bare `Last reviewed` changes,
 - touching unrelated docs to satisfy the docs-sync gate,
 - claiming verification without command evidence,
-- skipping architecture-sensitive doc updates without a waiver.
+- skipping architecture-sensitive doc updates without a waiver,
+- pointing the harness at an unrelated evidence artifact for the same branch.
+
+### Diff-Scoped Evidence Selection
+
+The harness validates against the evidence artifact that matches the current
+diff, not whichever JSON file sorts last in `docs/generated/change-evidence/`.
+For local branch validation, the diff is resolved from the branch merge-base
+with `origin/main`, `main`, or the configured upstream before falling back to
+`HEAD~1`.
 
 ### Current build-time gates
 
