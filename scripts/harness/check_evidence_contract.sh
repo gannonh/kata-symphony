@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 cd "$ROOT_DIR"
+# shellcheck disable=SC1091
 source "${SCRIPT_DIR}/common.sh"
 
 STAGED_MODE=0
