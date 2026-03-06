@@ -71,4 +71,16 @@ describe('bootstrap service internals', () => {
     const service = createService()
     await expect(service.orchestrator.stop()).resolves.toBeUndefined()
   })
+
+  it('provides workspace lifecycle helpers with default no-hook config', async () => {
+    const service = createService()
+    const workspace = await service.workspace.ensureWorkspace('KAT-227/fix*scope')
+
+    await expect(service.workspace.runBeforeRun(workspace)).resolves.toBeUndefined()
+    await expect(service.workspace.runAfterRun(workspace)).resolves.toBeUndefined()
+    await expect(service.workspace.removeWorkspace('KAT-227/fix*scope')).resolves.toMatchObject({
+      removed: true,
+      path: workspace.path,
+    })
+  })
 })

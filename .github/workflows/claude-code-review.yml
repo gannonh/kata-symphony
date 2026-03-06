@@ -31,17 +31,32 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Install Claude Code v2.1.18
+        run: |
+          npm install --no-save @anthropic-ai/claude-code@2.1.18
+          echo "CLAUDE_PATH=${GITHUB_WORKSPACE}/node_modules/.bin/claude" >> "$GITHUB_ENV"
+          "${GITHUB_WORKSPACE}/node_modules/.bin/claude" --version
+
       - name: Run Claude Code Review
         id: claude-review
-        uses: anthropics/claude-code-action@v1
+        continue-on-error: true
+        # Work around upstream SDK regression in anthropics/claude-code-action@v1.
+        # See: https://github.com/anthropics/claude-code-action/issues/892
+        uses: anthropics/claude-code-action@01e756b34ef7a1447e9508f674143b07d20c2631
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Use workflow token directly so PRs that modify this workflow don't fail
           # app-token exchange validation against default branch.
           github_token: ${{ github.token }}
+          path_to_claude_code_executable: ${{ env.CLAUDE_PATH }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           # code-review plugin command signature is `/code-review [--comment]`
           prompt: '/code-review'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
+
+      - name: Warn on Claude review instability
+        if: steps.claude-review.outcome == 'failure'
+        run: |
+          echo "::warning::Claude Code review failed due upstream action instability; not blocking this PR."

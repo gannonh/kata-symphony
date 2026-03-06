@@ -30,11 +30,21 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Install Claude Code v2.1.18
+        run: |
+          npm install --no-save @anthropic-ai/claude-code@2.1.18
+          echo "CLAUDE_PATH=${GITHUB_WORKSPACE}/node_modules/.bin/claude" >> "$GITHUB_ENV"
+          "${GITHUB_WORKSPACE}/node_modules/.bin/claude" --version
+
       - name: Run Claude Code
         id: claude
-        uses: anthropics/claude-code-action@v1
+        # Work around upstream SDK regression in anthropics/claude-code-action@v1.
+        # See: https://github.com/anthropics/claude-code-action/issues/892
+        uses: anthropics/claude-code-action@01e756b34ef7a1447e9508f674143b07d20c2631
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          path_to_claude_code_executable: ${{ env.CLAUDE_PATH }}
 
           # This is an optional setting that allows Claude to read CI results on PRs
           additional_permissions: |
@@ -47,4 +57,3 @@ jobs:
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
           # claude_args: '--allowed-tools Bash(gh pr:*)'
-

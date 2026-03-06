@@ -1,7 +1,7 @@
 import { buildEffectiveConfig } from '../config/build-effective-config.js'
 import { createStaticConfigProvider } from '../config/contracts.js'
-import { sanitizeWorkspaceKey } from '../domain/normalization.js'
 import type { AgentRunner, WorkspaceManager } from '../execution/contracts.js'
+import { createWorkspaceManager } from '../execution/workspace/index.js'
 import type { Logger } from '../observability/contracts.js'
 import { createNoopOrchestrator } from '../orchestrator/contracts.js'
 import {
@@ -80,16 +80,11 @@ export function createService(): ServiceBootstrap {
     },
   }
 
-  const workspace: WorkspaceManager = {
-    async ensureWorkspace(issueIdentifier: string) {
-      const workspaceKey = sanitizeWorkspaceKey(issueIdentifier)
-      return {
-        path: `/tmp/symphony/${workspaceKey}`,
-        workspace_key: workspaceKey,
-        created_now: false,
-      }
-    },
-  }
+  const snapshot = config.getSnapshot()
+  const workspace: WorkspaceManager = createWorkspaceManager({
+    workspaceRoot: snapshot.workspace.root,
+    hooks: snapshot.hooks,
+  })
 
   const agentRunner: AgentRunner = {
     async runAttempt() {
