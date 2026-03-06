@@ -162,4 +162,25 @@ describe('agent runner error mapping', () => {
     },
     1000,
   )
+
+  it(
+    'fails fast on child error and ignores subsequent failure events',
+    async () => {
+      const harness = await createHarness({
+        startSession: () => new Promise(() => {}),
+      })
+
+      const resultPromise = harness.runner.runAttempt(issue, null)
+      setTimeout(() => {
+        harness.child.emit('error', new Error('spawn failed'))
+        harness.child.emit('exit', 1, null)
+      }, 10)
+
+      const result = await resultPromise
+      expect(result.attempt.status).toBe('failed')
+      expect(result.attempt).toMatchObject({ error: 'response_error' })
+      expect(harness.kill).toHaveBeenCalledTimes(1)
+    },
+    1000,
+  )
 })

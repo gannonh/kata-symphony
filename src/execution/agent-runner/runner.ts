@@ -203,7 +203,7 @@ export function createAgentRunner(deps: RunnerDeps) {
           childFailure.failure,
         ])
 
-        return {
+        const result = {
           attempt: {
             issue_id: issue.id,
             issue_identifier: issue.identifier,
@@ -214,8 +214,10 @@ export function createAgentRunner(deps: RunnerDeps) {
           },
           session: sessionReducer.toLiveSession(sessionStart, child.pid),
         }
+        cleanup()
+        return result
       } catch (error) {
-        return {
+        const result = {
           attempt: {
             issue_id: issue.id,
             issue_identifier: issue.identifier,
@@ -227,8 +229,8 @@ export function createAgentRunner(deps: RunnerDeps) {
           },
           session: null,
         }
-      } finally {
         cleanup()
+        return result
       }
     },
   }
