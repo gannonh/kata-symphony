@@ -62,6 +62,12 @@ Without this integration seam, `KAT-230` cannot dispatch real work safely.
 4. Continuation guidance must not resend the full workflow prompt body on every turn (Section 7 guidance + Section 10 continuation semantics).
 5. `after_run` remains best-effort and non-fatal on all post-workspace failure/timeout paths.
 
+## Implementation Status
+
+As of `2026-03-06`, the repository includes the Task 4 single-turn baseline for this design: create/reuse workspace, run `before_run`, build the first-turn prompt, start a session, execute one turn, refresh issue state once, stop the session, and always run `after_run` in a guarded `finally`.
+
+Multi-turn continuation reuse, event streaming fan-out, and max-turn loop semantics remain follow-on work for the next task in the implementation plan.
+
 ## Approaches Considered
 
 1. Keep all worker logic inside `createAgentRunner.runAttempt`
