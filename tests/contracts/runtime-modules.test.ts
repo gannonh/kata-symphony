@@ -33,4 +33,11 @@ describe('runtime-loadable contract modules', () => {
     expect(typeof workflow.createWorkflowFrontMatterNotAMapError).toBe('function')
     expect(typeof workflow.createWorkflowParseError).toBe('function')
   })
+
+  it('exposes orchestrator preflight gate exports', async () => {
+    const preflight = await import('../../src/orchestrator/preflight/index.js')
+
+    expect(typeof preflight.validateDispatchPreflight).toBe('function')
+    expect(typeof preflight.runTickPreflightGate).toBe('function')
+  })
 })
