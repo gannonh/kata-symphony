@@ -32,6 +32,7 @@ const DEFAULT_RUN_COMMAND: RunWorkspaceHookCommand = async ({
     stdio: ['ignore', 'ignore', 'pipe'],
   })
 
+  const STDERR_MAX = 65_536
   let stderr = ''
   let timedOut = false
   let settled = false
@@ -54,7 +55,9 @@ const DEFAULT_RUN_COMMAND: RunWorkspaceHookCommand = async ({
   }
 
   child.stderr?.on('data', (chunk) => {
-    stderr += String(chunk)
+    if (stderr.length < STDERR_MAX) {
+      stderr += String(chunk)
+    }
   })
 
   child.on('error', (error) => {
@@ -88,11 +91,12 @@ const DEFAULT_RUN_COMMAND: RunWorkspaceHookCommand = async ({
 
 export function createWorkspaceManager(input: CreateWorkspaceManagerInput): WorkspaceManager {
   const runCommand = input.runCommand ?? DEFAULT_RUN_COMMAND
+  const resolvedRoot = path.resolve(input.workspaceRoot)
 
   return {
     async ensureWorkspace(issueIdentifier: string): Promise<Workspace> {
-      const resolved = createWorkspacePathForIssue(input.workspaceRoot, issueIdentifier)
-      const created_now = await ensureDirectory(resolved.path, input.workspaceRoot)
+      const resolved = createWorkspacePathForIssue(resolvedRoot, issueIdentifier)
+      const created_now = await ensureDirectory(resolved.path, resolvedRoot)
 
       if (created_now) {
         try {
@@ -140,7 +144,7 @@ export function createWorkspaceManager(input: CreateWorkspaceManagerInput): Work
       })
     },
     async removeWorkspace(issueIdentifier: string): Promise<{ removed: boolean; path: string }> {
-      const resolved = createWorkspacePathForIssue(input.workspaceRoot, issueIdentifier)
+      const resolved = createWorkspacePathForIssue(resolvedRoot, issueIdentifier)
       const state = await getDirectoryState(resolved.path)
 
       if (state === 'missing') {

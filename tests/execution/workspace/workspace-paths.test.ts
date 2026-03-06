@@ -22,7 +22,6 @@ describe('workspace paths', () => {
     const second = createWorkspacePathForIssue(workspaceRoot, issueIdentifier)
 
     expect(first).toEqual({
-      workspace_root: expectedRoot,
       workspace_key: expectedKey,
       path: expectedPath,
     })

@@ -5,7 +5,6 @@ import { sanitizeWorkspaceKey } from '../../domain/normalization.js'
 import { WorkspaceExecutionError } from './errors.js'
 
 export interface WorkspacePathResolution {
-  workspace_root: string
   workspace_key: string
   path: string
 }
@@ -34,14 +33,13 @@ export function createWorkspacePathForIssue(
   workspaceRoot: string,
   issueIdentifier: string,
 ): WorkspacePathResolution {
-  const workspace_root = path.resolve(workspaceRoot)
+  const resolvedRoot = path.resolve(workspaceRoot)
   const workspace_key = sanitizeWorkspaceKey(issueIdentifier)
-  const candidatePath = path.resolve(workspace_root, workspace_key)
+  const candidatePath = path.resolve(resolvedRoot, workspace_key)
 
-  assertWorkspaceInsideRoot(workspace_root, candidatePath)
+  assertWorkspaceInsideRoot(resolvedRoot, candidatePath)
 
   return {
-    workspace_root,
     workspace_key,
     path: candidatePath,
   }

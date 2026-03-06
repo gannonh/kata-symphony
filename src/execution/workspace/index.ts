@@ -1,4 +1,7 @@
-export * from './errors.js'
-export * from './hooks.js'
-export * from './manager.js'
-export * from './paths.js'
+export {
+  WORKSPACE_EXECUTION_ERROR_CODES,
+  WorkspaceExecutionError,
+  type WorkspaceExecutionErrorCode,
+  type WorkspaceExecutionErrorContext,
+} from './errors.js'
+export { createWorkspaceManager, type CreateWorkspaceManagerInput } from './manager.js'
