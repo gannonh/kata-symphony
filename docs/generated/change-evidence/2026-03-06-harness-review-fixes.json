@@ -41,6 +41,10 @@
     {
       "command": "pnpm run typecheck",
       "result": "pass"
+    },
+    {
+      "command": "pnpm run lint",
+      "result": "pass"
     }
   ],
   "verificationArtifacts": [],

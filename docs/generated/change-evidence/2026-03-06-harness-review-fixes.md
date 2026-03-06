@@ -41,6 +41,7 @@ Address PR review comments: fix merge-base detection, exit code handling, path t
 - `pnpm vitest run tests/harness/` -> pass
 - `make check` -> pass
 - `pnpm run typecheck` -> pass
+- `pnpm run lint` -> pass
 
 ## Verification Artifacts
 
