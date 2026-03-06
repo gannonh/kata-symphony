@@ -82,10 +82,17 @@ if [[ "$architecture_sensitive" -eq 0 && "$non_doc_changes" -lt 2 ]]; then
 fi
 
 evidence_path=""
-if ! evidence_path="$(harness_find_matching_evidence_path "$changed_files" 2>/dev/null)"; then
+match_rc=0
+match_output="$(harness_find_matching_evidence_path "$changed_files" 2>&1)" || match_rc=$?
+
+if [[ "$match_rc" -eq 2 ]]; then
+  printf '%s\n' "$match_output" >&2
+  exit 1
+elif [[ "$match_rc" -ne 0 ]]; then
   echo "Qualifying changes require a change-evidence JSON artifact that matches the current diff."
   exit 1
 fi
+evidence_path="$match_output"
 
 harness_assert_evidence_matches_changed_files "$evidence_path" "$changed_files"
 
@@ -116,29 +123,38 @@ const requiredArray = (name) => {
   return parsed[name]
 }
 
+const requiredStringArray = (name, { allowEmpty = false } = {}) => {
+  if (!Array.isArray(parsed[name]) || (!allowEmpty && parsed[name].length === 0)) {
+    errors.push(`${allowEmpty ? 'Missing array field' : 'Missing non-empty array field'}: ${name}`)
+    return []
+  }
+  for (const item of parsed[name]) {
+    if (typeof item !== 'string' || item.trim().length === 0) {
+      errors.push(`${name} must contain only non-empty strings.`)
+      break
+    }
+  }
+  return parsed[name]
+}
+
 requiredString('topic')
 requiredString('summary')
-requiredArray('changedFiles')
-requiredArray('contextLoaded')
-const decisionArtifacts = Array.isArray(parsed.decisionArtifacts) ? parsed.decisionArtifacts : []
+requiredStringArray('changedFiles')
+requiredStringArray('contextLoaded')
+const decisionArtifacts = requiredStringArray('decisionArtifacts', { allowEmpty: true })
 if (architectureSensitive && decisionArtifacts.length === 0) {
   errors.push('Architecture-sensitive changes require at least one decision artifact.')
 }
-if (!Array.isArray(parsed.canonicalDocsUpdated)) {
-  errors.push('canonicalDocsUpdated must be an array.')
-}
+const canonicalDocsUpdated = requiredStringArray('canonicalDocsUpdated', { allowEmpty: true })
 const waivers = Array.isArray(parsed.waivers) ? parsed.waivers : null
 if (waivers === null) {
   errors.push('waivers must be an array.')
 }
 const verification = requiredArray('verification')
-const verificationArtifacts = Array.isArray(parsed.verificationArtifacts) ? parsed.verificationArtifacts : null
-if (verificationArtifacts === null) {
-  errors.push('verificationArtifacts must be an array.')
-}
-requiredArray('impactedAreas')
+requiredStringArray('verificationArtifacts', { allowEmpty: true })
+requiredStringArray('impactedAreas')
 
-if (Array.isArray(parsed.canonicalDocsUpdated) && parsed.canonicalDocsUpdated.length === 0) {
+if (canonicalDocsUpdated.length === 0) {
   if (!Array.isArray(parsed.waivers) || parsed.waivers.length === 0) {
     errors.push('No canonical docs updated; add an explicit waiver with rationale.')
   }

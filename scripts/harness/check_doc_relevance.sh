@@ -58,7 +58,14 @@ if [[ -z "${changed_files:-}" ]]; then
 fi
 
 evidence_path=""
-if evidence_path="$(harness_find_matching_evidence_path "$changed_files" 2>/dev/null)"; then
+match_rc=0
+match_output="$(harness_find_matching_evidence_path "$changed_files" 2>&1)" || match_rc=$?
+
+if [[ "$match_rc" -eq 2 ]]; then
+  printf '%s\n' "$match_output" >&2
+  exit 1
+elif [[ "$match_rc" -eq 0 ]]; then
+  evidence_path="$match_output"
   harness_assert_evidence_matches_changed_files "$evidence_path" "$changed_files"
 fi
 

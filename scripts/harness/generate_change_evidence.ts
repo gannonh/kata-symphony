@@ -140,9 +140,20 @@ ${bulletList(evidence.impactedAreas, 'No impacted areas inferred.')}
 }
 
 function detectChangedFiles(repoRoot: string): string[] {
+  let baseRef: string
+  try {
+    baseRef = execFileSync(
+      'git',
+      ['merge-base', 'HEAD', 'origin/main'],
+      { cwd: repoRoot, encoding: 'utf8' },
+    ).trim()
+  } catch {
+    baseRef = 'HEAD~1'
+  }
+
   const output = execFileSync(
     'git',
-    ['diff', '--name-only', 'HEAD'],
+    ['diff', '--name-only', baseRef, 'HEAD'],
     { cwd: repoRoot, encoding: 'utf8' },
   )
 
@@ -152,12 +163,26 @@ function detectChangedFiles(repoRoot: string): string[] {
     .filter((line) => line.length > 0)
 }
 
+function toEvidenceSlug(topic: string): string {
+  const slug = topic
+    .trim()
+    .replace(/[\\/]+/g, '-')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+
+  if (slug.length === 0) {
+    return 'untitled'
+  }
+
+  return slug
+}
+
 export function writeEvidenceFiles(repoRoot: string, evidence: ChangeEvidence): { jsonPath: string; markdownPath: string } {
   const outputDir = path.join(repoRoot, 'docs/generated/change-evidence')
   fs.mkdirSync(outputDir, { recursive: true })
 
   const stamp = new Date().toISOString().slice(0, 10)
-  const baseName = `${stamp}-${evidence.topic}`
+  const baseName = `${stamp}-${toEvidenceSlug(evidence.topic)}`
   const jsonPath = path.join(outputDir, `${baseName}.json`)
   const markdownPath = path.join(outputDir, `${baseName}.md`)
 

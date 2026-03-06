@@ -44,7 +44,11 @@ for (const rule of rules) {
     }
 
     const owns = Array.isArray(rule.owned_by) ? rule.owned_by : []
-    const touchedOwnedDoc = files.some((file) => owns.includes(file))
+    const touchedOwnedDoc = files.some((file) =>
+      owns.some((owned) =>
+        owned.endsWith('/') ? file.startsWith(owned) : file === owned
+      )
+    )
     if (!touchedOwnedDoc) {
       changesWithoutDoc += 1
     }

@@ -5,7 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck disable=SC1091
 source "${ROOT_DIR}/scripts/harness/common.sh"
 
-HARNESS_BASE_REF="${HARNESS_BASE_REF:-$(harness_resolve_base_ref || true)}"
+if [[ -z "${HARNESS_BASE_REF:-}" ]]; then
+  HARNESS_BASE_REF="$(harness_resolve_base_ref)"
+fi
 export HARNESS_BASE_REF
 
 echo "[ci-local] lint"

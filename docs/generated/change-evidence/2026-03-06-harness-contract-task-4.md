@@ -24,7 +24,6 @@ Enforce evidence artifacts and linked decision records for qualifying harness ch
 - `docs/harness/BUILDING-WITH-HARNESS.md`
 - `docs/harness/change-evidence-schema.md`
 - `docs/harness/context-map.yaml`
-- `docs/harness/context-map.yaml`
 
 ## Decision Artifacts
 

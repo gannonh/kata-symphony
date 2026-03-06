@@ -19,11 +19,18 @@ if [[ -z "${changed_files:-}" ]]; then
 fi
 
 evidence_path=""
-if evidence_path="$(harness_find_matching_evidence_path "$changed_files" 2>/dev/null)"; then
+match_rc=0
+match_output="$(harness_find_matching_evidence_path "$changed_files" 2>&1)" || match_rc=$?
+
+if [[ "$match_rc" -eq 2 ]]; then
+  printf '%s\n' "$match_output" >&2
+  exit 1
+elif [[ "$match_rc" -eq 0 ]]; then
+  evidence_path="$match_output"
   harness_assert_evidence_matches_changed_files "$evidence_path" "$changed_files"
 fi
 
-if [[ -z "${evidence_path:-}" || ! -f "${evidence_path}" ]]; then
+if [[ ! -f "${evidence_path:-}" ]]; then
   echo "No matching evidence artifact found; skipping decision link checks."
   exit 0
 fi
@@ -48,20 +55,33 @@ const contextMap = YAML.parse(fs.readFileSync(path.join(rootDir, 'docs/harness/c
 const rules = Array.isArray(contextMap?.rules) ? contextMap.rules : []
 const errors = []
 
+const repoRoot = path.resolve(rootDir)
+const normalizeRepoPath = (field, candidate) => {
+  if (typeof candidate !== 'string' || candidate.trim().length === 0) {
+    errors.push(`${field} contains an empty path.`)
+    return null
+  }
+  const resolved = path.resolve(repoRoot, candidate)
+  if (resolved !== repoRoot && !resolved.startsWith(`${repoRoot}${path.sep}`)) {
+    errors.push(`${field} must stay within the repository: ${candidate}`)
+    return null
+  }
+  return path.relative(repoRoot, resolved).split(path.sep).join('/')
+}
 const fileExists = (relativePath) => fs.existsSync(path.join(rootDir, relativePath))
 
 for (const field of ['decisionArtifacts', 'verificationArtifacts', 'canonicalDocsUpdated']) {
   const values = Array.isArray(parsed[field]) ? parsed[field] : []
   for (const item of values) {
-    if (typeof item !== 'string' || item.trim().length === 0) {
-      errors.push(`${field} contains an empty path.`)
+    const normalized = normalizeRepoPath(field, item)
+    if (!normalized) {
       continue
     }
-    if (!fileExists(item)) {
-      errors.push(`Linked artifact does not exist: ${item}`)
+    if (!fileExists(normalized)) {
+      errors.push(`Linked artifact does not exist: ${normalized}`)
     }
-    if (!markdown.includes(item)) {
-      errors.push(`Markdown evidence is missing linked path: ${item}`)
+    if (!markdown.includes(normalized)) {
+      errors.push(`Markdown evidence is missing linked path: ${normalized}`)
     }
   }
 }

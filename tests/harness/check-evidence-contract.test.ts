@@ -97,15 +97,27 @@ ${((content.verificationArtifacts as string[] | undefined) ?? []).map((item) => 
   return jsonPath
 }
 
-function runScript(scriptPath: string, root: string, evidencePath?: string): { ok: boolean; output: string } {
+function runScript(
+  scriptPath: string,
+  root: string,
+  options: { evidencePath?: string; refOrFlag?: string } = {},
+): { ok: boolean; output: string } {
+  const {
+    HARNESS_BASE_REF: _ignoredBaseRef,
+    HARNESS_EVIDENCE_PATH: _ignoredEvidencePath,
+    REPO_ROOT: _ignoredRepoRoot,
+    ...cleanEnv
+  } = process.env
+
+  const ref = options.refOrFlag ?? 'HEAD~1'
   try {
-    const output = execFileSync('bash', [scriptPath, 'HEAD~1'], {
+    const output = execFileSync('bash', [scriptPath, ref], {
       cwd: root,
       env: {
-        ...process.env,
+        ...cleanEnv,
         NODE_PATH: path.resolve('node_modules'),
         REPO_ROOT: root,
-        ...(evidencePath ? { HARNESS_EVIDENCE_PATH: evidencePath } : {}),
+        ...(options.evidencePath ? { HARNESS_EVIDENCE_PATH: options.evidencePath } : {}),
       },
       encoding: 'utf8',
     })
@@ -155,7 +167,7 @@ describe('evidence contract harness scripts', () => {
       impactedAreas: [],
     })
 
-    const result = runScript(evidenceScript, root, evidencePath)
+    const result = runScript(evidenceScript, root, { evidencePath })
     expect(result.ok).toBe(false)
     expect(result.output).toContain('Architecture-sensitive changes require at least one decision artifact.')
   })
@@ -179,7 +191,7 @@ describe('evidence contract harness scripts', () => {
       impactedAreas: ['harness'],
     })
 
-    const result = runScript(evidenceScript, root, evidencePath)
+    const result = runScript(evidenceScript, root, { evidencePath })
     expect(result.ok).toBe(false)
     expect(result.output).toContain('Verification entries must include concrete command evidence.')
   })
@@ -203,7 +215,7 @@ describe('evidence contract harness scripts', () => {
       impactedAreas: ['harness'],
     })
 
-    const result = runScript(evidenceScript, root, evidencePath)
+    const result = runScript(evidenceScript, root, { evidencePath })
     expect(result.ok).toBe(false)
     expect(result.output).toContain('Evidence artifact changedFiles do not match the current diff.')
   })
@@ -264,7 +276,7 @@ describe('evidence contract harness scripts', () => {
       impactedAreas: ['harness'],
     })
 
-    const result = runScript(evidenceScript, root, evidencePath)
+    const result = runScript(evidenceScript, root, { evidencePath })
     expect(result.ok).toBe(true)
     expect(result.output).toContain('Evidence contract check passed.')
   })
@@ -288,7 +300,7 @@ describe('evidence contract harness scripts', () => {
       impactedAreas: ['architecture', 'reliability'],
     })
 
-    const result = runScript(linksScript, root, evidencePath)
+    const result = runScript(linksScript, root, { evidencePath })
     expect(result.ok).toBe(false)
     expect(result.output).toContain('Linked artifact does not exist: docs/plans/missing.md')
   })
