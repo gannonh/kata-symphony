@@ -83,6 +83,21 @@ describe('validateDispatchPreflight', () => {
     ])
   })
 
+  it('returns config validation errors when getSnapshot returns a non-object', async () => {
+    const result = await validateDispatchPreflight({
+      loadWorkflow: async () => ({ config: {}, prompt_template: 'ok' }),
+      getSnapshot: () => 42 as unknown as ConfigSnapshot,
+    })
+
+    const failure = expectPreflightFailure(result)
+    expect(failure.errors.map((error) => error.code)).toEqual([
+      'tracker_kind_missing',
+      'tracker_api_key_missing',
+      'tracker_project_slug_missing',
+      'codex_command_missing',
+    ])
+  })
+
   it('returns tracker_kind_unsupported for non-linear trackers', async () => {
     const result = await validateDispatchPreflight({
       loadWorkflow: async () => ({ config: {}, prompt_template: 'ok' }),
@@ -96,6 +111,25 @@ describe('validateDispatchPreflight', () => {
     const failure = expectPreflightFailure(result)
     expect(failure.errors.map((error) => error.code)).toEqual([
       'tracker_kind_unsupported',
+    ])
+  })
+
+  it('treats non-object tracker/codex sections as missing configuration', async () => {
+    const result = await validateDispatchPreflight({
+      loadWorkflow: async () => ({ config: {}, prompt_template: 'ok' }),
+      getSnapshot: () =>
+        asSnapshot({
+          tracker: 'invalid-shape',
+          codex: 'invalid-shape',
+        }),
+    })
+
+    const failure = expectPreflightFailure(result)
+    expect(failure.errors.map((error) => error.code)).toEqual([
+      'tracker_kind_missing',
+      'tracker_api_key_missing',
+      'tracker_project_slug_missing',
+      'codex_command_missing',
     ])
   })
 })
