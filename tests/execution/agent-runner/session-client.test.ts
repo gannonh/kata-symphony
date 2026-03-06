@@ -13,13 +13,19 @@ type FakeChild = EventEmitter & {
   kill: ReturnType<typeof vi.fn>
 }
 
-function createFakeChild(): FakeChild {
+interface FakeChildHarness {
+  child: FakeChild
+  emitDeferredCompletion(turnNumber: number): void
+}
+
+function createFakeChild(turnPlan: Array<'complete' | 'defer'> = ['complete', 'complete']): FakeChildHarness {
   const child = new EventEmitter() as FakeChild
   child.pid = 321
   child.stdout = new PassThrough()
   child.stderr = new PassThrough()
   child.stdin = new PassThrough()
   child.kill = vi.fn(() => true)
+  const deferredCompletions = new Map<number, () => void>()
 
   let turnCount = 0
   let buffer = ''
@@ -59,23 +65,39 @@ function createFakeChild(): FakeChild {
         child.stdout.write(
           `${JSON.stringify({ id: message.id, result: { turn: { id: `turn-${turnCount}` } } })}\n`,
         )
-        child.stdout.write(
-          `${JSON.stringify({
-            method: 'turn/completed',
-            params: {
-              usage: {
-                input_tokens: turnCount,
-                output_tokens: turnCount + 1,
-                total_tokens: turnCount + 2,
+
+        const emitCompletion = () => {
+          child.stdout.write(
+            `${JSON.stringify({
+              method: 'turn/completed',
+              params: {
+                usage: {
+                  input_tokens: turnCount,
+                  output_tokens: turnCount + 1,
+                  total_tokens: turnCount + 2,
+                },
               },
-            },
-          })}\n`,
-        )
+            })}\n`,
+          )
+        }
+
+        if (turnPlan[turnCount - 1] === 'defer') {
+          deferredCompletions.set(turnCount, emitCompletion)
+          continue
+        }
+
+        emitCompletion()
       }
     }
   })
 
-  return child
+  return {
+    child,
+    emitDeferredCompletion(turnNumber: number) {
+      deferredCompletions.get(turnNumber)?.()
+      deferredCompletions.delete(turnNumber)
+    },
+  }
 }
 
 describe('agent session client', () => {
@@ -90,7 +112,7 @@ describe('agent session client', () => {
         stall_timeout_ms: 1000,
       },
       workspacePath: '/tmp/ws',
-      spawnChild: vi.fn(() => fakeChild as unknown as ChildProcessWithoutNullStreams),
+      spawnChild: vi.fn(() => fakeChild.child as unknown as ChildProcessWithoutNullStreams),
     })
 
     const firstTurn = await client.startSession({
@@ -130,7 +152,48 @@ describe('agent session client', () => {
 
     await client.stopSession()
 
-    expect(fakeChild.kill).toHaveBeenCalledTimes(1)
+    expect(fakeChild.child.kill).toHaveBeenCalledTimes(1)
+    expect(client.getLatestSession()).toBeNull()
+  })
+
+  it('invalidates the runtime after a timed out turn so late completions cannot be reused', async () => {
+    const fakeChild = createFakeChild(['complete', 'defer', 'complete'])
+
+    const client = createAgentSessionClient({
+      codex: {
+        command: 'echo noop',
+        turn_timeout_ms: 10,
+        read_timeout_ms: 500,
+        stall_timeout_ms: 1000,
+      },
+      workspacePath: '/tmp/ws',
+      spawnChild: vi.fn(() => fakeChild.child as unknown as ChildProcessWithoutNullStreams),
+    })
+
+    const firstTurn = await client.startSession({
+      title: 'KAT-229: first',
+      prompt: 'first prompt',
+    })
+
+    await expect(
+      client.runTurn({
+        threadId: firstTurn.threadId,
+        title: 'KAT-229: second',
+        prompt: 'second prompt',
+      }),
+    ).rejects.toThrow('response_timeout')
+
+    fakeChild.emitDeferredCompletion(2)
+
+    await expect(
+      client.runTurn({
+        threadId: firstTurn.threadId,
+        title: 'KAT-229: third',
+        prompt: 'third prompt',
+      }),
+    ).rejects.toThrow('session_not_started')
+
+    expect(fakeChild.child.kill).toHaveBeenCalledTimes(1)
     expect(client.getLatestSession()).toBeNull()
   })
 })

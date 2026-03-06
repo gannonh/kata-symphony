@@ -174,54 +174,63 @@ export function createAgentSessionClient(deps: SessionClientDeps): AgentSessionC
     latestStart = null
   }
 
+  const invalidateRuntime = async (error: unknown) => {
+    await stopRuntime()
+    throw error
+  }
+
   return {
     async startSession(input) {
       if (latestStart) {
         throw new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.SESSION_ALREADY_STARTED)
       }
 
-      const activeRuntime = ensureRuntime()
-      const sessionInput: {
-        cwd: string
-        title: string
-        prompt: string
-        approvalPolicy?: string
-        threadSandbox?: string
-        turnSandboxPolicy?: { mode: string }
-      } = {
-        cwd: deps.workspacePath,
-        title: input.title,
-        prompt: input.prompt,
-      }
-      if (deps.codex.approval_policy) {
-        sessionInput.approvalPolicy = deps.codex.approval_policy
-      }
-      if (deps.codex.thread_sandbox) {
-        sessionInput.threadSandbox = deps.codex.thread_sandbox
-      }
-      const initialSandboxPolicy = turnSandboxPolicy(deps.codex.turn_sandbox_policy)
-      if (initialSandboxPolicy) {
-        sessionInput.turnSandboxPolicy = initialSandboxPolicy
-      }
+      try {
+        const activeRuntime = ensureRuntime()
+        const sessionInput: {
+          cwd: string
+          title: string
+          prompt: string
+          approvalPolicy?: string
+          threadSandbox?: string
+          turnSandboxPolicy?: { mode: string }
+        } = {
+          cwd: deps.workspacePath,
+          title: input.title,
+          prompt: input.prompt,
+        }
+        if (deps.codex.approval_policy) {
+          sessionInput.approvalPolicy = deps.codex.approval_policy
+        }
+        if (deps.codex.thread_sandbox) {
+          sessionInput.threadSandbox = deps.codex.thread_sandbox
+        }
+        const initialSandboxPolicy = turnSandboxPolicy(deps.codex.turn_sandbox_policy)
+        if (initialSandboxPolicy) {
+          sessionInput.turnSandboxPolicy = initialSandboxPolicy
+        }
 
-      const sessionStart = await Promise.race([
-        activeRuntime.protocolClient.startSession(sessionInput),
-        activeRuntime.childFailure.failure,
-      ])
+        const sessionStart = await Promise.race([
+          activeRuntime.protocolClient.startSession(sessionInput),
+          activeRuntime.childFailure.failure,
+        ])
 
-      await Promise.race([
-        activeRuntime.sessionReducer.waitForTurnCompletion(deps.codex.turn_timeout_ms),
-        activeRuntime.childFailure.failure,
-      ])
+        await Promise.race([
+          activeRuntime.sessionReducer.waitForTurnCompletion(deps.codex.turn_timeout_ms),
+          activeRuntime.childFailure.failure,
+        ])
 
-      activeRuntime.turnCount = 1
-      latestStart = sessionStart
-      latestSession = activeRuntime.sessionReducer.toLiveSession(
-        sessionStart,
-        activeRuntime.child.pid,
-        activeRuntime.turnCount,
-      )
-      return sessionStart
+        activeRuntime.turnCount = 1
+        latestStart = sessionStart
+        latestSession = activeRuntime.sessionReducer.toLiveSession(
+          sessionStart,
+          activeRuntime.child.pid,
+          activeRuntime.turnCount,
+        )
+        return sessionStart
+      } catch (error) {
+        return invalidateRuntime(error)
+      }
     },
 
     async runTurn(input) {
@@ -230,47 +239,51 @@ export function createAgentSessionClient(deps: SessionClientDeps): AgentSessionC
         throw new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.SESSION_NOT_STARTED)
       }
 
-      activeRuntime.sessionReducer.resetForNextTurn()
-      const nextTurnCount = activeRuntime.turnCount + 1
-      const turnInput: {
-        cwd: string
-        threadId: string
-        title: string
-        prompt: string
-        approvalPolicy?: string
-        turnSandboxPolicy?: { mode: string }
-      } = {
-        cwd: deps.workspacePath,
-        threadId: input.threadId,
-        title: input.title,
-        prompt: input.prompt,
-      }
-      if (deps.codex.approval_policy) {
-        turnInput.approvalPolicy = deps.codex.approval_policy
-      }
-      const continuationSandboxPolicy = turnSandboxPolicy(deps.codex.turn_sandbox_policy)
-      if (continuationSandboxPolicy) {
-        turnInput.turnSandboxPolicy = continuationSandboxPolicy
-      }
+      try {
+        activeRuntime.sessionReducer.resetForNextTurn()
+        const nextTurnCount = activeRuntime.turnCount + 1
+        const turnInput: {
+          cwd: string
+          threadId: string
+          title: string
+          prompt: string
+          approvalPolicy?: string
+          turnSandboxPolicy?: { mode: string }
+        } = {
+          cwd: deps.workspacePath,
+          threadId: input.threadId,
+          title: input.title,
+          prompt: input.prompt,
+        }
+        if (deps.codex.approval_policy) {
+          turnInput.approvalPolicy = deps.codex.approval_policy
+        }
+        const continuationSandboxPolicy = turnSandboxPolicy(deps.codex.turn_sandbox_policy)
+        if (continuationSandboxPolicy) {
+          turnInput.turnSandboxPolicy = continuationSandboxPolicy
+        }
 
-      const sessionStart = await Promise.race([
-        activeRuntime.protocolClient.startTurn(turnInput),
-        activeRuntime.childFailure.failure,
-      ])
+        const sessionStart = await Promise.race([
+          activeRuntime.protocolClient.startTurn(turnInput),
+          activeRuntime.childFailure.failure,
+        ])
 
-      await Promise.race([
-        activeRuntime.sessionReducer.waitForTurnCompletion(deps.codex.turn_timeout_ms),
-        activeRuntime.childFailure.failure,
-      ])
+        await Promise.race([
+          activeRuntime.sessionReducer.waitForTurnCompletion(deps.codex.turn_timeout_ms),
+          activeRuntime.childFailure.failure,
+        ])
 
-      activeRuntime.turnCount = nextTurnCount
-      latestStart = sessionStart
-      latestSession = activeRuntime.sessionReducer.toLiveSession(
-        sessionStart,
-        activeRuntime.child.pid,
-        activeRuntime.turnCount,
-      )
-      return sessionStart
+        activeRuntime.turnCount = nextTurnCount
+        latestStart = sessionStart
+        latestSession = activeRuntime.sessionReducer.toLiveSession(
+          sessionStart,
+          activeRuntime.child.pid,
+          activeRuntime.turnCount,
+        )
+        return sessionStart
+      } catch (error) {
+        return invalidateRuntime(error)
+      }
     },
 
     async stopSession() {
