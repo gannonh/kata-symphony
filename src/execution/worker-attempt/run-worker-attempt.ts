@@ -200,17 +200,14 @@ export function createWorkerAttemptRunner(
               )
               return
             }
-
-            if (turnNumber >= deps.maxTurns) {
-              attemptStatus = 'succeeded'
-              outcome = createNormalOutcome(
-                'stopped_max_turns_reached',
-                turnNumber,
-                currentIssue.state,
-              )
-              return
-            }
           }
+
+          attemptStatus = 'succeeded'
+          outcome = createNormalOutcome(
+            'stopped_max_turns_reached',
+            deps.maxTurns,
+            currentIssue.state,
+          )
         }
 
         await executeAttempt()
