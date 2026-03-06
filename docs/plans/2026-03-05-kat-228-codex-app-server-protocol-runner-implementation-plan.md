@@ -576,3 +576,7 @@ git commit -m "test(agent-runner): cover timeout and stderr protocol edge cases"
   - startup response timeout maps to `response_timeout`
   - stderr diagnostics are ignored for protocol parsing
   - protocol read timeout includes jitter tolerance for stable CI/full-suite execution
+- Added CI coverage hardening tests for runner internals:
+  - `tests/execution/agent-runner/session-reducer.test.ts`
+  - `tests/execution/agent-runner/transport.test.ts`
+  - `tests/execution/agent-runner/runner-error-mapping.test.ts`
