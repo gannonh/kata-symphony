@@ -101,7 +101,7 @@ function createFakeChild(turnPlan: Array<'complete' | 'defer'> = ['complete', 'c
 }
 
 describe('agent session client', () => {
-  it('starts a session, runs a continuation turn on the same thread, and clears state on stop', async () => {
+  it('starts a session, runs continuation turns on the same thread, and clears state on stop', async () => {
     const fakeChild = createFakeChild()
 
     const client = createAgentSessionClient({
@@ -148,6 +148,24 @@ describe('agent session client', () => {
       turn_id: 'turn-2',
       codex_total_tokens: 4,
       turn_count: 2,
+    })
+
+    const thirdTurn = await client.runTurn({
+      threadId: firstTurn.threadId,
+      title: 'KAT-229: third',
+      prompt: 'third prompt',
+    })
+
+    expect(thirdTurn).toEqual({
+      threadId: 'thread-1',
+      turnId: 'turn-3',
+      sessionId: 'thread-1-turn-3',
+    })
+    expect(client.getLatestSession()).toMatchObject({
+      thread_id: 'thread-1',
+      turn_id: 'turn-3',
+      codex_total_tokens: 5,
+      turn_count: 3,
     })
 
     await client.stopSession()
