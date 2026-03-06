@@ -3,8 +3,9 @@
 ## Summary
 
 Roll up the evidence-backed build-time harness rollout and the follow-up review
-fixes for canonical-doc authorization, diff-scoped evidence selection, and
-branch-base validation.
+fixes for canonical-doc authorization, diff-scoped evidence selection,
+branch-base validation, plus the CI shellcheck repair for dynamic `common.sh`
+sourcing.
 
 ## Changed Files
 
@@ -19,6 +20,8 @@ branch-base validation.
 - `docs/generated/change-evidence/.gitkeep`
 - `docs/generated/change-evidence/2026-03-06-build-time-harness.json`
 - `docs/generated/change-evidence/2026-03-06-build-time-harness.md`
+- `docs/generated/change-evidence/2026-03-06-harness-ci-shellcheck-fix.json`
+- `docs/generated/change-evidence/2026-03-06-harness-ci-shellcheck-fix.md`
 - `docs/generated/change-evidence/2026-03-06-harness-contract-task-4.json`
 - `docs/generated/change-evidence/2026-03-06-harness-contract-task-4.md`
 - `docs/generated/change-evidence/2026-03-06-harness-review-fixes.json`
@@ -95,6 +98,7 @@ branch-base validation.
 - `pnpm vitest tests/harness/check-doc-relevance.test.ts` -> pass
 - `pnpm vitest tests/harness/check-evidence-contract.test.ts` -> pass
 - `bash scripts/ci-local.sh` -> pass
+- `bash -n scripts/harness/check_decision_links.sh scripts/harness/check_doc_relevance.sh scripts/harness/check_evidence_contract.sh scripts/ci-local.sh` -> pass
 - `make check` -> pass
 
 ## Verification Artifacts
