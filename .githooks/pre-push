@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[pre-push] running local CI gate..."
+echo "[pre-push] running local CI gate with evidence checks..."
 pnpm run ci:local

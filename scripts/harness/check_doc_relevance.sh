@@ -4,6 +4,12 @@ set -euo pipefail
 ROOT_DIR="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$ROOT_DIR"
 
+STAGED_MODE=0
+if [[ "${1:-}" == "--staged" ]]; then
+  STAGED_MODE=1
+  shift
+fi
+
 canonical_docs=(
   "AGENTS.md"
   "ARCHITECTURE.md"
@@ -21,20 +27,32 @@ canonical_docs=(
 
 BASE_REF="${1:-}"
 if [[ -z "$BASE_REF" ]]; then
+  if [[ "$STAGED_MODE" -eq 1 ]]; then
+    changed_files="$(git diff --cached --name-only)"
+    if [[ -z "${changed_files:-}" ]]; then
+      echo "No staged files; doc relevance check passed."
+      exit 0
+    fi
+  fi
+
+  if [[ "$STAGED_MODE" -eq 0 ]]; then
   if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
     BASE_REF="origin/${GITHUB_BASE_REF}"
     git fetch --no-tags --depth=1 origin "${GITHUB_BASE_REF}" >/dev/null 2>&1 || true
   else
     BASE_REF="$(git rev-parse --verify HEAD~1 2>/dev/null || true)"
   fi
+  fi
 fi
 
-if [[ -z "$BASE_REF" ]]; then
+if [[ "$STAGED_MODE" -eq 0 && -z "$BASE_REF" ]]; then
   echo "Could not determine base ref; skipping doc relevance check."
   exit 0
 fi
 
-changed_files="$(git diff --name-only "${BASE_REF}"...HEAD)"
+if [[ "$STAGED_MODE" -eq 0 ]]; then
+  changed_files="$(git diff --name-only "${BASE_REF}"...HEAD)"
+fi
 
 if [[ -z "${changed_files:-}" ]]; then
   echo "No changed files; doc relevance check passed."
@@ -91,8 +109,13 @@ is_metadata_only_diff() {
   local before_content
   local after_content
 
-  before_content="$(git show "${BASE_REF}:${target}" 2>/dev/null || true)"
-  after_content="$(cat "$target")"
+  if [[ "$STAGED_MODE" -eq 1 ]]; then
+    before_content="$(git show "HEAD:${target}" 2>/dev/null || true)"
+    after_content="$(git show ":${target}" 2>/dev/null || true)"
+  else
+    before_content="$(git show "${BASE_REF}:${target}" 2>/dev/null || true)"
+    after_content="$(git show "HEAD:${target}" 2>/dev/null || cat "$target")"
+  fi
 
   local normalized_before
   local normalized_after
