@@ -70,6 +70,7 @@ As of March 6, 2026, the repository implements the worker-attempt execution slic
 - agent-runner exposes a reusable session lifecycle with repeated `runTurn()` on one thread
 - worker-attempt execution loops across turns, refreshes tracker state between turns, and returns deterministic `stopped_non_active_state`, `stopped_max_turns_reached`, and abnormal retry reason codes
 - bootstrap wiring now constructs a concrete `workerAttemptRunner`
+- repository-level verification coverage now includes worker-attempt failure paths, session-client lifecycle guards, and bootstrap wiring execution so the 100% coverage gate stays enforced for this slice
 
 Residual work after this design implementation is verification-oriented rather than architectural: full repository harness evidence, integration follow-through in downstream orchestrator tickets, and any follow-up fixes discovered by broader checks.
 

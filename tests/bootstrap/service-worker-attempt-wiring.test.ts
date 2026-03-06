@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 const harness = vi.hoisted(() => {
   const startSession = vi.fn().mockResolvedValue({
@@ -53,6 +53,15 @@ describe('bootstrap worker attempt runner wiring', () => {
   beforeAll(() => {
     originalApiKey = process.env.LINEAR_API_KEY
     process.env.LINEAR_API_KEY = process.env.LINEAR_API_KEY ?? 'test-bootstrap-key'
+  })
+
+  afterAll(() => {
+    if (originalApiKey === undefined) {
+      delete process.env.LINEAR_API_KEY
+      return
+    }
+
+    process.env.LINEAR_API_KEY = originalApiKey
   })
 
   afterEach(() => {
