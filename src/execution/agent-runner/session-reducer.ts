@@ -41,8 +41,7 @@ export function createSessionReducer() {
   let usage: UsageTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
   let completed = false
   let completionResolve!: () => void
-
-  const completionPromise = new Promise<void>((resolve) => {
+  let completionPromise = new Promise<void>((resolve) => {
     completionResolve = resolve
   })
 
@@ -73,6 +72,14 @@ export function createSessionReducer() {
       completionResolve()
     },
 
+    resetForNextTurn() {
+      completed = false
+      usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
+      completionPromise = new Promise<void>((resolve) => {
+        completionResolve = resolve
+      })
+    },
+
     async waitForTurnCompletion(timeoutMs: number) {
       if (completed) {
         return
@@ -90,7 +97,7 @@ export function createSessionReducer() {
       })
     },
 
-    toLiveSession(session: SessionStart, pid: number | undefined): LiveSession {
+    toLiveSession(session: SessionStart, pid: number | undefined, turnCount: number): LiveSession {
       return {
         session_id: session.sessionId,
         thread_id: session.threadId,
@@ -105,7 +112,7 @@ export function createSessionReducer() {
         last_reported_input_tokens: usage.input_tokens,
         last_reported_output_tokens: usage.output_tokens,
         last_reported_total_tokens: usage.total_tokens,
-        turn_count: 1,
+        turn_count: turnCount,
       }
     },
   }

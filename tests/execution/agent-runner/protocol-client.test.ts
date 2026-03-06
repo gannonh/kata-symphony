@@ -4,10 +4,12 @@ import { createProtocolClient } from '../../../src/execution/agent-runner/protoc
 function transportFixture(options?: {
   threadResponse?: unknown
   turnResponse?: unknown
+  turnResponses?: unknown[]
   skipInitializeResponse?: boolean
 }) {
   const writes: string[] = []
   const pending = new Map<number, (value: unknown) => void>()
+  const turnResponses = [...(options?.turnResponses ?? [])]
 
   return {
     writes,
@@ -21,7 +23,11 @@ function transportFixture(options?: {
         pending.get(msg.id)?.(options?.threadResponse ?? { result: { thread: { id: 'thread-1' } } })
       }
       if (msg.method === 'turn/start' && msg.id) {
-        pending.get(msg.id)?.(options?.turnResponse ?? { result: { turn: { id: 'turn-1' } } })
+        pending.get(msg.id)?.(
+          turnResponses.shift() ??
+            options?.turnResponse ??
+            { result: { turn: { id: 'turn-1' } } },
+        )
       }
     },
     onRequest(id: number, resolver: (value: unknown) => void) {
@@ -40,16 +46,24 @@ describe('protocol client handshake', () => {
       registerPending: transport.onRequest,
     })
 
-    const result = await client.startSession({
+    await client.initializeSession()
+
+    const thread = await client.startThread({
+      cwd: '/tmp/ws',
+      approvalPolicy: 'never',
+      threadSandbox: 'workspace-write',
+    })
+
+    const result = await client.startTurn({
+      threadId: thread.threadId,
       cwd: '/tmp/ws',
       title: 'KAT-228: Runner',
       prompt: 'hello',
       approvalPolicy: 'never',
-      threadSandbox: 'workspace-write',
       turnSandboxPolicy: { mode: 'workspace-write' },
     })
 
-    expect(result.threadId).toBe('thread-1')
+    expect(thread.threadId).toBe('thread-1')
     expect(result.turnId).toBe('turn-1')
     expect(result.sessionId).toBe('thread-1-turn-1')
 
@@ -65,13 +79,9 @@ describe('protocol client handshake', () => {
       registerPending: transport.onRequest,
     })
 
-    await expect(
-      client.startSession({
-        cwd: '/tmp/ws',
-        title: 'KAT-228: Runner',
-        prompt: 'hello',
-      }),
-    ).rejects.toThrow('response_error')
+    await client.initializeSession()
+
+    await expect(client.startThread({ cwd: '/tmp/ws' })).rejects.toThrow('response_error')
   })
 
   it('throws response_error when turn id is missing', async () => {
@@ -82,9 +92,13 @@ describe('protocol client handshake', () => {
       registerPending: transport.onRequest,
     })
 
+    await client.initializeSession()
+    const thread = await client.startThread({ cwd: '/tmp/ws' })
+
     await expect(
-      client.startSession({
+      client.startTurn({
         cwd: '/tmp/ws',
+        threadId: thread.threadId,
         title: 'KAT-228: Runner',
         prompt: 'hello',
       }),
@@ -99,12 +113,41 @@ describe('protocol client handshake', () => {
       registerPending: transport.onRequest,
     })
 
-    await expect(
-      client.startSession({
-        cwd: '/tmp/ws',
-        title: 'KAT-228: Runner',
-        prompt: 'hello',
-      }),
-    ).rejects.toThrow('response_timeout')
+    await expect(client.initializeSession()).rejects.toThrow('response_timeout')
+  })
+
+  it('starts multiple turns on the same thread', async () => {
+    const transport = transportFixture({
+      turnResponses: [
+        { result: { turn: { id: 'turn-1' } } },
+        { result: { turn: { id: 'turn-2' } } },
+      ],
+    })
+
+    const client = createProtocolClient({
+      readTimeoutMs: 500,
+      sendLine: transport.writeLine,
+      registerPending: transport.onRequest,
+    })
+
+    await client.initializeSession()
+    const thread = await client.startThread({ cwd: '/tmp/ws' })
+    const turn1 = await client.startTurn({
+      cwd: '/tmp/ws',
+      threadId: thread.threadId,
+      title: 'first',
+      prompt: 'one',
+    })
+    const turn2 = await client.startTurn({
+      cwd: '/tmp/ws',
+      threadId: thread.threadId,
+      title: 'second',
+      prompt: 'two',
+    })
+
+    expect(turn1.threadId).toBe(thread.threadId)
+    expect(turn2.threadId).toBe(thread.threadId)
+    expect(turn1.turnId).toBe('turn-1')
+    expect(turn2.turnId).toBe('turn-2')
   })
 })
