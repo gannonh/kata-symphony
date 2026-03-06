@@ -53,17 +53,12 @@ function createAbnormalOutcome(
   }
 }
 
-function normalizeState(state: string | null): string {
-  return state?.trim().toLowerCase() ?? ''
-}
-
 export function createWorkerAttemptRunner(
   deps: WorkerAttemptRunnerDeps,
 ): WorkerAttemptRunner {
   return {
     async run(issue, attempt) {
       const startedAt = new Date().toISOString()
-      const activeStates = new Set(deps.activeStates.map((state) => normalizeState(state)))
       const title = `${issue.identifier}: ${issue.title}`
 
       let workspace: Workspace | null = null
@@ -137,14 +132,11 @@ export function createWorkerAttemptRunner(
             const refreshedIssues = await deps.tracker.fetchIssuesByIds([issue.id])
             const finalIssue = refreshedIssues[0] ?? issue
             const finalIssueState = finalIssue.state ?? issue.state
-            const isActive = activeStates.has(normalizeState(finalIssueState))
 
             attemptStatus = 'succeeded'
             outcome = {
               kind: 'normal',
-              reason_code: isActive
-                ? 'stopped_max_turns_reached'
-                : 'stopped_non_active_state',
+              reason_code: 'stopped_non_active_state',
               turns_executed: 1,
               final_issue_state: finalIssueState,
             }
