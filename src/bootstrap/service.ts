@@ -4,15 +4,24 @@ import { sanitizeWorkspaceKey } from '../domain/normalization.js'
 import type { AgentRunner, WorkspaceManager } from '../execution/contracts.js'
 import type { Logger } from '../observability/contracts.js'
 import { createNoopOrchestrator } from '../orchestrator/contracts.js'
+import {
+  logPreflightFailure,
+  validateDispatchPreflight,
+  type DispatchPreflightError,
+  type DispatchPreflightResult,
+} from '../orchestrator/preflight/index.js'
 import type { TrackerClient } from '../tracker/contracts.js'
+import { loadWorkflowDefinition } from '../workflow/index.js'
 
-const logger: Logger = {
-  info(message, context) {
-    console.log(message, context ?? {})
-  },
-  error(message, context) {
-    console.error(message, context ?? {})
-  },
+function createLogger(): Logger {
+  return {
+    info(message, context) {
+      console.log(message, context ?? {})
+    },
+    error(message, context) {
+      console.error(message, context ?? {})
+    },
+  }
 }
 
 export interface ServiceBootstrap {
@@ -24,7 +33,28 @@ export interface ServiceBootstrap {
   orchestrator: ReturnType<typeof createNoopOrchestrator>
 }
 
+export class StartupPreflightError extends Error {
+  readonly code = 'dispatch_preflight_failed'
+  readonly errors: DispatchPreflightError[]
+
+  constructor(errors: DispatchPreflightError[]) {
+    super('startup preflight failed')
+    this.name = 'StartupPreflightError'
+    this.errors = errors
+  }
+}
+
+async function runStartupPreflight(
+  service: ServiceBootstrap,
+): Promise<DispatchPreflightResult> {
+  return validateDispatchPreflight({
+    loadWorkflow: loadWorkflowDefinition,
+    getSnapshot: () => service.config.getSnapshot(),
+  })
+}
+
 export function createService(): ServiceBootstrap {
+  const logger = createLogger()
   const config = createStaticConfigProvider(
     buildEffectiveConfig(
       {
@@ -78,7 +108,20 @@ export function createService(): ServiceBootstrap {
   return { config, tracker, workspace, agentRunner, logger, orchestrator }
 }
 
-export async function startService(service = createService()): Promise<void> {
+export async function startService(
+  service = createService(),
+): Promise<void> {
+  const preflight = await runStartupPreflight(service)
+
+  if (preflight.ok === false) {
+    try {
+      logPreflightFailure(service.logger, 'startup', preflight.errors)
+    } catch (error) {
+      void error
+    }
+    throw new StartupPreflightError(preflight.errors)
+  }
+
   await service.orchestrator.start()
   service.logger.info('Symphony bootstrap ok', {
     mode: 'bootstrap',
