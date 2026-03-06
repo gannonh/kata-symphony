@@ -6,7 +6,7 @@ Last reviewed: 2026-03-05
 
 0. KAT-221 Service skeleton and core domain model (in review, PR #4 rounds 1-2 addressed)
 1. KAT-223 Typed config layer with defaults, env resolution, and reload fallback (completed, verified 2026-03-05)
-2. KAT-227 Workspace manager hooks safety + deterministic root-contained paths (completed, verified 2026-03-05)
+2. KAT-227 Workspace manager hooks safety + deterministic root-contained paths (completed, verified 2026-03-05, post-review cleanup 2026-03-05)
 3. KAT-255 TypeScript scaffold and baseline toolchain (completed)
 4. Core conformance implementation from `SPEC.md` Section 18.1
 5. Core conformance validation from `SPEC.md` Section 17.1-17.7
