@@ -471,6 +471,44 @@ describe('worker attempt runner', () => {
     expect(deps.runAfterRun).toHaveBeenCalledTimes(1)
   })
 
+  it('does not let onCodexEvent failures alter the attempt outcome', async () => {
+    const deps = createBaseDeps()
+    const onCodexEvent = vi.fn(() => {
+      throw new Error('callback exploded')
+    })
+
+    const runner = createWorkerAttemptRunner({
+      workspace: {
+        ensureWorkspace: deps.ensureWorkspace,
+        runBeforeRun: deps.runBeforeRun,
+        runAfterRun: deps.runAfterRun,
+      },
+      tracker: {
+        fetchIssuesByIds: vi.fn().mockResolvedValue([{ ...issue, state: 'Review' }]),
+      },
+      sessionClientFactory: () => ({
+        startSession: deps.startSession,
+        runTurn: deps.runTurn,
+        stopSession: deps.stopSession,
+        getLatestSession: deps.getLatestSession,
+      }),
+      workflowTemplate: 'Issue {{ issue.identifier }}',
+      activeStates: ['todo', 'in progress'],
+      maxTurns: 3,
+      onCodexEvent,
+    })
+
+    const result = await runner.run(issue, null)
+
+    expect(onCodexEvent).toHaveBeenCalledTimes(1)
+    expect(result.outcome).toMatchObject({
+      kind: 'normal',
+      reason_code: 'stopped_non_active_state',
+      turns_executed: 1,
+    })
+    expect(result.attempt.status).toBe('succeeded')
+  })
+
   it('maps workspace provisioning failures before a workspace exists', async () => {
     const deps = createBaseDeps()
     deps.ensureWorkspace.mockRejectedValueOnce(new Error('workspace unavailable'))
@@ -589,7 +627,7 @@ describe('worker attempt runner', () => {
     expect(deps.runAfterRun).toHaveBeenCalledTimes(1)
   })
 
-  it('returns stopped_max_turns_reached when no turns are permitted', async () => {
+  it('returns stopped_max_turns_reached when no turns are permitted without running hooks or session', async () => {
     const deps = createBaseDeps()
 
     const runner = createWorkerAttemptRunner({
@@ -615,7 +653,7 @@ describe('worker attempt runner', () => {
     const result = await runner.run(issue, null)
 
     expect(result.attempt).toMatchObject({
-      status: 'failed',
+      status: 'succeeded',
       workspace_path: '/tmp/ws/KAT-229',
     })
     expect(result.attempt.error).toBeUndefined()
@@ -625,9 +663,10 @@ describe('worker attempt runner', () => {
       turns_executed: 0,
       final_issue_state: 'In Progress',
     })
+    expect(deps.runBeforeRun).not.toHaveBeenCalled()
     expect(deps.startSession).not.toHaveBeenCalled()
     expect(deps.runTurn).not.toHaveBeenCalled()
-    expect(deps.stopSession).toHaveBeenCalledTimes(1)
+    expect(deps.stopSession).not.toHaveBeenCalled()
     expect(deps.runAfterRun).toHaveBeenCalledTimes(1)
   })
 })

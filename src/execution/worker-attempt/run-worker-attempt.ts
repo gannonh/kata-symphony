@@ -103,6 +103,12 @@ export function createWorkerAttemptRunner(
           runtimeState.workspace = await deps.workspace.ensureWorkspace(issue.identifier)
           workspacePath = runtimeState.workspace.path
 
+          if (deps.maxTurns <= 0) {
+            attemptStatus = 'succeeded'
+            outcome = createNormalOutcome('stopped_max_turns_reached', 0, issue.state)
+            return
+          }
+
           try {
             await deps.workspace.runBeforeRun(runtimeState.workspace)
           } catch (error) {
@@ -113,11 +119,6 @@ export function createWorkerAttemptRunner(
 
           runtimeState.client = deps.sessionClientFactory(runtimeState.workspace.path)
           let threadId: string | null = null
-
-          if (deps.maxTurns <= 0) {
-            outcome = createNormalOutcome('stopped_max_turns_reached', 0, issue.state)
-            return
-          }
 
           for (let turnNumber = 1; turnNumber <= deps.maxTurns; turnNumber += 1) {
             const prompt = await buildTurnPrompt({
@@ -167,14 +168,18 @@ export function createWorkerAttemptRunner(
             }
 
             threadId = turnStart.threadId
-            deps.onCodexEvent?.({
-              issue_id: issue.id,
-              issue_identifier: issue.identifier,
-              event: 'turn_completed',
-              turn_number: turnNumber,
-              timestamp: new Date().toISOString(),
-              session: runtimeState.client.getLatestSession(),
-            })
+            try {
+              deps.onCodexEvent?.({
+                issue_id: issue.id,
+                issue_identifier: issue.identifier,
+                event: 'turn_completed',
+                turn_number: turnNumber,
+                timestamp: new Date().toISOString(),
+                session: runtimeState.client.getLatestSession(),
+              })
+            } catch {
+              // Callback failures must not alter attempt outcome
+            }
 
             try {
               const refreshedIssues = await deps.tracker.fetchIssuesByIds([issue.id])

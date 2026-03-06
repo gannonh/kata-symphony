@@ -35,6 +35,7 @@ interface SessionClientDeps {
 
 interface ChildFailureSignal {
   failure: Promise<never>
+  trigger(): void
   stop(): void
 }
 
@@ -89,6 +90,9 @@ function createChildFailureSignal(child: ChildProcess): ChildFailureSignal {
 
   return {
     failure,
+    trigger() {
+      fail()
+    },
     stop() {
       child.off('error', onError)
       child.off('exit', onExit)
@@ -164,6 +168,7 @@ export function createAgentSessionClient(deps: SessionClientDeps): AgentSessionC
       return
     }
 
+    runtime.childFailure.trigger()
     runtime.childFailure.stop()
     runtime.clearPending()
     runtime.stopTransport()
