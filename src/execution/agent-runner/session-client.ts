@@ -160,6 +160,8 @@ export function createAgentSessionClient(deps: SessionClientDeps): AgentSessionC
 
   const stopRuntime = async () => {
     if (!runtime) {
+      latestSession = null
+      latestStart = null
       return
     }
 
@@ -168,6 +170,7 @@ export function createAgentSessionClient(deps: SessionClientDeps): AgentSessionC
     runtime.stopTransport()
     runtime.child.kill()
     runtime = null
+    latestSession = null
     latestStart = null
   }
 
@@ -178,15 +181,31 @@ export function createAgentSessionClient(deps: SessionClientDeps): AgentSessionC
       }
 
       const activeRuntime = ensureRuntime()
+      const sessionInput: {
+        cwd: string
+        title: string
+        prompt: string
+        approvalPolicy?: string
+        threadSandbox?: string
+        turnSandboxPolicy?: { mode: string }
+      } = {
+        cwd: deps.workspacePath,
+        title: input.title,
+        prompt: input.prompt,
+      }
+      if (deps.codex.approval_policy) {
+        sessionInput.approvalPolicy = deps.codex.approval_policy
+      }
+      if (deps.codex.thread_sandbox) {
+        sessionInput.threadSandbox = deps.codex.thread_sandbox
+      }
+      const initialSandboxPolicy = turnSandboxPolicy(deps.codex.turn_sandbox_policy)
+      if (initialSandboxPolicy) {
+        sessionInput.turnSandboxPolicy = initialSandboxPolicy
+      }
+
       const sessionStart = await Promise.race([
-        activeRuntime.protocolClient.startSession({
-          cwd: deps.workspacePath,
-          title: input.title,
-          prompt: input.prompt,
-          approvalPolicy: deps.codex.approval_policy,
-          threadSandbox: deps.codex.thread_sandbox,
-          turnSandboxPolicy: turnSandboxPolicy(deps.codex.turn_sandbox_policy),
-        }),
+        activeRuntime.protocolClient.startSession(sessionInput),
         activeRuntime.childFailure.failure,
       ])
 
@@ -213,15 +232,29 @@ export function createAgentSessionClient(deps: SessionClientDeps): AgentSessionC
 
       activeRuntime.sessionReducer.resetForNextTurn()
       const nextTurnCount = activeRuntime.turnCount + 1
+      const turnInput: {
+        cwd: string
+        threadId: string
+        title: string
+        prompt: string
+        approvalPolicy?: string
+        turnSandboxPolicy?: { mode: string }
+      } = {
+        cwd: deps.workspacePath,
+        threadId: input.threadId,
+        title: input.title,
+        prompt: input.prompt,
+      }
+      if (deps.codex.approval_policy) {
+        turnInput.approvalPolicy = deps.codex.approval_policy
+      }
+      const continuationSandboxPolicy = turnSandboxPolicy(deps.codex.turn_sandbox_policy)
+      if (continuationSandboxPolicy) {
+        turnInput.turnSandboxPolicy = continuationSandboxPolicy
+      }
+
       const sessionStart = await Promise.race([
-        activeRuntime.protocolClient.startTurn({
-          cwd: deps.workspacePath,
-          threadId: input.threadId,
-          title: input.title,
-          prompt: input.prompt,
-          approvalPolicy: deps.codex.approval_policy,
-          turnSandboxPolicy: turnSandboxPolicy(deps.codex.turn_sandbox_policy),
-        }),
+        activeRuntime.protocolClient.startTurn(turnInput),
         activeRuntime.childFailure.failure,
       ])
 

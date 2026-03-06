@@ -113,20 +113,30 @@ export function createProtocolClient(deps: ProtocolClientDeps) {
 
     async startSession(input: StartSessionInput): Promise<SessionStartResult> {
       await this.initializeSession()
-      const thread = await this.startThread({
-        cwd: input.cwd,
-        approvalPolicy: input.approvalPolicy,
-        threadSandbox: input.threadSandbox,
-      })
+      const threadInput: StartThreadInput = { cwd: input.cwd }
+      if (input.approvalPolicy) {
+        threadInput.approvalPolicy = input.approvalPolicy
+      }
+      if (input.threadSandbox) {
+        threadInput.threadSandbox = input.threadSandbox
+      }
 
-      return this.startTurn({
+      const thread = await this.startThread(threadInput)
+
+      const turnInput: StartTurnInput = {
         cwd: input.cwd,
         threadId: thread.threadId,
         title: input.title,
         prompt: input.prompt,
-        approvalPolicy: input.approvalPolicy,
-        turnSandboxPolicy: input.turnSandboxPolicy,
-      })
+      }
+      if (input.approvalPolicy) {
+        turnInput.approvalPolicy = input.approvalPolicy
+      }
+      if (input.turnSandboxPolicy !== undefined) {
+        turnInput.turnSandboxPolicy = input.turnSandboxPolicy
+      }
+
+      return this.startTurn(turnInput)
     },
   }
 }
