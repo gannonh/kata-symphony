@@ -1,3 +1,4 @@
+/* v8 ignore file -- type-only contract surface */
 export interface LinearGraphQLError {
   message: string
   [key: string]: unknown

@@ -62,4 +62,17 @@ describe('tracker module contracts', () => {
       },
     })
   })
+
+  it('keeps request error details deterministic for undefined and primitive causes', () => {
+    const noCause = createLinearApiRequestError('request failed')
+    const primitiveCause = createLinearApiRequestError('request failed', 'timeout')
+
+    expect(noCause.details).toEqual({})
+    expect(primitiveCause.details).toEqual({
+      cause: {
+        type: 'string',
+        value: 'timeout',
+      },
+    })
+  })
 })

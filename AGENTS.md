@@ -25,6 +25,8 @@ Build and operate `Symphony` from `SPEC.md` with an agent-first workflow.
 4. Update documentation when behavior changes.
 5. Run harness checks before claiming completion:
    - `make check`
+6. Never bypass git hooks with `--no-verify`.
+   - If pre-push fails, fix the underlying issue (including coverage thresholds) and rerun normally.
 
 ## Commands
 

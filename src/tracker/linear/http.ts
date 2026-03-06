@@ -46,14 +46,15 @@ export async function runLinearGraphQL(
       throw createLinearGraphQLErrorsError(payload.errors)
     }
 
+    clearTimeout(timeout)
     return payload.data
   } catch (error: unknown) {
+    clearTimeout(timeout)
+
     if (error instanceof TrackerIntegrationError) {
       throw error
     }
 
     throw createLinearApiRequestError('Linear request failed', error)
-  } finally {
-    clearTimeout(timeout)
   }
 }
