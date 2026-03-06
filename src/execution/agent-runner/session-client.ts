@@ -8,7 +8,7 @@ import { createProtocolClient, type SessionStartResult } from './protocol-client
 import { createSessionReducer } from './session-reducer.js'
 import { createStdioTransport } from './transport.js'
 
-export interface AgentSessionStart extends SessionStartResult {}
+export type AgentSessionStart = SessionStartResult
 
 export interface AgentSessionClient {
   startSession(input: { title: string; prompt: string }): Promise<AgentSessionStart>
