@@ -1,6 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createLineBuffer } from './line-buffer.js'
-import { isObjectRecord } from './utils.js'
+import { isRecord } from '../../config/coerce.js'
 
 export interface ProtocolMessage {
   id?: number
@@ -28,7 +28,7 @@ export function createStdioTransport(options: {
     for (const line of lineBuffer.push(chunk)) {
       try {
         const parsed = JSON.parse(line) as unknown
-        if (isObjectRecord(parsed)) {
+        if (isRecord(parsed)) {
           options.onMessage(parsed as ProtocolMessage)
         }
       } catch {

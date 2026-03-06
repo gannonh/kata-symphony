@@ -3,7 +3,7 @@ import {
   AGENT_RUNNER_ERROR_CODES,
   AgentRunnerError,
 } from './errors.js'
-import { isObjectRecord } from './utils.js'
+import { isRecord } from '../../config/coerce.js'
 
 interface SessionStart {
   threadId: string
@@ -18,12 +18,12 @@ interface UsageTotals {
 }
 
 function parseUsage(params: unknown): UsageTotals {
-  if (!isObjectRecord(params)) {
+  if (!isRecord(params)) {
     return { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
   }
 
   const usage = params.usage
-  if (!isObjectRecord(usage)) {
+  if (!isRecord(usage)) {
     return { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
   }
 
@@ -36,8 +36,8 @@ function parseUsage(params: unknown): UsageTotals {
 
 export function createSessionReducer() {
   let latestEvent: string | null = null
-  let latestMessage: string | null = null
-  let latestTimestamp: string | null = null
+  let latestMessageRaw: unknown = null
+  let latestTimestamp: number | null = null
   let usage: UsageTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
   let completed = false
   let completionResolve!: () => void
@@ -48,7 +48,7 @@ export function createSessionReducer() {
 
   return {
     acceptMessage(message: unknown) {
-      if (!isObjectRecord(message)) {
+      if (!isRecord(message)) {
         return
       }
 
@@ -57,8 +57,8 @@ export function createSessionReducer() {
       }
 
       latestEvent = message.method
-      latestMessage = JSON.stringify(message)
-      latestTimestamp = new Date().toISOString()
+      latestMessageRaw = message
+      latestTimestamp = Date.now()
 
       if (
         message.method !== 'turn/completed' &&
@@ -80,14 +80,13 @@ export function createSessionReducer() {
 
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
-          clearTimeout(timer)
           reject(new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.RESPONSE_TIMEOUT))
         }, timeoutMs)
 
         completionPromise.then(() => {
           clearTimeout(timer)
           resolve()
-        }, reject)
+        })
       })
     },
 
@@ -98,8 +97,8 @@ export function createSessionReducer() {
         turn_id: session.turnId,
         codex_app_server_pid: pid ? String(pid) : null,
         last_codex_event: latestEvent,
-        last_codex_timestamp: latestTimestamp,
-        last_codex_message: latestMessage,
+        last_codex_timestamp: latestTimestamp ? new Date(latestTimestamp).toISOString() : null,
+        last_codex_message: latestMessageRaw ? JSON.stringify(latestMessageRaw) : null,
         codex_input_tokens: usage.input_tokens,
         codex_output_tokens: usage.output_tokens,
         codex_total_tokens: usage.total_tokens,

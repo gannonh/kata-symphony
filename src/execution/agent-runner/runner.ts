@@ -116,6 +116,7 @@ export function createAgentRunner(deps: RunnerDeps) {
       })
 
       const cleanup = () => {
+        pending.clear()
         transport.stop()
         child.kill()
       }
@@ -147,9 +148,7 @@ export function createAgentRunner(deps: RunnerDeps) {
           startSessionInput.turnSandboxPolicy = sandboxPolicy
         }
 
-        const sessionStart = await protocolClient.startSession({
-          ...startSessionInput,
-        })
+        const sessionStart = await protocolClient.startSession(startSessionInput)
 
         const turnCompletionTimeoutMs = deps.codex.turn_timeout_ms
         await sessionReducer.waitForTurnCompletion(turnCompletionTimeoutMs)
