@@ -114,7 +114,11 @@ export async function startService(
   const preflight = await runStartupPreflight(service)
 
   if (preflight.ok === false) {
-    logPreflightFailure(service.logger, 'startup', preflight.errors)
+    try {
+      logPreflightFailure(service.logger, 'startup', preflight.errors)
+    } catch (error) {
+      void error
+    }
     throw new StartupPreflightError(preflight.errors)
   }
 

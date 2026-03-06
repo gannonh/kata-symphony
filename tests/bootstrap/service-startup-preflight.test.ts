@@ -72,4 +72,41 @@ describe('startService startup preflight gate', () => {
       }),
     )
   })
+
+  it('rejects with dispatch_preflight_failed when startup preflight logging throws', async () => {
+    const service = createService()
+    const orchestratorStartSpy = vi.fn(async () => {})
+    const loggerErrorSpy = vi.fn(() => {
+      throw new Error('logger unavailable')
+    })
+
+    service.orchestrator.start = orchestratorStartSpy
+    service.logger.error = loggerErrorSpy
+
+    vi.spyOn(service.config, 'getSnapshot').mockReturnValue({
+      tracker: {
+        kind: 'linear',
+        api_key: '',
+        project_slug: 'bootstrap',
+      },
+      codex: {
+        command: 'codex app-server',
+      },
+    } as ReturnType<typeof service.config.getSnapshot>)
+
+    await expect(startService(service)).rejects.toMatchObject({
+      code: 'dispatch_preflight_failed',
+      message: 'startup preflight failed',
+      errors: [
+        expect.objectContaining({
+          code: 'tracker_api_key_missing',
+          source: 'config',
+          field: 'tracker.api_key',
+        }),
+      ],
+    })
+
+    expect(orchestratorStartSpy).not.toHaveBeenCalled()
+    expect(loggerErrorSpy).toHaveBeenCalledTimes(1)
+  })
 })

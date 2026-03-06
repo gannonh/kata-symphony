@@ -90,4 +90,61 @@ describe('runTickPreflightGate', () => {
     expect(validate).toHaveBeenCalledTimes(1)
     expect(logFailure).not.toHaveBeenCalled()
   })
+
+  it('blocks dispatch when validate throws', async () => {
+    const reconcile = vi.fn(async () => {})
+    const validate = vi.fn(async () => {
+      throw new Error('validate failed')
+    })
+    const logFailure = vi.fn(async (errors: DispatchPreflightError[]) => {
+      expect(errors).toEqual([
+        {
+          code: 'workflow_invalid',
+          source: 'workflow',
+          field: 'workflow',
+          message: 'Workflow file cannot be loaded or parsed',
+        },
+      ])
+    })
+
+    const result = await runTickPreflightGate({
+      reconcile,
+      validate,
+      logFailure,
+    })
+
+    expect(result).toEqual({ dispatchAllowed: false })
+    expect(reconcile).toHaveBeenCalledTimes(1)
+    expect(validate).toHaveBeenCalledTimes(1)
+    expect(logFailure).toHaveBeenCalledTimes(1)
+  })
+
+  it('blocks dispatch when logFailure rejects', async () => {
+    const errors: DispatchPreflightError[] = [
+      {
+        code: 'tracker_api_key_missing',
+        source: 'config',
+        field: 'tracker.api_key',
+        message: 'tracker.api_key is required after resolution',
+      },
+    ]
+
+    const reconcile = vi.fn(async () => {})
+    const validate = vi.fn(async () => ({ ok: false as const, errors }))
+    const logFailure = vi.fn(async () => {
+      throw new Error('log failure broke')
+    })
+
+    const result = await runTickPreflightGate({
+      reconcile,
+      validate,
+      logFailure,
+    })
+
+    expect(result).toEqual({ dispatchAllowed: false })
+    expect(reconcile).toHaveBeenCalledTimes(1)
+    expect(validate).toHaveBeenCalledTimes(1)
+    expect(logFailure).toHaveBeenCalledTimes(1)
+    expect(logFailure).toHaveBeenCalledWith(errors)
+  })
 })
