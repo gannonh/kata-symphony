@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events'
 import { describe, expect, it, vi } from 'vitest'
 
 const issue = {
@@ -15,19 +16,39 @@ const issue = {
   updated_at: null,
 }
 
-async function runWithWaitError(waitError: unknown) {
+interface HarnessOptions {
+  startSession?: () => Promise<{
+    threadId: string
+    turnId: string
+    sessionId: string
+  }>
+  waitForTurnCompletion?: () => Promise<void>
+  buildPrompt?: () => Promise<
+    { ok: true; prompt: string } | { ok: false; error: string | { message?: string } }
+  >
+}
+
+async function createHarness(options: HarnessOptions = {}) {
   vi.resetModules()
 
   const kill = vi.fn()
+  const child = new EventEmitter() as EventEmitter & {
+    pid?: number
+    killed?: boolean
+    kill: () => void
+    stdout: Record<string, unknown>
+    stderr: Record<string, unknown>
+    stdin: Record<string, unknown>
+  }
+  child.pid = 123
+  child.killed = false
+  child.kill = kill
+  child.stdout = {}
+  child.stderr = {}
+  child.stdin = {}
+
   vi.doMock('node:child_process', () => ({
-    spawn: vi.fn(() => ({
-      pid: 123,
-      killed: false,
-      kill,
-      stdout: {},
-      stderr: {},
-      stdin: {},
-    })),
+    spawn: vi.fn(() => child),
   }))
 
   vi.doMock('../../../src/execution/agent-runner/transport.js', () => ({
@@ -37,22 +58,24 @@ async function runWithWaitError(waitError: unknown) {
     })),
   }))
 
+  const startSession =
+    options.startSession ??
+    (async () => ({
+      threadId: 'thread-1',
+      turnId: 'turn-1',
+      sessionId: 'thread-1-turn-1',
+    }))
   vi.doMock('../../../src/execution/agent-runner/protocol-client.js', () => ({
     createProtocolClient: vi.fn(() => ({
-      startSession: vi.fn(async () => ({
-        threadId: 'thread-1',
-        turnId: 'turn-1',
-        sessionId: 'thread-1-turn-1',
-      })),
+      startSession: vi.fn(startSession),
     })),
   }))
 
+  const waitForTurnCompletion = options.waitForTurnCompletion ?? (async () => {})
   vi.doMock('../../../src/execution/agent-runner/session-reducer.js', () => ({
     createSessionReducer: vi.fn(() => ({
       acceptMessage: vi.fn(),
-      waitForTurnCompletion: vi.fn(async () => {
-        throw waitError
-      }),
+      waitForTurnCompletion: vi.fn(waitForTurnCompletion),
       toLiveSession: vi.fn(() => null),
     })),
   }))
@@ -67,11 +90,23 @@ async function runWithWaitError(waitError: unknown) {
       stall_timeout_ms: 1000,
     },
     workspacePath: '/tmp',
-    buildPrompt: async () => ({ ok: true as const, prompt: 'hello' }),
+    buildPrompt:
+      options.buildPrompt ??
+      (async () => ({ ok: true as const, prompt: 'hello' })),
   })
 
-  const result = await runner.runAttempt(issue, null)
-  expect(kill).toHaveBeenCalledTimes(1)
+  return { runner, child, kill }
+}
+
+async function runWithWaitError(waitError: unknown) {
+  const harness = await createHarness({
+    waitForTurnCompletion: async () => {
+      throw waitError
+    },
+  })
+
+  const result = await harness.runner.runAttempt(issue, null)
+  expect(harness.kill).toHaveBeenCalledTimes(1)
   return result
 }
 
@@ -87,4 +122,44 @@ describe('agent runner error mapping', () => {
     expect(result.attempt.status).toBe('failed')
     expect(result.attempt).toMatchObject({ error: '42' })
   })
+
+  it(
+    'fails fast when child exits before startup handshake resolves',
+    async () => {
+      const harness = await createHarness({
+        startSession: () => new Promise(() => {}),
+      })
+
+      const resultPromise = harness.runner.runAttempt(issue, null)
+      setTimeout(() => {
+        harness.child.emit('exit', 1, null)
+      }, 10)
+
+      const result = await resultPromise
+      expect(result.attempt.status).toBe('failed')
+      expect(result.attempt).toMatchObject({ error: 'response_error' })
+      expect(harness.kill).toHaveBeenCalledTimes(1)
+    },
+    1000,
+  )
+
+  it(
+    'fails fast when child closes before turn completion arrives',
+    async () => {
+      const harness = await createHarness({
+        waitForTurnCompletion: () => new Promise(() => {}),
+      })
+
+      const resultPromise = harness.runner.runAttempt(issue, null)
+      setTimeout(() => {
+        harness.child.emit('close', 1, null)
+      }, 10)
+
+      const result = await resultPromise
+      expect(result.attempt.status).toBe('failed')
+      expect(result.attempt).toMatchObject({ error: 'response_error' })
+      expect(harness.kill).toHaveBeenCalledTimes(1)
+    },
+    1000,
+  )
 })

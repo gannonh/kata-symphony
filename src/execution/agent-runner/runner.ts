@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import type { Issue } from '../../domain/models.js'
 import {
   AGENT_RUNNER_ERROR_CODES,
@@ -55,73 +55,117 @@ function turnSandboxPolicy(value: string | undefined): { mode: string } | undefi
   return { mode: value }
 }
 
+function createChildFailureSignal(child: ChildProcess) {
+  let rejectFailure!: (error: AgentRunnerError) => void
+  let settled = false
+
+  const fail = () => {
+    if (settled) {
+      return
+    }
+
+    settled = true
+    rejectFailure(new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.RESPONSE_ERROR))
+  }
+
+  const failure = new Promise<never>((_resolve, reject) => {
+    rejectFailure = reject
+  })
+
+  const onError = () => {
+    fail()
+  }
+  const onExit = () => {
+    fail()
+  }
+  const onClose = () => {
+    fail()
+  }
+
+  child.once('error', onError)
+  child.once('exit', onExit)
+  child.once('close', onClose)
+
+  return {
+    failure,
+    stop() {
+      child.off('error', onError)
+      child.off('exit', onExit)
+      child.off('close', onClose)
+    },
+  }
+}
+
 export function createAgentRunner(deps: RunnerDeps) {
   return {
     async runAttempt(issue: Issue, attempt: number | null) {
       const startedAt = new Date().toISOString()
-      const prompt = await deps.buildPrompt({
-        issue: { identifier: issue.identifier, title: issue.title },
-        attempt,
-      })
-
-      if (!prompt.ok) {
-        const promptError =
-          typeof prompt.error === 'string'
-            ? prompt.error
-            : prompt.error.message ?? AGENT_RUNNER_ERROR_CODES.RESPONSE_ERROR
-
-        return {
-          attempt: {
-            issue_id: issue.id,
-            issue_identifier: issue.identifier,
-            attempt,
-            workspace_path: deps.workspacePath,
-            started_at: startedAt,
-            status: 'failed',
-            error: promptError,
-          },
-          session: null,
-        }
-      }
-
-      const child = spawn('bash', ['-lc', deps.codex.command], {
-        cwd: deps.workspacePath,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      })
-
-      const pending = new Map<number, (value: unknown) => void>()
-      const sessionReducer = createSessionReducer()
-      const transport = createStdioTransport({
-        child,
-        onMessage(message) {
-          if (typeof message.id === 'number') {
-            pending.get(message.id)?.(message)
-            pending.delete(message.id)
-            return
-          }
-
-          sessionReducer.acceptMessage(message)
-        },
-      })
-
-      const protocolClient = createProtocolClient({
-        readTimeoutMs: deps.codex.read_timeout_ms,
-        sendLine: transport.sendLine,
-        registerPending: (id, resolver) => {
-          pending.set(id, resolver)
-        },
-        unregisterPending: (id) => {
-          pending.delete(id)
-        },
-      })
-
-      const cleanup = () => {
-        pending.clear()
-        transport.stop()
-        child.kill()
-      }
-
+      let cleanup = () => {}
       try {
+        const prompt = await deps.buildPrompt({
+          issue: { identifier: issue.identifier, title: issue.title },
+          attempt,
+        })
+
+        if (!prompt.ok) {
+          const promptError =
+            typeof prompt.error === 'string'
+              ? prompt.error
+              : prompt.error.message ?? AGENT_RUNNER_ERROR_CODES.RESPONSE_ERROR
+
+          return {
+            attempt: {
+              issue_id: issue.id,
+              issue_identifier: issue.identifier,
+              attempt,
+              workspace_path: deps.workspacePath,
+              started_at: startedAt,
+              status: 'failed',
+              error: promptError,
+            },
+            session: null,
+          }
+        }
+
+        const child = spawn('bash', ['-lc', deps.codex.command], {
+          cwd: deps.workspacePath,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        })
+        const childFailure = createChildFailureSignal(child)
+
+        const pending = new Map<number, (value: unknown) => void>()
+        const sessionReducer = createSessionReducer()
+        const transport = createStdioTransport({
+          child,
+          onMessage(message) {
+            if (typeof message.id === 'number') {
+              pending.get(message.id)?.(message)
+              pending.delete(message.id)
+              return
+            }
+
+            sessionReducer.acceptMessage(message)
+          },
+        })
+
+        const protocolClient = createProtocolClient({
+          readTimeoutMs: deps.codex.read_timeout_ms,
+          sendLine: transport.sendLine,
+          registerPending: (id, resolver) => {
+            pending.set(id, resolver)
+          },
+          unregisterPending: (id) => {
+            pending.delete(id)
+          },
+        })
+
+        cleanup = () => {
+          childFailure.stop()
+          pending.clear()
+          transport.stop()
+          child.kill()
+        }
+
         const startSessionInput: {
           cwd: string
           title: string
@@ -148,12 +192,18 @@ export function createAgentRunner(deps: RunnerDeps) {
           startSessionInput.turnSandboxPolicy = sandboxPolicy
         }
 
-        const sessionStart = await protocolClient.startSession(startSessionInput)
+        const sessionStart = await Promise.race([
+          protocolClient.startSession(startSessionInput),
+          childFailure.failure,
+        ])
 
         const turnCompletionTimeoutMs = deps.codex.turn_timeout_ms
-        await sessionReducer.waitForTurnCompletion(turnCompletionTimeoutMs)
+        await Promise.race([
+          sessionReducer.waitForTurnCompletion(turnCompletionTimeoutMs),
+          childFailure.failure,
+        ])
 
-        const result = {
+        return {
           attempt: {
             issue_id: issue.id,
             issue_identifier: issue.identifier,
@@ -164,10 +214,8 @@ export function createAgentRunner(deps: RunnerDeps) {
           },
           session: sessionReducer.toLiveSession(sessionStart, child.pid),
         }
-        cleanup()
-        return result
       } catch (error) {
-        const result = {
+        return {
           attempt: {
             issue_id: issue.id,
             issue_identifier: issue.identifier,
@@ -179,8 +227,8 @@ export function createAgentRunner(deps: RunnerDeps) {
           },
           session: null,
         }
+      } finally {
         cleanup()
-        return result
       }
     },
   }

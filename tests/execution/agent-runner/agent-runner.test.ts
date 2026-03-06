@@ -55,6 +55,29 @@ describe('agent runner', () => {
     expect(result.session).toBeNull()
   })
 
+  it('returns failed attempt when prompt builder throws', async () => {
+    const fixture = path.resolve('tests/fixtures/fake-codex-app-server.mjs')
+    const runner = createAgentRunner({
+      codex: {
+        command: `node ${fixture} success`,
+        turn_timeout_ms: 5000,
+        read_timeout_ms: 500,
+        stall_timeout_ms: 1000,
+      },
+      workspacePath: '/tmp',
+      buildPrompt: async () => {
+        throw new Error('prompt builder crashed')
+      },
+    })
+
+    const result = await runner.runAttempt(issue, null)
+    expect(result.attempt).toMatchObject({
+      status: 'failed',
+      error: 'prompt builder crashed',
+    })
+    expect(result.session).toBeNull()
+  })
+
   it('runs startup handshake + turn and returns session metadata', async () => {
     const fixture = path.resolve('tests/fixtures/fake-codex-app-server.mjs')
 

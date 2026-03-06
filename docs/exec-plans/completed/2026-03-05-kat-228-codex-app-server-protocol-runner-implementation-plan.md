@@ -12,7 +12,7 @@
 
 Related skills during execution: `@executing-plans`, `@test-driven-development`, `@verification-before-completion`.
 
-### Task 1: Add failing line-buffer contract tests
+## Task 1: Add failing line-buffer contract tests
 
 **Files:**
 - Create: `tests/execution/agent-runner/line-buffer.test.ts`
@@ -55,7 +55,7 @@ git add tests/execution/agent-runner/line-buffer.test.ts
 git commit -m "test(agent-runner): add failing line buffer contract tests"
 ```
 
-### Task 2: Implement line-buffer utility
+## Task 2: Implement line-buffer utility
 
 **Files:**
 - Create: `src/execution/agent-runner/line-buffer.ts`
@@ -98,7 +98,7 @@ git add src/execution/agent-runner/line-buffer.ts tests/execution/agent-runner/l
 git commit -m "feat(agent-runner): implement stdout line buffer"
 ```
 
-### Task 3: Add failing startup-handshake protocol tests
+## Task 3: Add failing startup-handshake protocol tests
 
 **Files:**
 - Create: `tests/execution/agent-runner/protocol-client.test.ts`
@@ -171,7 +171,7 @@ git add tests/execution/agent-runner/protocol-client.test.ts
 git commit -m "test(agent-runner): add failing protocol handshake tests"
 ```
 
-### Task 4: Implement protocol client and timeout helpers
+## Task 4: Implement protocol client and timeout helpers
 
 **Files:**
 - Create: `src/execution/agent-runner/protocol-client.ts`
@@ -258,7 +258,7 @@ git add src/execution/agent-runner/protocol-client.ts src/execution/agent-runner
 git commit -m "feat(agent-runner): implement protocol startup handshake client"
 ```
 
-### Task 5: Add failing end-to-end runner tests with fake app-server stdio
+## Task 5: Add failing end-to-end runner tests with fake app-server stdio
 
 **Files:**
 - Create: `tests/fixtures/fake-codex-app-server.mjs`
@@ -347,7 +347,7 @@ git add tests/fixtures/fake-codex-app-server.mjs tests/execution/agent-runner/ag
 git commit -m "test(agent-runner): add failing end-to-end runner tests"
 ```
 
-### Task 6: Implement agent runner, stream parser, and session reducer
+## Task 6: Implement agent runner, stream parser, and session reducer
 
 **Files:**
 - Create: `src/execution/agent-runner/index.ts`
@@ -463,7 +463,7 @@ git add src/execution/agent-runner/index.ts src/execution/agent-runner/runner.ts
 git commit -m "feat(agent-runner): implement codex app-server protocol runner"
 ```
 
-### Task 7: Add timeout/error/stderr edge-case tests and finish conformance mapping
+## Task 7: Add timeout/error/stderr edge-case tests and finish conformance mapping
 
 **Files:**
 - Modify: `tests/execution/agent-runner/agent-runner.test.ts`
