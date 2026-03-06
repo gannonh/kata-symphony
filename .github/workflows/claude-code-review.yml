@@ -31,6 +31,12 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Install Claude Code v2.1.18
+        run: |
+          npm install --no-save @anthropic-ai/claude-code@2.1.18
+          echo "CLAUDE_PATH=${GITHUB_WORKSPACE}/node_modules/.bin/claude" >> "$GITHUB_ENV"
+          "${GITHUB_WORKSPACE}/node_modules/.bin/claude" --version
+
       - name: Run Claude Code Review
         id: claude-review
         # Work around upstream SDK regression in anthropics/claude-code-action@v1.
@@ -41,6 +47,7 @@ jobs:
           # Use workflow token directly so PRs that modify this workflow don't fail
           # app-token exchange validation against default branch.
           github_token: ${{ github.token }}
+          path_to_claude_code_executable: ${{ env.CLAUDE_PATH }}
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           # code-review plugin command signature is `/code-review [--comment]`
