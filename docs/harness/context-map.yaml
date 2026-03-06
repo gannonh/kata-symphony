@@ -49,3 +49,14 @@ rules:
       - "security"
       - "harness"
     notes: "Workflow changes alter agent behavior and should be reviewed as policy changes."
+
+  - pattern: "scripts/harness/**"
+    owned_by:
+      - "docs/harness/BUILDING-WITH-HARNESS.md"
+      - "docs/harness/change-evidence-schema.md"
+      - "docs/harness/context-map.yaml"
+    impacted_areas:
+      - "harness"
+      - "documentation"
+      - "tests"
+    notes: "Harness script changes should update the documented contract they enforce."

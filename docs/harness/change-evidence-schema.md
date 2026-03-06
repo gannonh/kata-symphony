@@ -27,17 +27,22 @@ The markdown file is for human review. The JSON file is for scripts and hooks.
    - The code/docs/config paths touched by the change.
 3. `Context Loaded`
    - The source-of-truth files the agent used.
-4. `Canonical Docs Updated`
+4. `Decision Artifacts`
+   - Linked design docs or implementation plans that justify the change.
+5. `Canonical Docs Updated`
    - The durable docs updated as a result of the change.
-5. `Waivers`
+6. `Waivers`
    - Explicit justification for any required doc that was not updated.
-6. `Verification`
+7. `Verification`
    - Commands run, relevant outcomes, and unresolved risks.
+8. `Verification Artifacts`
+   - Linked verification docs or summaries produced by the change.
 
 ### Required content rules
 
 - The file must contain at least one context file path.
 - The file must list at least one changed path.
+- The file must list at least one decision artifact for architecture-sensitive changes.
 - A waiver entry must name the skipped doc and explain why no update was needed.
 - Verification must include concrete commands, not only a success claim.
 
@@ -51,6 +56,10 @@ The markdown file is for human review. The JSON file is for scripts and hooks.
   "summary": "One sentence summary",
   "changedFiles": ["scripts/harness/check_repo_contract.sh"],
   "contextLoaded": ["ARCHITECTURE.md", "docs/harness/context-map.yaml"],
+  "decisionArtifacts": [
+    "docs/plans/2026-03-06-build-time-harness-evidence-contract-design.md",
+    "docs/plans/2026-03-06-build-time-harness-evidence-contract-implementation-plan.md"
+  ],
   "canonicalDocsUpdated": ["docs/harness/BUILDING-WITH-HARNESS.md"],
   "waivers": [
     {
@@ -64,6 +73,7 @@ The markdown file is for human review. The JSON file is for scripts and hooks.
       "result": "pass"
     }
   ],
+  "verificationArtifacts": ["docs/generated/harness-verification.md"],
   "impactedAreas": ["harness", "documentation"]
 }
 ```
@@ -74,9 +84,11 @@ The markdown file is for human review. The JSON file is for scripts and hooks.
 - `summary`: one-sentence description.
 - `changedFiles`: array of changed repo-relative paths.
 - `contextLoaded`: array of source-of-truth files loaded for the work.
+- `decisionArtifacts`: array of linked design or plan docs.
 - `canonicalDocsUpdated`: array of durable docs updated by the change.
 - `waivers`: array of `{doc, reason}` objects.
 - `verification`: array of `{command, result}` objects.
+- `verificationArtifacts`: array of linked verification docs.
 - `impactedAreas`: array of high-level affected areas such as `architecture`,
   `security`, `reliability`, `workflow`, `tests`, `docs`, or `harness`.
 

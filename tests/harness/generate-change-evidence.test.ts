@@ -13,9 +13,11 @@ describe('generate change evidence', () => {
     expect(evidence).toMatchObject({
       topic: 'build-time-harness',
       changedFiles: ['src/execution/workspace/manager.ts', 'WORKFLOW.md'],
+      decisionArtifacts: [],
       canonicalDocsUpdated: [],
       waivers: [],
       verification: [{ command: 'fill-in-command', result: 'pending' }],
+      verificationArtifacts: [],
     })
 
     expect(evidence.contextLoaded).toEqual([
@@ -43,8 +45,10 @@ describe('generate change evidence', () => {
 
     expect(markdown).toContain('# Change Evidence: config-change')
     expect(markdown).toContain('## Context Loaded')
+    expect(markdown).toContain('## Decision Artifacts')
     expect(markdown).toContain('## Canonical Docs Updated')
     expect(markdown).toContain('## Verification')
+    expect(markdown).toContain('## Verification Artifacts')
     expect(markdown).toContain('`ARCHITECTURE.md`')
   })
 })

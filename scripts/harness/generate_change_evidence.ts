@@ -30,9 +30,11 @@ export interface ChangeEvidence {
   summary: string
   changedFiles: string[]
   contextLoaded: string[]
+  decisionArtifacts: string[]
   canonicalDocsUpdated: string[]
   waivers: WaiverEntry[]
   verification: VerificationEntry[]
+  verificationArtifacts: string[]
   impactedAreas: string[]
 }
 
@@ -69,6 +71,7 @@ export function inferEvidence(topic: string, changedFiles: string[], contextMap:
     summary: `Change evidence stub for ${topic}`,
     changedFiles: uniqueSorted(changedFiles),
     contextLoaded: uniqueSorted(matchedRules.flatMap((rule) => rule.owned_by)),
+    decisionArtifacts: [],
     canonicalDocsUpdated: [],
     waivers: [],
     verification: [
@@ -77,6 +80,7 @@ export function inferEvidence(topic: string, changedFiles: string[], contextMap:
         result: 'pending',
       },
     ],
+    verificationArtifacts: [],
     impactedAreas: uniqueSorted(matchedRules.flatMap((rule) => rule.impacted_areas)),
   }
 }
@@ -109,6 +113,10 @@ ${bulletList(evidence.changedFiles, 'No changed files detected.')}
 
 ${bulletList(evidence.contextLoaded, 'No required context inferred.')}
 
+## Decision Artifacts
+
+${bulletList(evidence.decisionArtifacts, 'None yet. Add linked design docs or implementation plans here.')}
+
 ## Canonical Docs Updated
 
 ${bulletList(evidence.canonicalDocsUpdated, 'None yet. Add updated durable docs here.')}
@@ -120,6 +128,10 @@ ${waiverList}
 ## Verification
 
 ${verificationList}
+
+## Verification Artifacts
+
+${bulletList(evidence.verificationArtifacts, 'None yet. Add linked verification docs here.')}
 
 ## Impacted Areas
 

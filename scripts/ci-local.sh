@@ -19,5 +19,11 @@ pnpm run test:coverage
 echo "[ci-local] doc relevance"
 bash scripts/harness/check_doc_relevance.sh
 
+echo "[ci-local] evidence contract"
+bash scripts/harness/check_evidence_contract.sh
+
+echo "[ci-local] decision links"
+bash scripts/harness/check_decision_links.sh
+
 echo "[ci-local] harness checks"
 make check
