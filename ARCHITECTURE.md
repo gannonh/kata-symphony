@@ -36,6 +36,8 @@ Language-agnostic architecture reference for implementing `SPEC.md`.
    - `src/tracker/linear/http.ts`
    - `src/tracker/linear/normalize.ts`
    - `src/tracker/linear/client.ts`
+   - `src/tracker/index.ts` is the public adapter surface and should avoid
+     re-exporting low-level GraphQL transport types from `linear/types.ts`.
 4. Execution layer contracts
    - `src/execution/contracts.ts`
 5. Coordination layer contracts
