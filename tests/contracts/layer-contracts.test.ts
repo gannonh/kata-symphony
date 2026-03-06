@@ -6,7 +6,11 @@ import { resolve, dirname } from 'node:path'
 import { createStaticConfigProvider } from '../../src/config/contracts.js'
 import type { TrackerClient } from '../../src/tracker/contracts.js'
 import { createLinearTrackerClient } from '../../src/tracker/index.js'
-import type { WorkspaceManager, AgentRunner } from '../../src/execution/contracts.js'
+import type {
+  WorkspaceManager,
+  AgentRunner,
+  WorkerAttemptRunner,
+} from '../../src/execution/contracts.js'
 import type { Logger } from '../../src/observability/contracts.js'
 import { createNoopOrchestrator } from '../../src/orchestrator/contracts.js'
 import { loadWorkflowDefinition } from '../../src/workflow/index.js'
@@ -37,6 +41,10 @@ describe('layer contract surface', () => {
       async runAttempt() { throw new Error('not implemented') },
     }
 
+    const workerAttemptRunner: WorkerAttemptRunner = {
+      async run() { throw new Error('not implemented') },
+    }
+
     const logger: Logger = {
       info() {},
       error() {},
@@ -48,6 +56,7 @@ describe('layer contract surface', () => {
     expect(workspace.runAfterRun).toBeTypeOf('function')
     expect(workspace.removeWorkspace).toBeTypeOf('function')
     expect(agent.runAttempt).toBeTypeOf('function')
+    expect(workerAttemptRunner.run).toBeTypeOf('function')
     expect(logger.info).toBeTypeOf('function')
   })
 

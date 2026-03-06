@@ -1,6 +1,12 @@
 import { buildEffectiveConfig } from '../config/build-effective-config.js'
 import { createStaticConfigProvider } from '../config/contracts.js'
-import type { AgentRunner, WorkspaceManager } from '../execution/contracts.js'
+import type {
+  AgentRunner,
+  WorkerAttemptRunner,
+  WorkspaceManager,
+} from '../execution/contracts.js'
+import { createAgentSessionClient } from '../execution/agent-runner/index.js'
+import { createWorkerAttemptRunner } from '../execution/worker-attempt/index.js'
 import { createWorkspaceManager } from '../execution/workspace/index.js'
 import type { Logger } from '../observability/contracts.js'
 import { createNoopOrchestrator } from '../orchestrator/contracts.js'
@@ -29,6 +35,7 @@ export interface ServiceBootstrap {
   tracker: TrackerClient
   workspace: WorkspaceManager
   agentRunner: AgentRunner
+  workerAttemptRunner: WorkerAttemptRunner
   logger: Logger
   orchestrator: ReturnType<typeof createNoopOrchestrator>
 }
@@ -92,6 +99,22 @@ export function createService(): ServiceBootstrap {
     },
   }
 
+  const workerAttemptRunner: WorkerAttemptRunner = createWorkerAttemptRunner({
+    workspace,
+    tracker,
+    workflowTemplate: '', // placeholder until workflow config is wired into snapshot schema
+    activeStates: snapshot.tracker.active_states,
+    maxTurns: snapshot.agent.max_turns,
+    sessionClientFactory: (workspacePath) =>
+      createAgentSessionClient({
+        codex: snapshot.codex,
+        workspacePath,
+      }),
+    onCodexEvent(event) {
+      logger.info('worker_attempt_codex_event', event as Record<string, unknown>)
+    },
+  })
+
   const orchestrator = createNoopOrchestrator({
     config,
     tracker,
@@ -100,7 +123,15 @@ export function createService(): ServiceBootstrap {
     logger,
   })
 
-  return { config, tracker, workspace, agentRunner, logger, orchestrator }
+  return {
+    config,
+    tracker,
+    workspace,
+    agentRunner,
+    workerAttemptRunner,
+    logger,
+    orchestrator,
+  }
 }
 
 export async function startService(

@@ -8,6 +8,15 @@ export type {
 } from './prompt/contracts.js'
 export { PROMPT_ERROR_KINDS } from './prompt/contracts.js'
 export type {
+  WorkerAttemptOutcome,
+  WorkerAttemptResult,
+  WorkerAttemptRunner,
+} from './worker-attempt/contracts.js'
+export {
+  WORKER_ATTEMPT_OUTCOME_KINDS,
+  WORKER_ATTEMPT_REASON_CODES,
+} from './worker-attempt/contracts.js'
+export type {
   WorkspaceExecutionErrorCode,
   WorkspaceExecutionErrorContext,
 } from './workspace/errors.js'

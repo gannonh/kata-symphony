@@ -5,6 +5,9 @@ describe('runtime-loadable contract modules', () => {
     const trackerContracts = await import('../../src/tracker/contracts.js')
     const trackerRuntime = await import('../../src/tracker/index.js')
     const executionContracts = await import('../../src/execution/contracts.js')
+    const executionWorkerAttempt = await import(
+      '../../src/execution/worker-attempt/index.js'
+    )
     const executionWorkspace = await import('../../src/execution/workspace/index.js')
     const observabilityContracts = await import(
       '../../src/observability/contracts.js'
@@ -17,6 +20,23 @@ describe('runtime-loadable contract modules', () => {
     expect(typeof trackerRuntime.TrackerIntegrationError).toBe('function')
     expect(executionContracts).toBeTypeOf('object')
     expect(executionContracts.PROMPT_ERROR_KINDS).toBeDefined()
+    expect(executionContracts.WORKER_ATTEMPT_OUTCOME_KINDS).toBeDefined()
+    expect(executionContracts.WORKER_ATTEMPT_REASON_CODES).toBeDefined()
+    expect(executionWorkerAttempt).toBeTypeOf('object')
+    expect(executionWorkerAttempt.WORKER_ATTEMPT_OUTCOME_KINDS).toEqual([
+      'normal',
+      'abnormal',
+    ])
+    expect(executionWorkerAttempt.WORKER_ATTEMPT_REASON_CODES).toEqual([
+      'stopped_non_active_state',
+      'stopped_max_turns_reached',
+      'workspace_error',
+      'before_run_hook_error',
+      'agent_session_startup_error',
+      'prompt_error',
+      'agent_turn_error',
+      'issue_state_refresh_error',
+    ])
     expect(executionWorkspace).toBeTypeOf('object')
     expect(typeof executionWorkspace.createWorkspaceManager).toBe('function')
     expect(observabilityContracts).toBeTypeOf('object')
