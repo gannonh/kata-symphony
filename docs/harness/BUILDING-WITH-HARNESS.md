@@ -67,6 +67,13 @@ Together they prevent the repository from accepting either:
 - code changes with no durable documentation updates, or
 - low-value documentation updates made only to satisfy the docs-sync requirement.
 
+## Agent Guidance
+
+Use the repo-local `symphony-harness-evidence` skill when work touches
+architecture-sensitive paths, harness scripts, or other qualifying multi-file
+changes. The skill exists to make the evidence contract the default behavior
+before hooks fail, not after.
+
 ## Track 2: Runtime harness (product behavior)
 
 1. Enforce workflow/config validation before dispatch

@@ -60,3 +60,25 @@ rules:
       - "documentation"
       - "tests"
     notes: "Harness script changes should update the documented contract they enforce."
+
+  - pattern: ".codex/skills/**"
+    owned_by:
+      - "AGENTS.md"
+      - "docs/harness/BUILDING-WITH-HARNESS.md"
+      - "docs/harness/context-map.yaml"
+    impacted_areas:
+      - "agents"
+      - "documentation"
+      - "harness"
+    notes: "Repo-local skill changes must stay discoverable and aligned with harness rules."
+
+  - pattern: "AGENTS.md"
+    owned_by:
+      - "AGENTS.md"
+      - "docs/harness/BUILDING-WITH-HARNESS.md"
+      - "docs/harness/context-map.yaml"
+    impacted_areas:
+      - "agents"
+      - "documentation"
+      - "harness"
+    notes: "Agent routing changes should stay aligned with the harness guide and context map."
