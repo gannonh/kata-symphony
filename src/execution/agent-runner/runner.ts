@@ -110,6 +110,9 @@ export function createAgentRunner(deps: RunnerDeps) {
         registerPending: (id, resolver) => {
           pending.set(id, resolver)
         },
+        unregisterPending: (id) => {
+          pending.delete(id)
+        },
       })
 
       const cleanup = () => {
@@ -148,7 +151,7 @@ export function createAgentRunner(deps: RunnerDeps) {
           ...startSessionInput,
         })
 
-        const turnCompletionTimeoutMs = Math.min(deps.codex.turn_timeout_ms, 4000)
+        const turnCompletionTimeoutMs = deps.codex.turn_timeout_ms
         await sessionReducer.waitForTurnCompletion(turnCompletionTimeoutMs)
 
         const result = {

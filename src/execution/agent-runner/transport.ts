@@ -1,9 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createLineBuffer } from './line-buffer.js'
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
+import { isObjectRecord } from './utils.js'
 
 export interface ProtocolMessage {
   id?: number

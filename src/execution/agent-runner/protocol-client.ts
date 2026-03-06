@@ -13,6 +13,7 @@ interface ProtocolClientDeps {
   readTimeoutMs: number
   sendLine: (line: string) => void
   registerPending: (id: number, resolver: (value: unknown) => void) => void
+  unregisterPending?: (id: number) => void
 }
 
 interface StartSessionInput {
@@ -35,6 +36,7 @@ export function createProtocolClient(deps: ProtocolClientDeps) {
     const id = nextId++
     return new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
+        deps.unregisterPending?.(id)
         reject(new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.RESPONSE_TIMEOUT))
       }, readTimeoutWithJitterMs)
 

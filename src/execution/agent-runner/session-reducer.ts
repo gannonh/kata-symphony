@@ -3,6 +3,7 @@ import {
   AGENT_RUNNER_ERROR_CODES,
   AgentRunnerError,
 } from './errors.js'
+import { isObjectRecord } from './utils.js'
 
 interface SessionStart {
   threadId: string
@@ -14,10 +15,6 @@ interface UsageTotals {
   input_tokens: number
   output_tokens: number
   total_tokens: number
-}
-
-function isObjectRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
 }
 
 function parseUsage(params: unknown): UsageTotals {
@@ -63,7 +60,11 @@ export function createSessionReducer() {
       latestMessage = JSON.stringify(message)
       latestTimestamp = new Date().toISOString()
 
-      if (message.method !== 'turn/completed') {
+      if (
+        message.method !== 'turn/completed' &&
+        message.method !== 'turn/failed' &&
+        message.method !== 'turn/cancelled'
+      ) {
         return
       }
 

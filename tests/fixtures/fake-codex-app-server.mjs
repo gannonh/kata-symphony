@@ -6,7 +6,12 @@ const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity 
 const write = (obj) => process.stdout.write(`${JSON.stringify(obj)}\n`)
 
 rl.on('line', (line) => {
-  const msg = JSON.parse(line)
+  let msg
+  try {
+    msg = JSON.parse(line)
+  } catch {
+    return
+  }
   if (msg.method === 'initialize') {
     if (mode !== 'no-initialize-response') {
       write({ id: msg.id, result: { serverInfo: { name: 'fake' } } })
