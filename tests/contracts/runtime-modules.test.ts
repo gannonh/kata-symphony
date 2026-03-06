@@ -37,7 +37,21 @@ describe('runtime-loadable contract modules', () => {
   it('exposes orchestrator preflight gate exports', async () => {
     const preflight = await import('../../src/orchestrator/preflight/index.js')
 
+    expect(typeof preflight.isDispatchPreflightFailure).toBe('function')
     expect(typeof preflight.validateDispatchPreflight).toBe('function')
+    expect(typeof preflight.logPreflightFailure).toBe('function')
     expect(typeof preflight.runTickPreflightGate).toBe('function')
+    expect(Object.keys(preflight)).toEqual(
+      expect.arrayContaining([
+        'isDispatchPreflightFailure',
+        'validateDispatchPreflight',
+        'logPreflightFailure',
+        'runTickPreflightGate',
+      ]),
+    )
+    expect(preflight.isDispatchPreflightFailure({ ok: false, errors: [] })).toBe(
+      true,
+    )
+    expect(preflight.isDispatchPreflightFailure({ ok: true })).toBe(false)
   })
 })

@@ -43,8 +43,8 @@ Language-agnostic architecture reference for implementing `SPEC.md`.
 
 ## Canonical Runtime Flow
 
-1. Load and validate workflow/config.
-2. Run startup dispatch preflight before orchestrator boot.
+1. Load workflow content and build resolved runtime config (env/token/path coercion).
+2. Run startup dispatch preflight for dispatch-critical invariants before orchestrator boot.
 3. Reconcile in-flight runs.
 4. Poll active issues from tracker.
 5. Run tick dispatch preflight gate before any dispatch.
@@ -58,6 +58,7 @@ Language-agnostic architecture reference for implementing `SPEC.md`.
 
 1. Startup fail-fast gate
    - `startService` runs `validateDispatchPreflight` before starting the orchestrator.
+   - This preflight validates dispatch-readiness invariants (workflow readability plus required resolved config fields), not baseline config coercion.
    - On failure it logs structured preflight errors for `phase: "startup"` and throws `StartupPreflightError`.
    - `runMain` catches startup errors, reports `Symphony startup failed`, and sets `process.exitCode = 1`.
 2. Per-tick dispatch gate
