@@ -12,7 +12,7 @@
 
 **Skill refs for execution:** `@test-driven-development`, `@verification-before-completion`, `@systematic-debugging`
 
-### Task 1: Scaffold tracker adapter contracts and error surface
+## Task 1: Scaffold tracker adapter contracts and error surface
 
 **Files:**
 - Create: `src/tracker/errors.ts`
@@ -120,7 +120,7 @@ git add tests/tracker/tracker-module-contracts.test.ts src/tracker/errors.ts src
 git commit -m "feat(tracker): scaffold linear adapter error contracts"
 ```
 
-### Task 2: Implement Linear issue normalization contract
+## Task 2: Implement Linear issue normalization contract
 
 **Files:**
 - Create: `src/tracker/linear/normalize.ts`
@@ -239,7 +239,7 @@ git add tests/tracker/linear/normalize.test.ts src/tracker/linear/normalize.ts s
 git commit -m "feat(tracker): implement linear issue normalization contract"
 ```
 
-### Task 3: Add Linear query definitions and variable builders
+## Task 3: Add Linear query definitions and variable builders
 
 **Files:**
 - Create: `src/tracker/linear/queries.ts`
@@ -359,7 +359,7 @@ git add tests/tracker/linear/queries.test.ts src/tracker/linear/queries.ts src/t
 git commit -m "feat(tracker): add linear graphql query contract"
 ```
 
-### Task 4: Implement GraphQL transport with timeout and typed error mapping
+## Task 4: Implement GraphQL transport with timeout and typed error mapping
 
 **Files:**
 - Create: `src/tracker/linear/http.ts`
@@ -482,7 +482,7 @@ git add tests/tracker/linear/http.test.ts src/tracker/linear/http.ts src/tracker
 git commit -m "feat(tracker): add linear graphql transport error mapping"
 ```
 
-### Task 5: Implement `TrackerClient` with pagination and deterministic behavior
+## Task 5: Implement `TrackerClient` with pagination and deterministic behavior
 
 **Files:**
 - Create: `src/tracker/linear/client.ts`
@@ -678,7 +678,7 @@ git add tests/tracker/linear/client.test.ts src/tracker/linear/client.ts src/tra
 git commit -m "feat(tracker): implement linear tracker client pagination and refresh"
 ```
 
-### Task 6: Add integration contract tests and architecture touchpoint
+## Task 6: Add integration contract tests and architecture touchpoint
 
 **Files:**
 - Modify: `tests/contracts/layer-contracts.test.ts`
@@ -741,7 +741,7 @@ git add tests/contracts/layer-contracts.test.ts tests/contracts/runtime-modules.
 git commit -m "test(tracker): wire runtime tracker contract coverage"
 ```
 
-### Task 7: Full verification gate before handoff
+## Task 7: Full verification gate before handoff
 
 **Files:**
 - Modify: `docs/generated/kat-226-verification.md` (create only if your PR evidence flow uses it)

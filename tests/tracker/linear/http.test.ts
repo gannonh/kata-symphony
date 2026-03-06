@@ -78,6 +78,58 @@ describe('linear http transport', () => {
     }
   })
 
+  it('sends authorization header with Bearer prefix', async () => {
+    let capturedHeaders: HeadersInit | undefined
+    const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      capturedHeaders = init?.headers
+      return new Response(JSON.stringify({ data: { ok: true } }), { status: 200 })
+    })
+
+    await runLinearGraphQL({
+      endpoint: 'https://api.linear.app/graphql',
+      apiKey: 'test-token',
+      query: 'query { viewer { id } }',
+      variables: {},
+      fetchImpl,
+    })
+
+    expect(capturedHeaders).toMatchObject({
+      authorization: 'Bearer test-token',
+    })
+  })
+
+  it('maps null response body to linear_unknown_payload', async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response('null', { status: 200, headers: { 'content-type': 'application/json' } }),
+    )
+
+    await expect(
+      runLinearGraphQL({
+        endpoint: 'x',
+        apiKey: 'y',
+        query: 'q',
+        variables: {},
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({ code: 'linear_unknown_payload' })
+  })
+
+  it('maps array response body to linear_unknown_payload', async () => {
+    const fetchImpl = vi.fn(async () =>
+      new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } }),
+    )
+
+    await expect(
+      runLinearGraphQL({
+        endpoint: 'x',
+        apiKey: 'y',
+        query: 'q',
+        variables: {},
+        fetchImpl,
+      }),
+    ).rejects.toMatchObject({ code: 'linear_unknown_payload' })
+  })
+
   it('treats empty graphql errors array as non-failure payload', async () => {
     const response = new Response(
       JSON.stringify({ data: { ok: true }, errors: [] }),

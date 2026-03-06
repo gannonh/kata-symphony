@@ -110,6 +110,12 @@ export function createLinearTrackerClient(
         return []
       }
 
+      if (issueIds.length > 50) {
+        throw createLinearUnknownPayloadError(
+          `fetchIssuesByIds: ${issueIds.length} IDs exceeds single-page limit of 50`,
+        )
+      }
+
       const snapshot = config.getSnapshot()
       const data = await runLinearGraphQL(
         withOptionalFetch(

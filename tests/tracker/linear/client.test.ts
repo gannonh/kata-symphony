@@ -74,6 +74,13 @@ describe('linear tracker client', () => {
     const result = await client.fetchCandidates()
 
     expect(result.map((issue) => issue.id)).toEqual(['1', '2'])
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    const [, secondInit] = fetchImpl.mock.calls[1] ?? []
+    const secondBody = secondInit?.body
+    expect(typeof secondBody).toBe('string')
+    expect(JSON.parse(secondBody as string)).toMatchObject({
+      variables: { after: 'c1' },
+    })
   })
 
   it('throws linear_missing_end_cursor when hasNextPage=true and cursor missing', async () => {
@@ -94,6 +101,17 @@ describe('linear tracker client', () => {
     await expect(client.fetchCandidates()).rejects.toMatchObject({
       code: 'linear_missing_end_cursor',
     })
+  })
+
+  it('rejects fetchIssuesByIds when ids exceed single-page limit', async () => {
+    const fetchImpl = vi.fn()
+    const client = createLinearTrackerClient(testConfig(), fetchImpl)
+    const ids = Array.from({ length: 51 }, (_, i) => `id-${i}`)
+
+    await expect(client.fetchIssuesByIds(ids)).rejects.toMatchObject({
+      code: 'linear_unknown_payload',
+    })
+    expect(fetchImpl).not.toHaveBeenCalled()
   })
 
   it('fetches issues by ids when ids are present', async () => {

@@ -1,8 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import {
-  TrackerIntegrationError,
-  normalizeLinearIssue,
-} from '../../../src/tracker/index.js'
+import { normalizeLinearIssue } from '../../../src/tracker/index.js'
 
 describe('linear normalization', () => {
   it('normalizes labels, blockers, priority and timestamps', () => {
@@ -95,22 +92,18 @@ describe('linear normalization', () => {
   })
 
   it('throws a linear unknown payload error when required issue fields are missing', () => {
-    try {
+    expect(() =>
       normalizeLinearIssue({
         id: 'lin-1',
         identifier: '   ',
         title: 'Tracker work',
         state: { name: 'Todo' },
-      })
-      throw new Error('expected normalizeLinearIssue to throw')
-    } catch (error) {
-      expect(error).toBeInstanceOf(TrackerIntegrationError)
-      expect((error as TrackerIntegrationError).code).toBe(
-        'linear_unknown_payload',
-      )
-      expect((error as TrackerIntegrationError).message).toBe(
-        'Linear payload invalid: issue node missing required fields',
-      )
-    }
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        code: 'linear_unknown_payload',
+        message: 'Linear payload invalid: issue node missing required fields',
+      }),
+    )
   })
 })

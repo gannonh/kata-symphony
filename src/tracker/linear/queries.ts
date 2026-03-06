@@ -11,7 +11,6 @@ fragment IssueFields on Issue {
   updatedAt
   state { name }
   labels { nodes { name } }
-  issueRelations { nodes { type issue { id identifier state { name } } } }
   inverseRelations { nodes { type issue { id identifier state { name } } } }
 }
 `
@@ -36,7 +35,7 @@ ${LINEAR_ISSUE_FIELDS_FRAGMENT}
 export const LINEAR_TERMINAL_QUERY = LINEAR_CANDIDATES_QUERY
 
 export const LINEAR_ISSUES_BY_IDS_QUERY = `
-query IssuesByIds($issueIds: [ID!]) {
+query IssuesByIds($issueIds: [ID!]!) {
   issues(filter: { id: { in: $issueIds } }) {
     nodes { ...IssueFields }
   }
