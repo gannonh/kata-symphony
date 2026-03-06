@@ -16,6 +16,7 @@ Build and operate `Symphony` from `SPEC.md` with an agent-first workflow.
 6. Quality baseline: `QUALITY_SCORE.md`
 7. Harness rules: `docs/references/harness-engineering.md`
 8. Execution workflow contract: `WORKFLOW.md`
+9. Linear Project: `https://linear.app/kata-sh/project/symphony-service-v1-spec-execution-5f0020cb5273`
 
 ## Working Rules
 
