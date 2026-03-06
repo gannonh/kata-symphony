@@ -16,5 +16,8 @@ pnpm run test:integration
 echo "[ci-local] coverage"
 pnpm run test:coverage
 
+echo "[ci-local] doc relevance"
+bash scripts/harness/check_doc_relevance.sh
+
 echo "[ci-local] harness checks"
 make check

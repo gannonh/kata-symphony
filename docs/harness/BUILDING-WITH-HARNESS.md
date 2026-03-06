@@ -13,6 +13,7 @@ Use harness engineering while building Symphony, and ship Symphony with the same
 3. Scripted repository contract checks
 4. CI workflow that runs harness checks on every PR
 5. Evidence-backed change artifacts for meaningful repo work
+6. Doc relevance checks that reject metadata-only compliance
 
 ## Evidence Contract
 
@@ -51,6 +52,20 @@ This contract is intended to make the following fail loudly:
 - touching unrelated docs to satisfy the docs-sync gate,
 - claiming verification without command evidence,
 - skipping architecture-sensitive doc updates without a waiver.
+
+### Current build-time gates
+
+The build-time harness currently layers two document-focused checks:
+
+1. `check_docs_sync.sh`
+   - Ensures code, spec, or workflow changes are accompanied by a durable doc update.
+2. `check_doc_relevance.sh`
+   - Ensures canonical doc changes are substantive and aligned with the evidence-declared context.
+
+Together they prevent the repository from accepting either:
+
+- code changes with no durable documentation updates, or
+- low-value documentation updates made only to satisfy the docs-sync requirement.
 
 ## Track 2: Runtime harness (product behavior)
 
