@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 describe('runtime-loadable contract modules', () => {
   it('loads tracker, execution, observability, and workflow contract modules', async () => {
     const trackerContracts = await import('../../src/tracker/contracts.js')
+    const trackerRuntime = await import('../../src/tracker/index.js')
     const executionContracts = await import('../../src/execution/contracts.js')
     const executionWorkspace = await import('../../src/execution/workspace/index.js')
     const observabilityContracts = await import(
@@ -12,6 +13,8 @@ describe('runtime-loadable contract modules', () => {
 
     expect(trackerContracts).toBeTypeOf('object')
     expect(Object.keys(trackerContracts)).toEqual([])
+    expect(typeof trackerRuntime.createLinearTrackerClient).toBe('function')
+    expect(typeof trackerRuntime.TrackerIntegrationError).toBe('function')
     expect(executionContracts).toBeTypeOf('object')
     expect(executionContracts.PROMPT_ERROR_KINDS).toBeDefined()
     expect(executionWorkspace).toBeTypeOf('object')
