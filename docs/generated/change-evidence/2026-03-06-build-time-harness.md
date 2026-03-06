@@ -69,16 +69,20 @@ branch-base validation.
 
 ## Canonical Docs Updated
 
-- `AGENTS.md`
-- `PLANS.md`
-- `QUALITY_SCORE.md`
-- `docs/generated/README.md`
 - `docs/harness/BUILDING-WITH-HARNESS.md`
 - `docs/harness/change-evidence-schema.md`
-- `docs/harness/context-map.yaml`
 
 ## Waivers
 
+- `AGENTS.md`: The repo map changed to register the new harness skill, but
+  subsystem ownership for this branch remains governed by the harness docs.
+- `PLANS.md`: The execution tracker changed as part of the rollout record, but
+  the branch-level owning docs for the repair work remain the harness contracts.
+- `QUALITY_SCORE.md`: Quality-score updates recorded the rollout milestone, but
+  the review-fix behavior is governed by the harness contract docs.
+- `docs/harness/context-map.yaml`: The context map itself changed during the
+  rollout, but the follow-up review fixes did not alter subsystem ownership
+  rules.
 - `SECURITY.md`: The rollout and review fixes tightened build-time harness rules
   but did not change the repository security posture itself.
 - `RELIABILITY.md`: The review fixes tightened local branch validation without
