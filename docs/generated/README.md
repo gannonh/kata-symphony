@@ -8,5 +8,7 @@ Store generated documentation, reports, and snapshots here.
 
 - `docs/generated/change-evidence/` stores machine-readable and human-readable
   change evidence for qualifying harness work.
+- Branch- or rollout-level evidence can summarize multiple task-scoped artifacts
+  when a feature lands as a sequence of small commits.
 - Verification summaries can live alongside other generated artifacts in
   `docs/generated/`.
