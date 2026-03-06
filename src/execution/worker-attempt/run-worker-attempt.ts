@@ -189,7 +189,7 @@ export function createWorkerAttemptRunner(
               return
             }
 
-            if (!activeStates.has(currentIssue.state ? normalizeIssueState(currentIssue.state) : '')) {
+            if (!activeStates.has(normalizeIssueState(currentIssue.state ?? ''))) {
               attemptStatus = 'succeeded'
               outcome = createNormalOutcome(
                 'stopped_non_active_state',

@@ -116,6 +116,39 @@ describe('worker attempt runner', () => {
     expect(deps.runAfterRun).toHaveBeenCalledTimes(1)
   })
 
+  it('treats a null issue state as non-active', async () => {
+    const deps = createBaseDeps()
+
+    const runner = createWorkerAttemptRunner({
+      workspace: {
+        ensureWorkspace: deps.ensureWorkspace,
+        runBeforeRun: deps.runBeforeRun,
+        runAfterRun: deps.runAfterRun,
+      },
+      tracker: {
+        fetchIssuesByIds: vi.fn().mockResolvedValue([{ ...issue, state: null }]),
+      },
+      sessionClientFactory: () => ({
+        startSession: deps.startSession,
+        runTurn: deps.runTurn,
+        stopSession: deps.stopSession,
+        getLatestSession: deps.getLatestSession,
+      }),
+      workflowTemplate: 'Issue {{ issue.identifier }}',
+      activeStates: ['todo', 'in progress'],
+      maxTurns: 3,
+    })
+
+    const result = await runner.run(issue, null)
+
+    expect(result.outcome).toMatchObject({
+      kind: 'normal',
+      reason_code: 'stopped_non_active_state',
+      turns_executed: 1,
+      final_issue_state: null,
+    })
+  })
+
   it('reuses the same thread for continuation turns until the issue becomes non-active', async () => {
     const deps = createBaseDeps()
     const fetchIssuesByIds = vi
