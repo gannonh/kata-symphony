@@ -51,16 +51,16 @@ Use this single workflow in this repo.
    - `superpowers:verification-before-completion`
    - `user-acceptance`
    - `superpowers:finishing-a-development-branch`
+
+6. Close ticket lifecycle
+   - `kata-linear end KAT-<number>`
   
-6. PR workflow
+7. PR workflow
    - `pull-requests` create PR
    - `gh-address-comments` for PR comments
    - `gh-fix-ci` for CI failures
    - `pr-review-plugin:pr-review` for PR reviews
    - `pull-requests` merge pr when approved and CI is green
-
-7. Close ticket lifecycle
-   - `kata-linear end KAT-<number>`
 
 ## Optional Domain Skills
 
