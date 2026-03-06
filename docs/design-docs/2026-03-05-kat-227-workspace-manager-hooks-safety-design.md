@@ -111,13 +111,15 @@ Safety guarantees:
 
 - Reject out-of-root candidates with typed error (`workspace_path_outside_root`).
 - Reject non-directory collisions at target path with typed error (`workspace_path_not_directory`).
+- Reject symlinked workspace directories with typed error (`workspace_path_symlink`) using `lstat`.
+- Validate realpath containment for existing directories to prevent symlink-based root escape.
 - Returned `Workspace.path` is absolute and safe to use as `cwd`.
 
 ### 4. Hook Execution Semantics
 
 Hook runner contract:
 
-- Executes scripts via `sh -lc <script>` with `cwd = workspace.path`
+- Executes scripts via `sh -c <script>` with `cwd = workspace.path`
 - Applies `hooks.timeout_ms` with kill-on-timeout behavior
 - Captures exit status/stdout/stderr summary for logging (truncated)
 
@@ -173,7 +175,7 @@ Do not log secrets or full raw hook output.
 3. Workspace key sanitization with invalid characters, empty string, and dot-segment edge cases.
 4. Out-of-root path rejection returns typed containment error.
 5. Non-directory collision at workspace path returns typed error.
-6. `after_create` runs only on first creation and is fatal on failure/timeout.
+6. `after_create` runs only on first creation and is fatal on failure/timeout; directory is rolled back on failure.
 7. `before_run` failure/timeout aborts attempt path.
 8. `after_run` and `before_remove` failures/timeouts are logged and ignored.
 9. `removeWorkspace` deletes existing workspace and is deterministic by identifier.

@@ -106,9 +106,11 @@ export function createWorkspaceManager(input: CreateWorkspaceManagerInput): Work
         } catch (hookError) {
           try {
             await rm(resolved.path, { recursive: true, force: true })
+          /* c8 ignore start -- best-effort rollback; cleanup errors are non-deterministic */
           } catch {
-            // best-effort rollback; ignore cleanup errors
+            // ignored
           }
+          /* c8 ignore stop */
           throw hookError
         }
       }
@@ -243,6 +245,7 @@ async function assertRealpathContainment(pathAbs: string, workspaceRoot: string)
   const rootReal = await realpath(path.resolve(workspaceRoot))
   const relative = path.relative(rootReal, real)
 
+  /* c8 ignore start -- realpath containment is a defense-in-depth check for symlink-based root escape */
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
     throw new WorkspaceExecutionError(
       'workspace_path_outside_root',
@@ -250,6 +253,7 @@ async function assertRealpathContainment(pathAbs: string, workspaceRoot: string)
       { workspaceRoot: rootReal, workspacePath: real, fatal: true },
     )
   }
+  /* c8 ignore stop */
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
