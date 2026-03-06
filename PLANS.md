@@ -15,6 +15,7 @@ Last reviewed: 2026-03-06
    - this repository while building Symphony
    - Symphony runtime operation going forward
 7. KAT-228 codex app-server runner review follow-ups (PR #11) addressed and verified locally
+8. KAT-229 Worker attempt pipeline (PR #13) review feedback addressed: maxTurns guard, replaceAll, resetForNextTurn stale fields, turn failure propagation
 
 ## Plan Storage
 
