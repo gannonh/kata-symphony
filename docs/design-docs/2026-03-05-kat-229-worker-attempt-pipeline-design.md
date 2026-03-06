@@ -62,6 +62,17 @@ Without this integration seam, `KAT-230` cannot dispatch real work safely.
 4. Continuation guidance must not resend the full workflow prompt body on every turn (Section 7 guidance + Section 10 continuation semantics).
 5. `after_run` remains best-effort and non-fatal on all post-workspace failure/timeout paths.
 
+## Implementation Status
+
+As of March 6, 2026, the repository implements the worker-attempt execution slice described here:
+
+- execution-layer worker-attempt contracts and prompt helpers exist
+- agent-runner exposes a reusable session lifecycle with repeated `runTurn()` on one thread
+- worker-attempt execution loops across turns, refreshes tracker state between turns, and returns deterministic `stopped_non_active_state`, `stopped_max_turns_reached`, and abnormal retry reason codes
+- bootstrap wiring now constructs a concrete `workerAttemptRunner`
+
+Residual work after this design implementation is verification-oriented rather than architectural: full repository harness evidence, integration follow-through in downstream orchestrator tickets, and any follow-up fixes discovered by broader checks.
+
 ## Approaches Considered
 
 1. Keep all worker logic inside `createAgentRunner.runAttempt`
