@@ -3,6 +3,8 @@ export const AGENT_RUNNER_ERROR_CODES = {
   RESPONSE_ERROR: 'response_error',
   SESSION_NOT_STARTED: 'session_not_started',
   SESSION_ALREADY_STARTED: 'session_already_started',
+  TURN_FAILED: 'turn_failed',
+  TURN_CANCELLED: 'turn_cancelled',
 } as const
 
 export type AgentRunnerErrorCode =

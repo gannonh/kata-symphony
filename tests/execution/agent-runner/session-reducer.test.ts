@@ -66,6 +66,9 @@ describe('session reducer', () => {
     )
     expect(session.turn_count).toBe(2)
     expect(session.turn_id).toBe('turn-2')
+    expect(session.last_codex_event).toBeNull()
+    expect(session.last_codex_message).toBeNull()
+    expect(session.last_codex_timestamp).toBeNull()
 
     const waiting = reducer.waitForTurnCompletion(50)
     setTimeout(() => {
@@ -161,11 +164,11 @@ describe('session reducer', () => {
     expect(session.codex_total_tokens).toBe(0)
   })
 
-  it('resolves immediately on turn/failed', async () => {
+  it('throws turn_failed on turn/failed', async () => {
     const reducer = createSessionReducer()
     reducer.acceptMessage({ method: 'turn/failed', params: {} })
 
-    await expect(reducer.waitForTurnCompletion(5)).resolves.toBeUndefined()
+    await expect(reducer.waitForTurnCompletion(5)).rejects.toThrow('turn_failed')
     const session = reducer.toLiveSession(
       { threadId: 'thread-1', turnId: 'turn-1', sessionId: 'thread-1-turn-1' },
       1,
@@ -174,11 +177,11 @@ describe('session reducer', () => {
     expect(session.last_codex_event).toBe('turn/failed')
   })
 
-  it('resolves immediately on turn/cancelled', async () => {
+  it('throws turn_cancelled on turn/cancelled', async () => {
     const reducer = createSessionReducer()
     reducer.acceptMessage({ method: 'turn/cancelled', params: {} })
 
-    await expect(reducer.waitForTurnCompletion(5)).resolves.toBeUndefined()
+    await expect(reducer.waitForTurnCompletion(5)).rejects.toThrow('turn_cancelled')
     const session = reducer.toLiveSession(
       { threadId: 'thread-1', turnId: 'turn-1', sessionId: 'thread-1-turn-1' },
       1,

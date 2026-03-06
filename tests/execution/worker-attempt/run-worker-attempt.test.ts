@@ -556,7 +556,7 @@ describe('worker attempt runner', () => {
     expect(deps.runAfterRun).toHaveBeenCalledTimes(1)
   })
 
-  it('returns the default abnormal outcome when no turns are permitted', async () => {
+  it('returns stopped_max_turns_reached when no turns are permitted', async () => {
     const deps = createBaseDeps()
 
     const runner = createWorkerAttemptRunner({
@@ -587,10 +587,10 @@ describe('worker attempt runner', () => {
     })
     expect(result.attempt.error).toBeUndefined()
     expect(result.outcome).toMatchObject({
-      kind: 'abnormal',
-      reason_code: 'workspace_error',
+      kind: 'normal',
+      reason_code: 'stopped_max_turns_reached',
       turns_executed: 0,
-      final_issue_state: null,
+      final_issue_state: 'In Progress',
     })
     expect(deps.startSession).not.toHaveBeenCalled()
     expect(deps.runTurn).not.toHaveBeenCalled()

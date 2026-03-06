@@ -102,7 +102,7 @@ export function createService(): ServiceBootstrap {
   const workerAttemptRunner: WorkerAttemptRunner = createWorkerAttemptRunner({
     workspace,
     tracker,
-    workflowTemplate: '',
+    workflowTemplate: '', // placeholder until workflow config is wired into snapshot schema
     activeStates: snapshot.tracker.active_states,
     maxTurns: snapshot.agent.max_turns,
     sessionClientFactory: (workspacePath) =>

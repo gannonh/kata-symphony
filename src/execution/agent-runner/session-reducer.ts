@@ -75,26 +75,34 @@ export function createSessionReducer() {
     resetForNextTurn() {
       completed = false
       usage = { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
+      latestEvent = null
+      latestMessageRaw = null
+      latestTimestamp = null
       completionPromise = new Promise<void>((resolve) => {
         completionResolve = resolve
       })
     },
 
     async waitForTurnCompletion(timeoutMs: number) {
-      if (completed) {
-        return
+      if (!completed) {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            reject(new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.RESPONSE_TIMEOUT))
+          }, timeoutMs)
+
+          completionPromise.then(() => {
+            clearTimeout(timer)
+            resolve()
+          })
+        })
       }
 
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          reject(new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.RESPONSE_TIMEOUT))
-        }, timeoutMs)
-
-        completionPromise.then(() => {
-          clearTimeout(timer)
-          resolve()
-        })
-      })
+      if (latestEvent === 'turn/failed') {
+        throw new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.TURN_FAILED)
+      }
+      if (latestEvent === 'turn/cancelled') {
+        throw new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.TURN_CANCELLED)
+      }
     },
 
     toLiveSession(session: SessionStart, pid: number | undefined, turnCount: number): LiveSession {

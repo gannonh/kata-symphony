@@ -116,6 +116,11 @@ export function createWorkerAttemptRunner(
           runtimeState.client = deps.sessionClientFactory(runtimeState.workspace.path)
           let threadId: string | null = null
 
+          if (deps.maxTurns <= 0) {
+            outcome = createNormalOutcome('stopped_max_turns_reached', 0, issue.state)
+            return
+          }
+
           for (let turnNumber = 1; turnNumber <= deps.maxTurns; turnNumber += 1) {
             const prompt = await buildTurnPrompt({
               template: deps.workflowTemplate,

@@ -23,7 +23,7 @@ export async function buildTurnPrompt(input: BuildTurnPromptInput) {
   }
 
   return builder.build({
-    template: CONTINUATION_TEMPLATE.replace('{{ turn_number }}', String(input.turnNumber)).replace(
+    template: CONTINUATION_TEMPLATE.replaceAll('{{ turn_number }}', String(input.turnNumber)).replaceAll(
       '{{ max_turns }}',
       String(input.maxTurns),
     ),
