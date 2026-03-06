@@ -13,7 +13,6 @@ interface ProtocolClientDeps {
   readTimeoutMs: number
   sendLine: (line: string) => void
   registerPending: (id: number, resolver: (value: unknown) => void) => void
-  now: () => number
 }
 
 interface StartSessionInput {

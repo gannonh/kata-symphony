@@ -10,7 +10,7 @@ export function createLineBuffer(): LineBuffer {
     push(chunk: string) {
       const input = remainder + chunk
       const lines = input.split('\n')
-      remainder = lines.pop() ?? ''
+      remainder = lines.pop() as string
       return lines.map((line) => line.replace(/\r$/, ''))
     },
     flushRemainder() {

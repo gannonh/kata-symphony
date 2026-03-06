@@ -36,10 +36,6 @@ interface RunnerDeps {
 }
 
 function toErrorMessage(error: unknown): string {
-  if (typeof error === 'string') {
-    return error
-  }
-
   if (error instanceof AgentRunnerError) {
     return error.code
   }
@@ -114,8 +110,12 @@ export function createAgentRunner(deps: RunnerDeps) {
         registerPending: (id, resolver) => {
           pending.set(id, resolver)
         },
-        now: () => Date.now(),
       })
+
+      const cleanup = () => {
+        transport.stop()
+        child.kill()
+      }
 
       try {
         const startSessionInput: {
@@ -151,7 +151,7 @@ export function createAgentRunner(deps: RunnerDeps) {
         const turnCompletionTimeoutMs = Math.min(deps.codex.turn_timeout_ms, 4000)
         await sessionReducer.waitForTurnCompletion(turnCompletionTimeoutMs)
 
-        return {
+        const result = {
           attempt: {
             issue_id: issue.id,
             issue_identifier: issue.identifier,
@@ -162,8 +162,10 @@ export function createAgentRunner(deps: RunnerDeps) {
           },
           session: sessionReducer.toLiveSession(sessionStart, child.pid),
         }
+        cleanup()
+        return result
       } catch (error) {
-        return {
+        const result = {
           attempt: {
             issue_id: issue.id,
             issue_identifier: issue.identifier,
@@ -175,11 +177,8 @@ export function createAgentRunner(deps: RunnerDeps) {
           },
           session: null,
         }
-      } finally {
-        transport.stop()
-        if (!child.killed) {
-          child.kill()
-        }
+        cleanup()
+        return result
       }
     },
   }

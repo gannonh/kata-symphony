@@ -43,7 +43,7 @@ export function createSessionReducer() {
   let latestTimestamp: string | null = null
   let usage: UsageTotals = { input_tokens: 0, output_tokens: 0, total_tokens: 0 }
   let completed = false
-  let completionResolve: (() => void) | null = null
+  let completionResolve!: () => void
 
   const completionPromise = new Promise<void>((resolve) => {
     completionResolve = resolve
@@ -69,7 +69,7 @@ export function createSessionReducer() {
 
       usage = parseUsage(message.params)
       completed = true
-      completionResolve?.()
+      completionResolve()
     },
 
     async waitForTurnCompletion(timeoutMs: number) {
