@@ -16,6 +16,7 @@ branch-base validation.
 - `QUALITY_SCORE.md`
 - `docs/generated/README.md`
 - `docs/generated/build-time-harness-verification.md`
+- `docs/generated/change-evidence/.gitkeep`
 - `docs/generated/change-evidence/2026-03-06-build-time-harness.json`
 - `docs/generated/change-evidence/2026-03-06-build-time-harness.md`
 - `docs/generated/change-evidence/2026-03-06-harness-contract-task-4.json`
@@ -32,6 +33,8 @@ branch-base validation.
 - `docs/harness/BUILDING-WITH-HARNESS.md`
 - `docs/harness/change-evidence-schema.md`
 - `docs/harness/context-map.yaml`
+- `docs/plans/2026-03-06-build-time-harness-evidence-contract-design.md`
+- `docs/plans/2026-03-06-build-time-harness-evidence-contract-implementation-plan.md`
 - `package.json`
 - `scripts/ci-local.sh`
 - `scripts/harness/check_decision_links.sh`
