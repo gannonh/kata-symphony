@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createService, startService } from '../../src/bootstrap/service.js'
 
 describe('service bootstrap wiring', () => {
@@ -32,5 +32,25 @@ describe('service bootstrap wiring', () => {
 
     expect(workspace.workspace_key).toBe('KAT-221_fix_scope')
     expect(workspace.path).toContain('/tmp/symphony/KAT-221_fix_scope')
+  })
+
+  it('creates independent logger instances for each service bootstrap', () => {
+    const first = createService()
+    const second = createService()
+
+    expect(first.logger).not.toBe(second.logger)
+
+    const firstLoggerError = vi.fn()
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    try {
+      first.logger.error = firstLoggerError
+      second.logger.error('second logger message')
+
+      expect(firstLoggerError).not.toHaveBeenCalled()
+      expect(consoleErrorSpy).toHaveBeenCalledWith('second logger message', {})
+    } finally {
+      consoleErrorSpy.mockRestore()
+    }
   })
 })

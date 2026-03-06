@@ -13,13 +13,15 @@ import {
 import type { TrackerClient } from '../tracker/contracts.js'
 import { loadWorkflowDefinition } from '../workflow/index.js'
 
-const logger: Logger = {
-  info(message, context) {
-    console.log(message, context ?? {})
-  },
-  error(message, context) {
-    console.error(message, context ?? {})
-  },
+function createLogger(): Logger {
+  return {
+    info(message, context) {
+      console.log(message, context ?? {})
+    },
+    error(message, context) {
+      console.error(message, context ?? {})
+    },
+  }
 }
 
 export interface ServiceBootstrap {
@@ -42,13 +44,7 @@ export class StartupPreflightError extends Error {
   }
 }
 
-export interface StartServiceOptions {
-  runStartupPreflight?: (
-    service: ServiceBootstrap,
-  ) => Promise<DispatchPreflightResult>
-}
-
-async function runDefaultStartupPreflight(
+async function runStartupPreflight(
   service: ServiceBootstrap,
 ): Promise<DispatchPreflightResult> {
   return validateDispatchPreflight({
@@ -58,6 +54,7 @@ async function runDefaultStartupPreflight(
 }
 
 export function createService(): ServiceBootstrap {
+  const logger = createLogger()
   const config = createStaticConfigProvider(
     buildEffectiveConfig(
       {
@@ -113,10 +110,7 @@ export function createService(): ServiceBootstrap {
 
 export async function startService(
   service = createService(),
-  options: StartServiceOptions = {},
 ): Promise<void> {
-  const runStartupPreflight =
-    options.runStartupPreflight ?? runDefaultStartupPreflight
   const preflight = await runStartupPreflight(service)
 
   if (preflight.ok === false) {

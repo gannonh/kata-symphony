@@ -1,6 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
-import type { DispatchPreflightError } from '../../src/orchestrator/preflight/index.js'
-import { createService, startService } from '../../src/bootstrap/service.js'
+import { createService, startService, StartupPreflightError } from '../../src/bootstrap/service.js'
 
 describe('startService startup preflight gate', () => {
   let originalApiKey: string | undefined
@@ -26,24 +25,51 @@ describe('startService startup preflight gate', () => {
     service.orchestrator.start = orchestratorStartSpy
     service.logger.error = loggerErrorSpy
 
-    const errors: DispatchPreflightError[] = [
-      {
-        code: 'tracker_api_key_missing',
-        message: 'tracker.api_key is required after resolution',
-        source: 'config',
-        field: 'tracker.api_key',
+    vi.spyOn(service.config, 'getSnapshot').mockReturnValue({
+      tracker: {
+        kind: 'linear',
+        api_key: '',
+        project_slug: 'bootstrap',
       },
-    ]
+      codex: {
+        command: 'codex app-server',
+      },
+    } as ReturnType<typeof service.config.getSnapshot>)
 
-    await expect(
-      startService(service, {
-        runStartupPreflight: async () => ({ ok: false, errors }),
-      }),
-    ).rejects.toMatchObject({
+    const startupAttempt = startService(service)
+
+    await expect(startupAttempt).rejects.toBeInstanceOf(
+      StartupPreflightError,
+    )
+
+    await expect(startupAttempt).rejects.toMatchObject({
       code: 'dispatch_preflight_failed',
+      message: 'startup preflight failed',
+      errors: [
+        expect.objectContaining({
+          code: 'tracker_api_key_missing',
+          source: 'config',
+          field: 'tracker.api_key',
+        }),
+      ],
     })
 
     expect(orchestratorStartSpy).not.toHaveBeenCalled()
     expect(loggerErrorSpy).toHaveBeenCalledTimes(1)
+    expect(loggerErrorSpy).toHaveBeenCalledWith(
+      'Dispatch preflight validation failed',
+      expect.objectContaining({
+        phase: 'startup',
+        error_codes: ['tracker_api_key_missing'],
+        errors: [
+          expect.objectContaining({
+            code: 'tracker_api_key_missing',
+            source: 'config',
+            field: 'tracker.api_key',
+            message: 'tracker.api_key is required after resolution',
+          }),
+        ],
+      }),
+    )
   })
 })
