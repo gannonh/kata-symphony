@@ -16,13 +16,32 @@ export type WorkerAttemptOutcomeKind =
   (typeof WORKER_ATTEMPT_OUTCOME_KINDS)[number]
 export type WorkerAttemptReasonCode =
   (typeof WORKER_ATTEMPT_REASON_CODES)[number]
+export type WorkerAttemptNormalReasonCode =
+  | 'stopped_non_active_state'
+  | 'stopped_max_turns_reached'
+export type WorkerAttemptAbnormalReasonCode = Exclude<
+  WorkerAttemptReasonCode,
+  WorkerAttemptNormalReasonCode
+>
 
-export interface WorkerAttemptOutcome {
-  kind: WorkerAttemptOutcomeKind
-  reason_code: WorkerAttemptReasonCode
+interface WorkerAttemptOutcomeBase {
   turns_executed: number
   final_issue_state: string | null
 }
+
+export interface WorkerAttemptNormalOutcome extends WorkerAttemptOutcomeBase {
+  kind: 'normal'
+  reason_code: WorkerAttemptNormalReasonCode
+}
+
+export interface WorkerAttemptAbnormalOutcome extends WorkerAttemptOutcomeBase {
+  kind: 'abnormal'
+  reason_code: WorkerAttemptAbnormalReasonCode
+}
+
+export type WorkerAttemptOutcome =
+  | WorkerAttemptNormalOutcome
+  | WorkerAttemptAbnormalOutcome
 
 export interface WorkerAttemptResult {
   attempt: RunAttempt

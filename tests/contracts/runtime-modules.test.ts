@@ -27,6 +27,16 @@ describe('runtime-loadable contract modules', () => {
       'normal',
       'abnormal',
     ])
+    expect(executionWorkerAttempt.WORKER_ATTEMPT_REASON_CODES).toEqual([
+      'stopped_non_active_state',
+      'stopped_max_turns_reached',
+      'workspace_error',
+      'before_run_hook_error',
+      'agent_session_startup_error',
+      'prompt_error',
+      'agent_turn_error',
+      'issue_state_refresh_error',
+    ])
     expect(executionWorkspace).toBeTypeOf('object')
     expect(typeof executionWorkspace.createWorkspaceManager).toBe('function')
     expect(observabilityContracts).toBeTypeOf('object')
