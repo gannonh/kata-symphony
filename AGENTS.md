@@ -50,9 +50,9 @@ Use this single workflow in this repo.
 5. Verify before claiming completion
    - `superpowers:verification-before-completion`
    - `user-acceptance`
-   - `superpowers:finishing-a-development-branch`
 
 6. Close ticket lifecycle
+   - `superpowers:finishing-a-development-branch`
    - `kata-linear end KAT-<number>`
   
 7. PR workflow
