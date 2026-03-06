@@ -77,15 +77,17 @@ export function createSessionReducer() {
         return
       }
 
-      await Promise.race([
-        completionPromise,
-        new Promise<void>((_, reject) => {
-          const timer = setTimeout(() => {
-            clearTimeout(timer)
-            reject(new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.RESPONSE_TIMEOUT))
-          }, timeoutMs)
-        }),
-      ])
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          clearTimeout(timer)
+          reject(new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.RESPONSE_TIMEOUT))
+        }, timeoutMs)
+
+        completionPromise.then(() => {
+          clearTimeout(timer)
+          resolve()
+        }, reject)
+      })
     },
 
     toLiveSession(session: SessionStart, pid: number | undefined): LiveSession {
