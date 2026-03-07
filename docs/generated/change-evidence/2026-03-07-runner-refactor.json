@@ -1,0 +1,45 @@
+{
+  "topic": "runner-refactor",
+  "summary": "Simplify child process event handler wiring and inline single-use variable in agent runner.",
+  "changedFiles": [
+    "src/execution/agent-runner/runner.ts",
+    "docs/generated/change-evidence/2026-03-07-runner-refactor.json",
+    "docs/generated/change-evidence/2026-03-07-runner-refactor.md"
+  ],
+  "contextLoaded": [
+    "ARCHITECTURE.md",
+    "src/execution/agent-runner/runner.ts"
+  ],
+  "decisionArtifacts": [
+    "docs/generated/change-evidence/2026-03-07-runner-refactor.md"
+  ],
+  "canonicalDocsUpdated": [],
+  "waivers": [
+    {
+      "doc": "ARCHITECTURE.md",
+      "reason": "No architectural change; minor refactor removing wrapper functions and inlining a variable."
+    },
+    {
+      "doc": "SECURITY.md",
+      "reason": "No security posture change."
+    },
+    {
+      "doc": "RELIABILITY.md",
+      "reason": "No reliability posture change; behavior is identical."
+    }
+  ],
+  "verification": [
+    {
+      "command": "pnpm run typecheck",
+      "result": "pass"
+    },
+    {
+      "command": "pnpm run lint",
+      "result": "pass"
+    }
+  ],
+  "verificationArtifacts": [],
+  "impactedAreas": [
+    "architecture"
+  ]
+}

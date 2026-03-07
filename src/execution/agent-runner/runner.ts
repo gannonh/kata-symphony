@@ -72,26 +72,16 @@ function createChildFailureSignal(child: ChildProcess) {
     rejectFailure = reject
   })
 
-  const onError = () => {
-    fail()
-  }
-  const onExit = () => {
-    fail()
-  }
-  const onClose = () => {
-    fail()
-  }
-
-  child.once('error', onError)
-  child.once('exit', onExit)
-  child.once('close', onClose)
+  child.once('error', fail)
+  child.once('exit', fail)
+  child.once('close', fail)
 
   return {
     failure,
     stop() {
-      child.off('error', onError)
-      child.off('exit', onExit)
-      child.off('close', onClose)
+      child.off('error', fail)
+      child.off('exit', fail)
+      child.off('close', fail)
     },
   }
 }
@@ -197,9 +187,8 @@ export function createAgentRunner(deps: RunnerDeps) {
           childFailure.failure,
         ])
 
-        const turnCompletionTimeoutMs = deps.codex.turn_timeout_ms
         await Promise.race([
-          sessionReducer.waitForTurnCompletion(turnCompletionTimeoutMs),
+          sessionReducer.waitForTurnCompletion(deps.codex.turn_timeout_ms),
           childFailure.failure,
         ])
 
