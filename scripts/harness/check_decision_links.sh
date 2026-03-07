@@ -9,7 +9,10 @@ source "${SCRIPT_DIR}/common.sh"
 
 BASE_REF="${1:-}"
 if [[ -z "$BASE_REF" ]]; then
-  BASE_REF="$(harness_resolve_base_ref || true)"
+  BASE_REF="$(harness_resolve_base_ref)" || {
+    echo "Could not determine base ref; skipping decision link checks."
+    exit 0
+  }
 fi
 
 changed_files="$(harness_collect_changed_files 0 "$BASE_REF")"
@@ -80,7 +83,7 @@ for (const field of ['decisionArtifacts', 'verificationArtifacts', 'canonicalDoc
     if (!fileExists(normalized)) {
       errors.push(`Linked artifact does not exist: ${normalized}`)
     }
-    if (!markdown.includes(normalized)) {
+    if (!markdown.includes(normalized) && !markdown.includes(item)) {
       errors.push(`Markdown evidence is missing linked path: ${normalized}`)
     }
   }

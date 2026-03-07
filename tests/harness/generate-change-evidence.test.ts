@@ -1,13 +1,32 @@
 import { describe, expect, it } from 'vitest'
-import { inferEvidence, loadContextMap, renderMarkdownEvidence } from '../../scripts/harness/generate_change_evidence.js'
+import { inferEvidence, renderMarkdownEvidence } from '../../scripts/harness/generate_change_evidence.js'
+
+const fixtureContextMap = {
+  rules: [
+    {
+      pattern: 'src/execution/**',
+      owned_by: ['SPEC.md', 'ARCHITECTURE.md', 'SECURITY.md', 'RELIABILITY.md'],
+      impacted_areas: ['architecture', 'execution', 'security', 'reliability'],
+    },
+    {
+      pattern: 'WORKFLOW.md',
+      owned_by: ['SECURITY.md', 'docs/references/harness-engineering.md', 'docs/harness/BUILDING-WITH-HARNESS.md'],
+      impacted_areas: ['workflow', 'security', 'harness'],
+    },
+    {
+      pattern: 'src/config/**',
+      owned_by: ['SPEC.md', 'ARCHITECTURE.md', 'docs/design-docs/'],
+      impacted_areas: ['architecture', 'config', 'documentation'],
+    },
+  ],
+}
 
 describe('generate change evidence', () => {
   it('builds a deterministic stub from changed files and the context map', () => {
-    const contextMap = loadContextMap(process.cwd())
     const evidence = inferEvidence(
       'build-time-harness',
       ['src/execution/workspace/manager.ts', 'WORKFLOW.md'],
-      contextMap,
+      fixtureContextMap,
     )
 
     expect(evidence).toMatchObject({
@@ -39,8 +58,7 @@ describe('generate change evidence', () => {
   })
 
   it('renders the markdown stub sections expected by the evidence contract', () => {
-    const contextMap = loadContextMap(process.cwd())
-    const evidence = inferEvidence('config-change', ['src/config/build-effective-config.ts'], contextMap)
+    const evidence = inferEvidence('config-change', ['src/config/build-effective-config.ts'], fixtureContextMap)
     const markdown = renderMarkdownEvidence(evidence)
 
     expect(markdown).toContain('# Change Evidence: config-change')

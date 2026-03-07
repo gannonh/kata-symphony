@@ -1,23 +1,18 @@
-# Change Evidence: harness-review-fixes
+# Change Evidence: harness-review-round2
 
 ## Summary
 
-Address PR review comments: fix merge-base detection, exit code handling, path traversal guards, string validation, env isolation, and topic sanitization.
+Address second round of PR review comments: derive canonical docs from context-map, fix || true inconsistency, improve markdown path checks, and decouple tests from live context-map.
 
 ## Changed Files
 
-- `.githooks/pre-push`
-- `docs/generated/change-evidence/2026-03-06-harness-contract-task-4.md`
 - `docs/generated/change-evidence/2026-03-06-harness-review-fixes.json`
 - `docs/generated/change-evidence/2026-03-06-harness-review-fixes.md`
-- `scripts/ci-local.sh`
+- `docs/generated/change-evidence/2026-03-06-harness-review-round2.json`
+- `docs/generated/change-evidence/2026-03-06-harness-review-round2.md`
 - `scripts/harness/check_decision_links.sh`
 - `scripts/harness/check_doc_relevance.sh`
-- `scripts/harness/check_evidence_contract.sh`
-- `scripts/harness/check_stale_context.sh`
-- `scripts/harness/generate_change_evidence.ts`
 - `tests/harness/check-doc-relevance.test.ts`
-- `tests/harness/check-evidence-contract.test.ts`
 - `tests/harness/generate-change-evidence.test.ts`
 
 ## Context Loaded
@@ -36,14 +31,12 @@ Address PR review comments: fix merge-base detection, exit code handling, path t
 
 ## Waivers
 
-- `docs/harness/BUILDING-WITH-HARNESS.md`: Review fixes do not change harness contract semantics, only correctness of existing behavior.
+- `docs/harness/BUILDING-WITH-HARNESS.md`: Review fixes correct existing behavior without changing harness contract semantics.
 
 ## Verification
 
 - `pnpm vitest run tests/harness/` -> pass
 - `make check` -> pass
-- `pnpm run typecheck` -> pass
-- `pnpm run lint` -> pass
 
 ## Verification Artifacts
 

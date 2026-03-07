@@ -13,20 +13,23 @@ if [[ "${1:-}" == "--staged" ]]; then
   shift
 fi
 
-canonical_docs=(
-  "AGENTS.md"
-  "ARCHITECTURE.md"
-  "PLANS.md"
-  "QUALITY_SCORE.md"
-  "RELIABILITY.md"
-  "SECURITY.md"
-  "SPEC.md"
-  "WORKFLOW.md"
-  "docs/harness/BUILDING-WITH-HARNESS.md"
-  "docs/harness/change-evidence-schema.md"
-  "docs/harness/context-map.yaml"
-  "docs/references/harness-engineering.md"
-)
+context_map_path="${ROOT_DIR}/docs/harness/context-map.yaml"
+if [[ -f "$context_map_path" ]]; then
+  canonical_docs_str="$(awk '
+    /owned_by:/ { in_owned=1; next }
+    in_owned && /^[[:space:]]*- / {
+      val=$0
+      gsub(/^[[:space:]]*- /, "", val)
+      gsub(/^"/, "", val); gsub(/"$/, "", val)
+      gsub(/^\047/, "", val); gsub(/\047$/, "", val)
+      print val
+      next
+    }
+    in_owned { in_owned=0 }
+  ' "$context_map_path" | sort -u)"
+else
+  canonical_docs_str=""
+fi
 
 BASE_REF="${1:-}"
 if [[ -z "$BASE_REF" ]]; then
@@ -122,11 +125,30 @@ is_metadata_only_diff() {
   [[ "$normalized_before" == "$normalized_after" ]]
 }
 
+is_canonical_doc() {
+  local target="$1"
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    if [[ "$entry" == */ ]]; then
+      # Directory prefix match
+      if [[ "$target" == "$entry"* ]]; then
+        return 0
+      fi
+    else
+      # Exact match
+      if [[ "$target" == "$entry" ]]; then
+        return 0
+      fi
+    fi
+  done <<< "$canonical_docs_str"
+  return 1
+}
+
 failed=0
 while IFS= read -r file; do
   [[ -z "$file" ]] && continue
 
-  if ! contains_line "$file" "$(printf '%s\n' "${canonical_docs[@]}")"; then
+  if ! is_canonical_doc "$file"; then
     continue
   fi
 

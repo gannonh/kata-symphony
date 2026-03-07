@@ -12,7 +12,9 @@
     "scripts/harness/check_evidence_contract.sh",
     "scripts/harness/check_stale_context.sh",
     "scripts/harness/generate_change_evidence.ts",
-    "tests/harness/check-evidence-contract.test.ts"
+    "tests/harness/check-doc-relevance.test.ts",
+    "tests/harness/check-evidence-contract.test.ts",
+    "tests/harness/generate-change-evidence.test.ts"
   ],
   "contextLoaded": [
     "docs/harness/BUILDING-WITH-HARNESS.md",

@@ -23,6 +23,24 @@ function initTempRepo(): string {
 
   writeFile(root, 'ARCHITECTURE.md', '# Architecture\n\nLast reviewed: 2026-03-05\n\nInitial body.\n')
   writeFile(root, 'SECURITY.md', '# Security\n\nLast reviewed: 2026-03-05\n\nInitial body.\n')
+  writeFile(root, 'docs/harness/context-map.yaml', [
+    'rules:',
+    '  - pattern: "ARCHITECTURE.md"',
+    '    owned_by:',
+    '      - "ARCHITECTURE.md"',
+    '    impacted_areas:',
+    '      - "architecture"',
+    '  - pattern: "SECURITY.md"',
+    '    owned_by:',
+    '      - "SECURITY.md"',
+    '    impacted_areas:',
+    '      - "security"',
+    '  - pattern: "scripts/harness/**"',
+    '    owned_by:',
+    '      - "docs/harness/BUILDING-WITH-HARNESS.md"',
+    '    impacted_areas:',
+    '      - "harness"',
+  ].join('\n'))
   writeFile(root, 'docs/generated/change-evidence/task.json', JSON.stringify({
     changedFiles: ['ARCHITECTURE.md'],
     contextLoaded: ['ARCHITECTURE.md'],
