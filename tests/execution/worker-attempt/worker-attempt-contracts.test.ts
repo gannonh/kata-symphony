@@ -34,7 +34,7 @@ describe('worker attempt contracts', () => {
     } satisfies WorkerAttemptRunOptions
 
     const runner: WorkerAttemptRunner = {
-      async run(_issue, _attempt, _options) {
+      async run() {
         throw new Error('not implemented')
       },
     }

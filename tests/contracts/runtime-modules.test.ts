@@ -86,6 +86,19 @@ describe('runtime-loadable contract modules', () => {
 
     expect(orchestratorRuntime).toBeTypeOf('object')
     expect(typeof orchestratorRuntime.deriveClaimState).toBe('function')
-    expect(Object.keys(orchestratorRuntime)).toEqual(['deriveClaimState'])
+    expect(Object.keys(orchestratorRuntime)).toEqual(
+      expect.arrayContaining([
+        'deriveClaimState',
+        'shouldDispatch',
+        'sortCandidatesForDispatch',
+        'applyCodexUpdate',
+        'claimRunningIssue',
+        'createInitialOrchestratorState',
+        'deriveWorkerExitIntent',
+        'recordCompletion',
+        'releaseIssue',
+        'runPollTick',
+      ]),
+    )
   })
 })

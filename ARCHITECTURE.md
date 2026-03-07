@@ -1,6 +1,6 @@
 # Symphony Architecture Map
 
-Last reviewed: 2026-03-05
+Last reviewed: 2026-03-07
 
 ## Scope
 
@@ -21,7 +21,7 @@ Language-agnostic architecture reference for implementing `SPEC.md`.
 6. Observability layer
    - Structured logs and optional status surface
 
-## TypeScript Module Map (Current Skeleton)
+## TypeScript Module Map
 
 1. Shared domain contracts
    - `src/domain/models.ts`
@@ -40,8 +40,14 @@ Language-agnostic architecture reference for implementing `SPEC.md`.
      re-exporting low-level GraphQL transport types from `linear/types.ts`.
 4. Execution layer contracts
    - `src/execution/contracts.ts`
-5. Coordination layer contracts
+5. Coordination layer contracts and runtime
    - `src/orchestrator/contracts.ts`
+   - `src/orchestrator/runtime/contracts.ts`
+   - `src/orchestrator/runtime/dispatch-selection.ts`
+   - `src/orchestrator/runtime/state-machine.ts`
+   - `src/orchestrator/runtime/run-poll-tick.ts`
+   - `src/orchestrator/runtime/index.ts`
+   - `src/orchestrator/service.ts`
 6. Observability layer contracts
    - `src/observability/contracts.ts`
 7. Bootstrap wiring shell
@@ -56,10 +62,10 @@ Language-agnostic architecture reference for implementing `SPEC.md`.
 3. Reconcile in-flight runs.
 4. Poll active issues from tracker.
 5. Run tick dispatch preflight gate before any dispatch.
-6. Select eligible issues with concurrency bounds.
-7. Dispatch worker attempts in isolated workspaces.
-8. Stream agent runtime events into orchestrator state.
-9. Retry or release issues based on exit reason and tracker state.
+6. Select eligible issues with deterministic ordering and concurrency bounds.
+7. Dispatch worker attempts in isolated workspaces through the orchestrator service.
+8. Stream worker-attempt events back into orchestrator-owned runtime state.
+9. Convert worker exits into retry/release intents and release runtime ownership.
 10. Surface state via logs/status.
 
 ## Dispatch Preflight Gating Semantics
