@@ -28,9 +28,8 @@ export interface RunningEntry {
 export type OrchestratorClaimState =
   | 'unclaimed'
   | 'claimed'
-  | 'claimed_running'
-  | 'claimed_retry_queued'
-  | 'released'
+  | 'running'
+  | 'retry_queued'
 
 export type OrchestratorState = Omit<OrchestratorRuntimeState, 'running'> & {
   running: Map<string, RunningEntry>
@@ -42,24 +41,20 @@ export function deriveClaimState(
   issueId: string,
   state: OrchestratorState,
 ): OrchestratorClaimState {
-  // Active ownership structures are authoritative for the derived view.
-  // When memberships overlap inconsistently, prefer the most active runtime
-  // bookkeeping over terminal history: running > retry queued > claimed >
-  // released > unclaimed.
+  // Derive the spec-level reservation state from orchestrator-owned membership.
+  // `completed` is bookkeeping only and does not affect the claim-state view.
+  // When collections overlap, prefer the most active runtime ownership:
+  // running > retry_queued > claimed > unclaimed.
   if (state.running.has(issueId)) {
-    return 'claimed_running'
+    return 'running'
   }
 
   if (state.retry_attempts.has(issueId)) {
-    return 'claimed_retry_queued'
+    return 'retry_queued'
   }
 
   if (state.claimed.has(issueId)) {
     return 'claimed'
-  }
-
-  if (state.completed.has(issueId)) {
-    return 'released'
   }
 
   return 'unclaimed'
