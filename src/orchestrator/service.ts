@@ -55,14 +55,9 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
   const trackWorkerCallback = (callback: Promise<void>): void => {
     inFlightWorkerCallbacks.add(callback)
-    void callback.then(
-      () => {
-        inFlightWorkerCallbacks.delete(callback)
-      },
-      () => {
-        inFlightWorkerCallbacks.delete(callback)
-      },
-    )
+    void callback.then(() => {
+      inFlightWorkerCallbacks.delete(callback)
+    })
   }
 
   const scheduleNextTick = () => {

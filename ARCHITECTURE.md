@@ -66,7 +66,9 @@ Language-agnostic architecture reference for implementing `SPEC.md`.
 7. Dispatch worker attempts in isolated workspaces through the orchestrator service.
 8. Stream worker-attempt events back into orchestrator-owned runtime state.
 9. Convert worker exits into retry/release intents and release runtime ownership.
-10. Surface state via logs/status.
+10. Keep worker-attempt callbacks non-blocking; synchronous throws and async rejections are isolated from attempt outcomes.
+11. On shutdown, await the active poll tick plus tracked worker lifecycle callbacks before returning.
+12. Surface state via logs/status.
 
 ## Dispatch Preflight Gating Semantics
 

@@ -638,6 +638,203 @@ describe('createOrchestrator', () => {
     await orchestrator.stop()
   })
 
+  it('logs and swallows codex event state update failures', async () => {
+    const { createOrchestrator } = await import('../../src/orchestrator/service.js')
+    const issue = createIssue()
+    const logger = { info: vi.fn(), error: vi.fn() }
+    const { createStaticConfigProvider } = await import(
+      '../../src/config/contracts.js'
+    )
+
+    let snapshotReads = 0
+    const config = {
+      getSnapshot: vi.fn(() => {
+        snapshotReads += 1
+        if (snapshotReads === 5) {
+          throw new Error('snapshot exploded')
+        }
+
+        return createStaticConfigProvider({
+          tracker: {
+            kind: 'linear',
+            endpoint: 'https://api.linear.app/graphql',
+            api_key: 'token',
+            project_slug: 'proj',
+            active_states: ['Todo'],
+            terminal_states: ['Done'],
+          },
+          polling: { interval_ms: 30_000 },
+          workspace: { root: '/tmp/symphony' },
+          hooks: {
+            after_create: null,
+            before_run: null,
+            after_run: null,
+            before_remove: null,
+            timeout_ms: 60_000,
+          },
+          agent: {
+            max_concurrent_agents: 2,
+            max_turns: 4,
+            max_retry_backoff_ms: 120_000,
+            max_concurrent_agents_by_state: {},
+          },
+          codex: {
+            command: 'codex app-server',
+            turn_timeout_ms: 60_000,
+            read_timeout_ms: 1_000,
+            stall_timeout_ms: 10_000,
+          },
+        }).getSnapshot()
+      }),
+    }
+
+    harness.runPollTick.mockImplementation(async (options) => {
+      const typedOptions = options as MockRunPollTickOptions
+
+      if (
+        typedOptions.state.running.size === 0 &&
+        typedOptions.state.claimed.size === 0
+      ) {
+        return typedOptions.dispatchIssue(typedOptions.state, issue, null)
+      }
+
+      return typedOptions.state
+    })
+
+    const orchestrator = createOrchestrator(
+      await createDeps({
+        config,
+        logger,
+        workerAttemptRunner: {
+          async run(_issue, _attempt, runOptions) {
+            runOptions?.onCodexEvent?.({
+              issue_id: issue.id,
+              issue_identifier: issue.identifier,
+              event: 'turn_completed',
+              turn_number: 1,
+              timestamp: '2026-03-07T00:00:01Z',
+              session: null,
+            })
+
+            return {
+              attempt: {
+                issue_id: issue.id,
+                issue_identifier: issue.identifier,
+                attempt: null,
+                workspace_path: '/tmp/symphony/KAT-230',
+                started_at: '2026-03-07T00:00:00Z',
+                status: 'succeeded',
+              },
+              session: null,
+              outcome: {
+                kind: 'normal' as const,
+                reason_code: 'stopped_non_active_state' as const,
+                turns_executed: 1,
+                final_issue_state: 'Done',
+              },
+            }
+          },
+        },
+      }),
+    )
+
+    await orchestrator.start()
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'orchestrator_state_update_failed',
+      expect.objectContaining({
+        issue_id: issue.id,
+        error: 'snapshot exploded',
+      }),
+    )
+
+    await orchestrator.stop()
+  })
+
+  it('swallows secondary logger failures while reporting state update failures', async () => {
+    const { createOrchestrator } = await import('../../src/orchestrator/service.js')
+    const issue = createIssue()
+    const logger = {
+      info: vi.fn(() => {
+        throw new Error('log exploded')
+      }),
+      error: vi.fn(() => {
+        throw new Error('secondary logger exploded')
+      }),
+    }
+
+    harness.runPollTick.mockImplementation(async (options) => {
+      const typedOptions = options as MockRunPollTickOptions
+
+      if (
+        typedOptions.state.running.size === 0 &&
+        typedOptions.state.claimed.size === 0
+      ) {
+        return typedOptions.dispatchIssue(typedOptions.state, issue, null)
+      }
+
+      return typedOptions.state
+    })
+
+    const orchestrator = createOrchestrator(
+      await createDeps({
+        logger,
+        workerAttemptRunner: {
+          async run() {
+            return {
+              attempt: {
+                issue_id: issue.id,
+                issue_identifier: issue.identifier,
+                attempt: null,
+                workspace_path: '/tmp/symphony/KAT-230',
+                started_at: '2026-03-07T00:00:00Z',
+                status: 'succeeded',
+              },
+              session: null,
+              outcome: {
+                kind: 'normal' as const,
+                reason_code: 'stopped_max_turns_reached' as const,
+                turns_executed: 1,
+                final_issue_state: 'Todo',
+              },
+            }
+          },
+        },
+      }),
+    )
+
+    await orchestrator.start()
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'orchestrator_state_update_failed',
+      expect.objectContaining({
+        issue_id: issue.id,
+        error: 'log exploded',
+      }),
+    )
+
+    await expect(orchestrator.stop()).resolves.toBeUndefined()
+  })
+
+  it('clears the active tick when tick error logging throws', async () => {
+    const { createOrchestrator } = await import('../../src/orchestrator/service.js')
+    const logger = {
+      info: vi.fn(),
+      error: vi.fn(() => {
+        throw new Error('logger exploded')
+      }),
+    }
+
+    harness.runPollTick.mockRejectedValueOnce(new Error('boom'))
+
+    const orchestrator = createOrchestrator(await createDeps({ logger }))
+
+    await expect(orchestrator.start()).rejects.toThrow('logger exploded')
+    await expect(orchestrator.stop()).resolves.toBeUndefined()
+  })
+
   it('logs Error-backed worker failures using the error message', async () => {
     const { createOrchestrator } = await import('../../src/orchestrator/service.js')
     const logger = { info: vi.fn(), error: vi.fn() }
