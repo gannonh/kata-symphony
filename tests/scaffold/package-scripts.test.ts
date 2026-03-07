@@ -5,6 +5,7 @@ describe('package scripts', () => {
   it('defines required scripts', () => {
     const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'))
     expect(pkg.scripts).toMatchObject({
+      'harness:generate-evidence': expect.any(String),
       lint: expect.any(String),
       typecheck: expect.any(String),
       test: expect.any(String),
@@ -13,4 +14,3 @@ describe('package scripts', () => {
     })
   })
 })
-

@@ -26,8 +26,12 @@ Each dimension is scored 0-5.
 - Operability: 0
 - Documentation legibility: 2 (harness baseline scaffold in place)
 
+## Active Improvement Levers
+
+- Evidence-backed harness checks for qualifying changes
+- Periodic stale-context drift audit for docs, plans, and evidence links
+
 ## Exit Criteria For MVP
 
 - No dimension below 3
 - Spec conformance and test coverage both at least 4
-

@@ -1,6 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+source "${ROOT_DIR}/scripts/harness/common.sh"
+
+if [[ -z "${HARNESS_BASE_REF:-}" ]]; then
+  HARNESS_BASE_REF="$(harness_resolve_base_ref)"
+fi
+export HARNESS_BASE_REF
+
 echo "[ci-local] lint"
 pnpm run lint
 
@@ -15,6 +24,15 @@ pnpm run test:integration
 
 echo "[ci-local] coverage"
 pnpm run test:coverage
+
+echo "[ci-local] doc relevance"
+bash scripts/harness/check_doc_relevance.sh
+
+echo "[ci-local] evidence contract"
+bash scripts/harness/check_evidence_contract.sh
+
+echo "[ci-local] decision links"
+bash scripts/harness/check_decision_links.sh
 
 echo "[ci-local] harness checks"
 make check

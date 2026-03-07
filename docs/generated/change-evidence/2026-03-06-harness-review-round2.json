@@ -1,0 +1,39 @@
+{
+  "topic": "harness-review-round2",
+  "summary": "Address second round of PR review comments: derive canonical docs from context-map, fix || true inconsistency, improve markdown path checks, and decouple tests from live context-map.",
+  "changedFiles": [
+    "docs/generated/change-evidence/2026-03-06-harness-review-fixes.json",
+    "docs/generated/change-evidence/2026-03-06-harness-review-fixes.md",
+    "docs/generated/change-evidence/2026-03-06-harness-review-round2.json",
+    "docs/generated/change-evidence/2026-03-06-harness-review-round2.md",
+    "scripts/harness/check_decision_links.sh",
+    "scripts/harness/check_doc_relevance.sh",
+    "tests/harness/check-doc-relevance.test.ts",
+    "tests/harness/generate-change-evidence.test.ts"
+  ],
+  "contextLoaded": [
+    "docs/harness/BUILDING-WITH-HARNESS.md",
+    "docs/harness/change-evidence-schema.md",
+    "docs/harness/context-map.yaml"
+  ],
+  "decisionArtifacts": [
+    "docs/plans/2026-03-06-build-time-harness-evidence-contract-design.md"
+  ],
+  "canonicalDocsUpdated": [],
+  "waivers": [
+    {
+      "doc": "docs/harness/BUILDING-WITH-HARNESS.md",
+      "reason": "Review fixes correct existing behavior without changing harness contract semantics."
+    }
+  ],
+  "verification": [
+    { "command": "pnpm vitest run tests/harness/", "result": "pass" },
+    { "command": "make check", "result": "pass" }
+  ],
+  "verificationArtifacts": [],
+  "impactedAreas": [
+    "documentation",
+    "harness",
+    "tests"
+  ]
+}

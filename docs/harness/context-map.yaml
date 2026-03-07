@@ -1,0 +1,104 @@
+# Maps change paths to the source-of-truth context agents are expected to load.
+# The harness uses these rules to decide which canonical docs must be updated
+# or explicitly waived in change-evidence artifacts.
+
+rules:
+  - pattern: "src/config/**"
+    owned_by:
+      - "SPEC.md"
+      - "ARCHITECTURE.md"
+      - "docs/design-docs/"
+    impacted_areas:
+      - "architecture"
+      - "config"
+      - "documentation"
+    notes: "Config changes should stay aligned with typed config contracts and design records."
+
+  - pattern: "src/execution/**"
+    owned_by:
+      - "SPEC.md"
+      - "ARCHITECTURE.md"
+      - "SECURITY.md"
+      - "RELIABILITY.md"
+    impacted_areas:
+      - "architecture"
+      - "execution"
+      - "security"
+      - "reliability"
+    notes: "Execution changes require workspace, safety, and recovery context."
+
+  - pattern: "src/orchestrator/**"
+    owned_by:
+      - "SPEC.md"
+      - "ARCHITECTURE.md"
+      - "RELIABILITY.md"
+    impacted_areas:
+      - "architecture"
+      - "orchestration"
+      - "reliability"
+      - "observability"
+    notes: "Orchestrator work should preserve dispatch, retry, and reconciliation guarantees."
+
+  - pattern: "WORKFLOW.md"
+    owned_by:
+      - "SECURITY.md"
+      - "docs/references/harness-engineering.md"
+      - "docs/harness/BUILDING-WITH-HARNESS.md"
+    impacted_areas:
+      - "workflow"
+      - "security"
+      - "harness"
+    notes: "Workflow changes alter agent behavior and should be reviewed as policy changes."
+
+  - pattern: "scripts/harness/**"
+    owned_by:
+      - "docs/harness/BUILDING-WITH-HARNESS.md"
+      - "docs/harness/change-evidence-schema.md"
+      - "docs/harness/context-map.yaml"
+    impacted_areas:
+      - "harness"
+      - "documentation"
+      - "tests"
+    notes: "Harness script changes should update the documented contract they enforce."
+
+  - pattern: ".codex/skills/**"
+    owned_by:
+      - "AGENTS.md"
+      - "docs/harness/BUILDING-WITH-HARNESS.md"
+      - "docs/harness/context-map.yaml"
+    impacted_areas:
+      - "agents"
+      - "documentation"
+      - "harness"
+    notes: "Repo-local skill changes must stay discoverable and aligned with harness rules."
+
+  - pattern: "AGENTS.md"
+    owned_by:
+      - "AGENTS.md"
+      - "docs/harness/BUILDING-WITH-HARNESS.md"
+      - "docs/harness/context-map.yaml"
+    impacted_areas:
+      - "agents"
+      - "documentation"
+      - "harness"
+    notes: "Agent routing changes should stay aligned with the harness guide and context map."
+
+  - pattern: "QUALITY_SCORE.md"
+    owned_by:
+      - "QUALITY_SCORE.md"
+      - "docs/harness/context-map.yaml"
+    impacted_areas:
+      - "documentation"
+      - "quality"
+      - "harness"
+    notes: "Quality score updates should remain aligned with the harness capabilities they describe."
+
+  - pattern: "PLANS.md"
+    owned_by:
+      - "PLANS.md"
+      - "docs/harness/context-map.yaml"
+    impacted_areas:
+      - "documentation"
+      - "planning"
+      - "harness"
+    notes: "Plan index changes should stay aligned with the active harness rollout tracks."

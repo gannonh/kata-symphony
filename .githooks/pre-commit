@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "[pre-commit] checking doc relevance..."
+bash scripts/harness/check_doc_relevance.sh --staged
+
+echo "[pre-commit] checking evidence contract..."
+bash scripts/harness/check_evidence_contract.sh --staged

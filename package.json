@@ -15,6 +15,7 @@
     "test:integration": "vitest run tests/bootstrap",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
+    "harness:generate-evidence": "tsx scripts/harness/generate_change_evidence.ts",
     "ci:local": "bash scripts/ci-local.sh",
     "hooks:install": "bash scripts/install-githooks.sh",
     "start": "tsx src/main.ts",
