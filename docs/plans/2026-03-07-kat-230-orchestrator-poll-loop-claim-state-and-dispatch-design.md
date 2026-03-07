@@ -92,6 +92,8 @@ event producers and policy details inside those seams.
    all state mutation.
 5. Timer callbacks, worker exits, and codex updates are routed back through the orchestrator rather
    than mutating state directly.
+6. Late worker completions may arrive after reconciliation or a later tick has already released the
+   issue; those completions must log a release intent and must not recreate a running claim.
 
 ## Approaches Considered
 
@@ -282,6 +284,8 @@ rule.
 
 - normal worker exit requests a continuation retry,
 - abnormal worker exit requests a failure retry,
+- worker exits observed after the issue has already been released stay as release intents with null
+  retry metadata,
 - release removes the issue from `claimed` plus any associated retry bookkeeping,
 - retry re-dispatch must respect the same eligibility and slot rules as normal tick dispatch.
 
