@@ -16,9 +16,7 @@ import {
   validateDispatchPreflight,
 } from './preflight/index.js'
 
-type StateUpdater =
-  | OrchestratorState
-  | ((state: OrchestratorState) => OrchestratorState)
+type StateUpdater = (state: OrchestratorState) => OrchestratorState
 
 export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
   let state = applySnapshot(
@@ -31,10 +29,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
 
   const enqueueStateUpdate = (updater: StateUpdater): Promise<void> => {
     const applyUpdate = async () => {
-      state =
-        typeof updater === 'function'
-          ? applySnapshot(updater(state), deps)
-          : applySnapshot(updater, deps)
+      state = applySnapshot(updater(state), deps)
     }
 
     const next = mutationQueue.then(applyUpdate, applyUpdate)
@@ -58,7 +53,7 @@ export function createOrchestrator(deps: OrchestratorDeps): Orchestrator {
       return
     }
 
-    let releaseDispatchCallbacks = () => {}
+    let releaseDispatchCallbacks!: () => void
     const dispatchCallbacksReady = new Promise<void>((resolve) => {
       releaseDispatchCallbacks = resolve
     })

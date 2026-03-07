@@ -109,6 +109,50 @@ describe('sortCandidatesForDispatch', () => {
       'KAT-300',
     ])
   })
+
+  it('sorts invalid created_at values after valid timestamps for the same priority', () => {
+    const issues = [
+      createIssue({
+        id: 'issue-2',
+        identifier: 'KAT-200',
+        priority: 1,
+        created_at: 'not-a-date',
+      }),
+      createIssue({
+        id: 'issue-3',
+        identifier: 'KAT-100',
+        priority: 1,
+        created_at: '2026-03-07T01:00:00Z',
+      }),
+    ]
+
+    expect(sortCandidatesForDispatch(issues).map((issue) => issue.identifier)).toEqual([
+      'KAT-100',
+      'KAT-200',
+    ])
+  })
+
+  it('sorts null created_at values after valid timestamps for the same priority', () => {
+    const issues = [
+      createIssue({
+        id: 'issue-2',
+        identifier: 'KAT-200',
+        priority: 1,
+        created_at: null,
+      }),
+      createIssue({
+        id: 'issue-3',
+        identifier: 'KAT-100',
+        priority: 1,
+        created_at: '2026-03-07T01:00:00Z',
+      }),
+    ]
+
+    expect(sortCandidatesForDispatch(issues).map((issue) => issue.identifier)).toEqual([
+      'KAT-100',
+      'KAT-200',
+    ])
+  })
 })
 
 describe('shouldDispatch', () => {
@@ -257,6 +301,28 @@ describe('shouldDispatch', () => {
           state: 'Cancelled',
         },
       ],
+    })
+
+    expect(shouldDispatch(issue, createState(), selectionOptions)).toBe(true)
+  })
+
+  it('returns false for Todo when a blocker is missing state', () => {
+    const issue = createIssue({
+      blocked_by: [
+        {
+          id: 'issue-11',
+          identifier: 'KAT-1001',
+          state: null,
+        },
+      ],
+    })
+
+    expect(shouldDispatch(issue, createState(), selectionOptions)).toBe(false)
+  })
+
+  it('treats malformed blocker payloads as having no blockers', () => {
+    const issue = createIssue({
+      blocked_by: null as unknown as Issue['blocked_by'],
     })
 
     expect(shouldDispatch(issue, createState(), selectionOptions)).toBe(true)

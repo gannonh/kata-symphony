@@ -148,6 +148,42 @@ describe('state-machine helpers', () => {
     expect(state.claimed.has(issue.id)).toBe(false)
   })
 
+  it('seeds running entries from an existing live session snapshot', () => {
+    const issue = createIssue()
+
+    const next = claimRunningIssue(createState(), issue, {
+      workerPromise: null,
+      retry_attempt: 1,
+      started_at: '2026-03-07T00:00:00Z',
+      session: {
+        session_id: 'thread-1-turn-1',
+        thread_id: 'thread-1',
+        turn_id: 'turn-1',
+        codex_app_server_pid: '321',
+        last_codex_event: 'turn/completed',
+        last_codex_timestamp: '2026-03-07T00:00:01Z',
+        last_codex_message: 'hello',
+        codex_input_tokens: 1,
+        codex_output_tokens: 2,
+        codex_total_tokens: 3,
+        last_reported_input_tokens: 1,
+        last_reported_output_tokens: 2,
+        last_reported_total_tokens: 3,
+        turn_count: 1,
+      },
+    })
+
+    expect(next.running.get(issue.id)).toMatchObject({
+      session_id: 'thread-1-turn-1',
+      codex_app_server_pid: '321',
+      last_codex_event: 'turn/completed',
+      last_codex_timestamp: '2026-03-07T00:00:01Z',
+      last_codex_message: 'hello',
+      codex_total_tokens: 3,
+      last_reported_total_tokens: 3,
+    })
+  })
+
   it('applies codex updates to running entries and aggregate totals', () => {
     const issue = createIssue()
     const claimed = claimRunningIssue(createState(), issue, {
@@ -197,6 +233,122 @@ describe('state-machine helpers', () => {
       output_tokens: 8,
       total_tokens: 14,
     })
+  })
+
+  it('applies rate limits even when the issue is not currently running', () => {
+    const state = createState()
+
+    const updated = applyCodexUpdate(state, 'missing-issue', {
+      rate_limits: { requests_remaining: 8 },
+    })
+
+    expect(updated.codex_rate_limits).toEqual({ requests_remaining: 8 })
+    expect(updated.running.size).toBe(0)
+  })
+
+  it('keeps running entry values intact when codex update has no session payload', () => {
+    const issue = createIssue()
+    const claimed = claimRunningIssue(createState(), issue, {
+      workerPromise: null,
+      retry_attempt: null,
+      started_at: '2026-03-07T00:00:00Z',
+    })
+
+    const updated = applyCodexUpdate(claimed, issue.id, {
+      rate_limits: { requests_remaining: 7 },
+    })
+
+    expect(updated.running.get(issue.id)).toMatchObject({
+      session_id: null,
+      codex_total_tokens: 0,
+      last_reported_total_tokens: 0,
+    })
+    expect(updated.codex_rate_limits).toEqual({ requests_remaining: 7 })
+  })
+
+  it('preserves omitted live-session fields during partial codex updates', () => {
+    const issue = createIssue()
+    const claimed = claimRunningIssue(createState(), issue, {
+      workerPromise: null,
+      retry_attempt: null,
+      started_at: '2026-03-07T00:00:00Z',
+      session: {
+        session_id: 'thread-1-turn-1',
+        thread_id: 'thread-1',
+        turn_id: 'turn-1',
+        codex_app_server_pid: '999',
+        last_codex_event: 'turn/completed',
+        last_codex_timestamp: '2026-03-07T00:00:01Z',
+        last_codex_message: 'before',
+        codex_input_tokens: 1,
+        codex_output_tokens: 2,
+        codex_total_tokens: 3,
+        last_reported_input_tokens: 1,
+        last_reported_output_tokens: 2,
+        last_reported_total_tokens: 3,
+        turn_count: 1,
+      },
+    })
+
+    const updated = applyCodexUpdate(claimed, issue.id, {
+      session: {
+        last_codex_message: 'after',
+        codex_total_tokens: 5,
+        last_reported_total_tokens: 5,
+      },
+    })
+
+    expect(updated.running.get(issue.id)).toMatchObject({
+      session_id: 'thread-1-turn-1',
+      codex_app_server_pid: '999',
+      last_codex_event: 'turn/completed',
+      last_codex_timestamp: '2026-03-07T00:00:01Z',
+      last_codex_message: 'after',
+      codex_input_tokens: 1,
+      codex_output_tokens: 2,
+      codex_total_tokens: 5,
+      last_reported_input_tokens: 1,
+      last_reported_output_tokens: 2,
+      last_reported_total_tokens: 5,
+    })
+  })
+
+  it('falls back to prior totals when a partial codex update carries null token counters', () => {
+    const issue = createIssue()
+    const claimed = claimRunningIssue(createState(), issue, {
+      workerPromise: null,
+      retry_attempt: null,
+      started_at: '2026-03-07T00:00:00Z',
+      session: {
+        session_id: 'thread-1-turn-1',
+        thread_id: 'thread-1',
+        turn_id: 'turn-1',
+        codex_app_server_pid: '999',
+        last_codex_event: 'turn/completed',
+        last_codex_timestamp: '2026-03-07T00:00:01Z',
+        last_codex_message: 'before',
+        codex_input_tokens: 1,
+        codex_output_tokens: 2,
+        codex_total_tokens: 3,
+        last_reported_input_tokens: 1,
+        last_reported_output_tokens: 2,
+        last_reported_total_tokens: 3,
+        turn_count: 1,
+      },
+    })
+
+    const updated = applyCodexUpdate(claimed, issue.id, {
+      session: {
+        codex_total_tokens: null as unknown as number,
+        last_reported_total_tokens: null as unknown as number,
+      },
+    })
+
+    expect(updated.running.get(issue.id)).toMatchObject({
+      codex_total_tokens: 3,
+      last_reported_total_tokens: 3,
+    })
+    expect(updated.codex_totals.total_tokens).toBe(0)
   })
 
   it('releases an issue by clearing claimed, running, and retry bookkeeping', () => {
@@ -317,6 +469,42 @@ describe('state-machine helpers', () => {
       kind: 'release',
       issue_id: issue.id,
       identifier: issue.identifier,
+    })
+  })
+
+  it('starts failure retries at attempt one when the running entry has no prior retry attempt', () => {
+    const issue = createIssue()
+    const runningState = claimRunningIssue(createState(), issue, {
+      workerPromise: null,
+      retry_attempt: null,
+      started_at: '2026-03-07T00:00:00Z',
+    })
+
+    expect(
+      deriveWorkerExitIntent(runningState, issue.id, {
+        attempt: {
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          attempt: null,
+          workspace_path: '/tmp/symphony/KAT-230',
+          started_at: '2026-03-07T00:00:00Z',
+          status: 'failed',
+        },
+        session: null,
+        outcome: {
+          kind: 'abnormal',
+          reason_code: 'workspace_error',
+          turns_executed: 0,
+          final_issue_state: null,
+        },
+      }),
+    ).toEqual<WorkerExitIntent>({
+      kind: 'retry',
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      attempt: 1,
+      retry_kind: 'failure',
+      error: 'worker exited: workspace_error',
     })
   })
 })
