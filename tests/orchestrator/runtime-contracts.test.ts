@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { Issue } from '../../src/domain/models.js'
 import type {
   OrchestratorClaimState,
   OrchestratorState,
@@ -6,7 +7,7 @@ import type {
 } from '../../src/orchestrator/contracts.js'
 import { deriveClaimState } from '../../src/orchestrator/contracts.js'
 
-const issueFixture = {
+const issueFixture: Issue = {
   id: 'issue-1',
   identifier: 'KAT-230',
   title: 'Implement orchestrator runtime contracts',
@@ -19,7 +20,7 @@ const issueFixture = {
   blocked_by: [],
   created_at: '2026-03-07T00:00:00Z',
   updated_at: '2026-03-07T00:00:00Z',
-} as const
+}
 
 describe('orchestrator runtime contracts', () => {
   it('supports concrete running entries and derived claim state', async () => {
