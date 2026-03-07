@@ -24,3 +24,5 @@ export {
   recordCompletion,
   releaseIssue,
 } from './state-machine.js'
+export type { RunPollTickOptions } from './run-poll-tick.js'
+export { runPollTick } from './run-poll-tick.js'
