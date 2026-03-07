@@ -12,6 +12,12 @@ export type {
   DispatchPreflightResult,
 } from './preflight/index.js'
 export { isDispatchPreflightFailure } from './preflight/index.js'
+export type {
+  OrchestratorClaimState,
+  OrchestratorState,
+  RunningEntry,
+} from './runtime/index.js'
+export { deriveClaimState } from './runtime/index.js'
 
 export interface Orchestrator {
   start(): Promise<void>

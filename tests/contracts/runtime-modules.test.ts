@@ -80,4 +80,12 @@ describe('runtime-loadable contract modules', () => {
     )
     expect(preflight.isDispatchPreflightFailure({ ok: true })).toBe(false)
   })
+
+  it('loads orchestrator runtime contract barrel', async () => {
+    const orchestratorRuntime = await import('../../src/orchestrator/runtime/index.js')
+
+    expect(orchestratorRuntime).toBeTypeOf('object')
+    expect(typeof orchestratorRuntime.deriveClaimState).toBe('function')
+    expect(Object.keys(orchestratorRuntime)).toEqual(['deriveClaimState'])
+  })
 })
