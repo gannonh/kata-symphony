@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 
-import type { WorkerAttemptRunner } from '../../../src/execution/contracts.js'
+import type {
+  WorkerAttemptRunOptions,
+  WorkerAttemptRunner,
+} from '../../../src/execution/contracts.js'
 import {
   WORKER_ATTEMPT_OUTCOME_KINDS,
   WORKER_ATTEMPT_REASON_CODES,
@@ -22,14 +25,19 @@ describe('worker attempt contracts', () => {
     ])
   })
 
-  it('adds a worker-attempt runner contract to the execution layer', () => {
+  it('adds a worker-attempt runner contract to the execution layer with per-run codex callbacks', () => {
+    const options = {
+      onCodexEvent(_event) {},
+    } satisfies WorkerAttemptRunOptions
+
     const runner: WorkerAttemptRunner = {
-      async run() {
+      async run(_issue, _attempt, _options) {
         throw new Error('not implemented')
       },
     }
 
     expect(typeof runner.run).toBe('function')
+    expect(typeof options.onCodexEvent).toBe('function')
   })
 
   it('discriminates reason codes by outcome kind at the type level', () => {

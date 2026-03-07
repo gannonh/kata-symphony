@@ -76,9 +76,10 @@ export function createWorkerAttemptRunner(
   )
 
   return {
-    async run(issue, attempt) {
+    async run(issue, attempt, options) {
       const startedAt = new Date().toISOString()
       const title = `${issue.identifier}: ${issue.title}`
+      const onCodexEvent = options?.onCodexEvent ?? deps.onCodexEvent
 
       const runtimeState: {
         workspace: Workspace | null
@@ -169,7 +170,7 @@ export function createWorkerAttemptRunner(
 
             threadId = turnStart.threadId
             try {
-              deps.onCodexEvent?.({
+              onCodexEvent?.({
                 issue_id: issue.id,
                 issue_identifier: issue.identifier,
                 event: 'turn_completed',

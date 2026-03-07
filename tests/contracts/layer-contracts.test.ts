@@ -50,6 +50,24 @@ describe('layer contract surface', () => {
       error() {},
     }
 
+    const orchestrator = createNoopOrchestrator({
+      config: createStaticConfigProvider({
+        tracker: {
+          kind: 'linear',
+          endpoint: 'https://api.linear.app/graphql',
+          api_key: 'token',
+          project_slug: 'proj',
+          active_states: ['Todo'],
+          terminal_states: ['Done'],
+        },
+      }),
+      tracker,
+      workspace,
+      agentRunner: agent,
+      workerAttemptRunner,
+      logger,
+    })
+
     expect(tracker.fetchCandidates).toBeTypeOf('function')
     expect(workspace.ensureWorkspace).toBeTypeOf('function')
     expect(workspace.runBeforeRun).toBeTypeOf('function')
@@ -58,6 +76,8 @@ describe('layer contract surface', () => {
     expect(agent.runAttempt).toBeTypeOf('function')
     expect(workerAttemptRunner.run).toBeTypeOf('function')
     expect(logger.info).toBeTypeOf('function')
+    expect(orchestrator.start).toBeTypeOf('function')
+    expect(orchestrator.stop).toBeTypeOf('function')
   })
 
   it('keeps domain model free of layer imports', () => {

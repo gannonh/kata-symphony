@@ -110,9 +110,6 @@ export function createService(): ServiceBootstrap {
         codex: snapshot.codex,
         workspacePath,
       }),
-    onCodexEvent(event) {
-      logger.info('worker_attempt_codex_event', event as Record<string, unknown>)
-    },
   })
 
   const orchestrator = createNoopOrchestrator({
@@ -120,6 +117,7 @@ export function createService(): ServiceBootstrap {
     tracker,
     workspace,
     agentRunner,
+    workerAttemptRunner,
     logger,
   })
 

@@ -95,4 +95,45 @@ describe('service bootstrap wiring', () => {
     expect(service).toHaveProperty('workerAttemptRunner')
     expect(typeof service.workerAttemptRunner.run).toBe('function')
   })
+
+  it('passes the worker attempt runner into orchestrator wiring', async () => {
+    vi.resetModules()
+    const createNoopOrchestrator = vi.fn(() => ({
+      start: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+    }))
+
+    vi.doMock('../../src/orchestrator/contracts.js', async () => {
+      const actual =
+        await vi.importActual<typeof import('../../src/orchestrator/contracts.js')>(
+          '../../src/orchestrator/contracts.js',
+        )
+
+      return {
+        ...actual,
+        createNoopOrchestrator,
+      }
+    })
+
+    try {
+      const { createService: createServiceWithMock } = await import(
+        '../../src/bootstrap/service.js'
+      )
+      const service = createServiceWithMock()
+
+      expect(createNoopOrchestrator).toHaveBeenCalledTimes(1)
+      expect(createNoopOrchestrator).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: service.config,
+          tracker: service.tracker,
+          workspace: service.workspace,
+          agentRunner: service.agentRunner,
+          workerAttemptRunner: service.workerAttemptRunner,
+          logger: service.logger,
+        }),
+      )
+    } finally {
+      vi.doUnmock('../../src/orchestrator/contracts.js')
+    }
+  })
 })

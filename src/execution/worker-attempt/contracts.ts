@@ -49,6 +49,14 @@ export interface WorkerAttemptResult {
   outcome: WorkerAttemptOutcome
 }
 
+export interface WorkerAttemptRunOptions {
+  onCodexEvent?: (event: unknown) => void
+}
+
 export interface WorkerAttemptRunner {
-  run(issue: Issue, attempt: number | null): Promise<WorkerAttemptResult>
+  run(
+    issue: Issue,
+    attempt: number | null,
+    options?: WorkerAttemptRunOptions,
+  ): Promise<WorkerAttemptResult>
 }

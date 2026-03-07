@@ -68,7 +68,7 @@ describe('bootstrap worker attempt runner wiring', () => {
     vi.clearAllMocks()
   })
 
-  it('creates the session client from the workspace path and logs codex events during a run', async () => {
+  it('creates the session client from the workspace path without defaulting codex events to the logger', async () => {
     vi.resetModules()
     const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
 
@@ -103,14 +103,7 @@ describe('bootstrap worker attempt runner wiring', () => {
       expect(harness.startSession).toHaveBeenCalledTimes(1)
       expect(harness.runTurn).not.toHaveBeenCalled()
       expect(harness.stopSession).toHaveBeenCalledTimes(1)
-      expect(consoleLogSpy).toHaveBeenCalledWith(
-        'worker_attempt_codex_event',
-        expect.objectContaining({
-          issue_identifier: 'KAT-229',
-          event: 'turn_completed',
-          turn_number: 1,
-        }),
-      )
+      expect(consoleLogSpy).not.toHaveBeenCalled()
       expect(result.outcome).toMatchObject({
         kind: 'normal',
         reason_code: 'stopped_non_active_state',
@@ -120,5 +113,41 @@ describe('bootstrap worker attempt runner wiring', () => {
     } finally {
       consoleLogSpy.mockRestore()
     }
+  })
+
+  it('lets each worker attempt provide its own codex event callback', async () => {
+    vi.resetModules()
+    const onCodexEvent = vi.fn()
+
+    const { createService } = await import('../../src/bootstrap/service.js')
+    const service = createService()
+
+    await service.workerAttemptRunner.run(
+      {
+        id: 'issue-1',
+        identifier: 'KAT-229',
+        title: 'Worker pipeline',
+        description: null,
+        priority: 1,
+        state: 'Review',
+        branch_name: null,
+        url: null,
+        labels: [],
+        blocked_by: [],
+        created_at: null,
+        updated_at: null,
+      },
+      null,
+      { onCodexEvent },
+    )
+
+    expect(onCodexEvent).toHaveBeenCalledTimes(1)
+    expect(onCodexEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        issue_identifier: 'KAT-229',
+        event: 'turn_completed',
+        turn_number: 1,
+      }),
+    )
   })
 })

@@ -9,6 +9,7 @@ export type {
 export { PROMPT_ERROR_KINDS } from './prompt/contracts.js'
 export type {
   WorkerAttemptOutcome,
+  WorkerAttemptRunOptions,
   WorkerAttemptResult,
   WorkerAttemptRunner,
 } from './worker-attempt/contracts.js'
