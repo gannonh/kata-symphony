@@ -75,6 +75,8 @@ They do not replace `kata-linear`, `brainstorming`, `writing-plans`, or `executi
    - `symphony-dogfood`
 4. Release go/no-go checkpoints
    - `symphony-ship-gate`
+5. Evidence-backed harness changes
+   - `symphony-harness-evidence`
 
 ## Documentation Layout
 
@@ -84,3 +86,4 @@ They do not replace `kata-linear`, `brainstorming`, `writing-plans`, or `executi
 - `docs/generated/`: generated reference material
 - `docs/product-specs/`: product/spec indexes
 - `docs/references/`: external references and adapted guidance
+- `docs/harness/`: repo harness contracts, context maps, and evidence rules

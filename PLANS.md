@@ -14,6 +14,7 @@ Last reviewed: 2026-03-06
 7. Harness-engineering bootstrap for:
    - this repository while building Symphony
    - Symphony runtime operation going forward
+   - stale-context and orphaned-artifact auditing
 7. KAT-228 codex app-server runner review follow-ups (PR #11) addressed and verified locally
 8. KAT-229 Worker attempt pipeline (PR #13) review feedback addressed: maxTurns guard, replaceAll, resetForNextTurn stale fields, turn failure propagation, domain utility reuse cleanup, zero-turn short-circuit ordering, onCodexEvent isolation, stopSession promise safety
 

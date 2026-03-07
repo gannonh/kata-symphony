@@ -19,6 +19,9 @@ required_files=(
   "docs/product-specs/index.md"
   "docs/references/harness-engineering.md"
   "docs/harness/BUILDING-WITH-HARNESS.md"
+  "docs/harness/context-map.yaml"
+  "docs/harness/change-evidence-schema.md"
+  "docs/generated/change-evidence/.gitkeep"
 )
 
 missing=0
@@ -32,6 +35,7 @@ done
 required_dirs=(
   "docs/exec-plans/active"
   "docs/exec-plans/completed"
+  "docs/generated/change-evidence"
   "scripts/harness"
 )
 
@@ -47,4 +51,3 @@ if [[ "$missing" -ne 0 ]]; then
 fi
 
 echo "Repository contract check passed."
-

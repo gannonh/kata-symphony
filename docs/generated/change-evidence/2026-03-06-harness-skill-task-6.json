@@ -1,0 +1,42 @@
+{
+  "topic": "harness-skill-task-6",
+  "summary": "Add repo-local skill guidance for evidence-backed harness work and register it in the repo map.",
+  "changedFiles": [
+    ".codex/skills/symphony-harness-evidence/SKILL.md",
+    "AGENTS.md",
+    "docs/generated/change-evidence/2026-03-06-harness-skill-task-6.json",
+    "docs/generated/change-evidence/2026-03-06-harness-skill-task-6.md",
+    "docs/generated/harness-skill-task-6-verification.md",
+    "docs/harness/BUILDING-WITH-HARNESS.md",
+    "docs/harness/context-map.yaml"
+  ],
+  "contextLoaded": [
+    "AGENTS.md",
+    "docs/harness/BUILDING-WITH-HARNESS.md",
+    "docs/harness/context-map.yaml"
+  ],
+  "decisionArtifacts": [
+    "docs/plans/2026-03-06-build-time-harness-evidence-contract-design.md",
+    "docs/plans/2026-03-06-build-time-harness-evidence-contract-implementation-plan.md"
+  ],
+  "canonicalDocsUpdated": [
+    "AGENTS.md",
+    "docs/harness/BUILDING-WITH-HARNESS.md",
+    "docs/harness/context-map.yaml"
+  ],
+  "waivers": [],
+  "verification": [
+    {
+      "command": "rg -n \"symphony-harness-evidence\" AGENTS.md docs/harness/BUILDING-WITH-HARNESS.md .codex/skills/symphony-harness-evidence/SKILL.md",
+      "result": "pass"
+    }
+  ],
+  "verificationArtifacts": [
+    "docs/generated/harness-skill-task-6-verification.md"
+  ],
+  "impactedAreas": [
+    "agents",
+    "documentation",
+    "harness"
+  ]
+}
