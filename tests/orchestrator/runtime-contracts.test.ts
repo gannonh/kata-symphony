@@ -125,12 +125,12 @@ describe('orchestrator runtime contracts', () => {
     expect(deriveClaimState(issueFixture.id, state)).toBe('claimed')
   })
 
-  it('ignores completed bookkeeping when there is no live reservation', () => {
+  it('derives released from completed bookkeeping when no live ownership remains', () => {
     const state = createState({
       completed: new Set([issueFixture.id]),
     })
 
-    expect(deriveClaimState(issueFixture.id, state)).toBe('unclaimed')
+    expect(deriveClaimState(issueFixture.id, state)).toBe('released')
   })
 
   it('prefers running over retry, claimed, and completed when memberships overlap', () => {
