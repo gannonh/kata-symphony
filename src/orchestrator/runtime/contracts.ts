@@ -27,6 +27,7 @@ export interface RunningEntry {
 
 export type OrchestratorClaimState =
   | 'unclaimed'
+  | 'claimed'
   | 'claimed_running'
   | 'claimed_retry_queued'
   | 'released'
@@ -43,13 +44,18 @@ export function deriveClaimState(
 ): OrchestratorClaimState {
   // Active ownership structures are authoritative for the derived view.
   // When memberships overlap inconsistently, prefer the most active runtime
-  // bookkeeping over terminal history: running > retry queued > released.
+  // bookkeeping over terminal history: running > retry queued > claimed >
+  // released > unclaimed.
   if (state.running.has(issueId)) {
     return 'claimed_running'
   }
 
   if (state.retry_attempts.has(issueId)) {
     return 'claimed_retry_queued'
+  }
+
+  if (state.claimed.has(issueId)) {
+    return 'claimed'
   }
 
   if (state.completed.has(issueId)) {

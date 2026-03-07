@@ -117,10 +117,17 @@ describe('orchestrator runtime contracts', () => {
     expect(deriveClaimState(issueFixture.id, state)).toBe('claimed_retry_queued')
   })
 
-  it('derives released from completed bookkeeping when no active ownership remains', () => {
+  it('derives claimed from reservation-only membership', () => {
+    const state = createState({
+      claimed: new Set([issueFixture.id]),
+    })
+
+    expect(deriveClaimState(issueFixture.id, state)).toBe('claimed')
+  })
+
+  it('derives released from completed bookkeeping when no reservation remains', () => {
     const state = createState({
       completed: new Set([issueFixture.id]),
-      claimed: new Set([issueFixture.id]),
     })
 
     expect(deriveClaimState(issueFixture.id, state)).toBe('released')
@@ -147,5 +154,35 @@ describe('orchestrator runtime contracts', () => {
     })
 
     expect(deriveClaimState(issueFixture.id, state)).toBe('claimed_running')
+  })
+
+  it('prefers retry ownership over completed bookkeeping when memberships overlap', () => {
+    const state = createState({
+      retry_attempts: new Map([
+        [
+          issueFixture.id,
+          {
+            issue_id: issueFixture.id,
+            identifier: issueFixture.identifier,
+            attempt: 2,
+            due_at_ms: 2_468,
+            timer_handle: null,
+            error: null,
+          },
+        ],
+      ]),
+      completed: new Set([issueFixture.id]),
+    })
+
+    expect(deriveClaimState(issueFixture.id, state)).toBe('claimed_retry_queued')
+  })
+
+  it('prefers claimed reservation over completed bookkeeping when memberships overlap', () => {
+    const state = createState({
+      claimed: new Set([issueFixture.id]),
+      completed: new Set([issueFixture.id]),
+    })
+
+    expect(deriveClaimState(issueFixture.id, state)).toBe('claimed')
   })
 })
