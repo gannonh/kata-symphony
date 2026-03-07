@@ -5,7 +5,6 @@ import type { OrchestratorState } from './contracts.js'
 export interface DispatchSelectionOptions {
   activeStates: readonly string[]
   terminalStates: readonly string[]
-  maxConcurrentAgents: number
   perStateLimits: Readonly<Record<string, number>>
 }
 
@@ -61,11 +60,11 @@ export function shouldDispatch(
     return false
   }
 
-  if (getAvailableGlobalSlots(state, options) <= 0) {
+  if (getAvailableGlobalSlots(state) <= 0) {
     return false
   }
 
-  if (getAvailablePerStateSlots(normalizedIssueState, state, options, perStateLimits) <= 0) {
+  if (getAvailablePerStateSlots(normalizedIssueState, state, perStateLimits) <= 0) {
     return false
   }
 
@@ -127,21 +126,18 @@ function compareNumbers(left: number, right: number): number {
   return 0
 }
 
-function getAvailableGlobalSlots(
-  state: OrchestratorState,
-  options: DispatchSelectionOptions,
-): number {
-  return Math.max(options.maxConcurrentAgents - state.running.size, 0)
+function getAvailableGlobalSlots(state: OrchestratorState): number {
+  return Math.max(state.max_concurrent_agents - state.running.size, 0)
 }
 
 function getAvailablePerStateSlots(
   normalizedIssueState: string,
   state: OrchestratorState,
-  options: DispatchSelectionOptions,
   perStateLimits: Readonly<Record<string, number>>,
 ): number {
   const runningCount = countRunningEntriesByNormalizedState(state).get(normalizedIssueState) ?? 0
-  const stateLimit = perStateLimits[normalizedIssueState] ?? options.maxConcurrentAgents
+  const stateLimit =
+    perStateLimits[normalizedIssueState] ?? state.max_concurrent_agents
 
   return Math.max(stateLimit - runningCount, 0)
 }

@@ -70,7 +70,6 @@ function createState(overrides: Partial<OrchestratorState> = {}): OrchestratorSt
 const selectionOptions = {
   activeStates: ['Todo', 'In Progress'],
   terminalStates: ['Done', 'Cancelled'],
-  maxConcurrentAgents: 3,
   perStateLimits: {},
 }
 
@@ -167,7 +166,36 @@ describe('shouldDispatch', () => {
       shouldDispatch(
         issue,
         createState({ running }),
-        { ...selectionOptions, maxConcurrentAgents: 3 },
+        selectionOptions,
+      ),
+    ).toBe(false)
+  })
+
+  it('uses state.max_concurrent_agents for the per-state fallback limit', () => {
+    const issue = createIssue({
+      state: 'In Progress',
+    })
+    const running = new Map<string, RunningEntry>([
+      [
+        'issue-2',
+        createRunningEntry(
+          createIssue({
+            id: 'issue-2',
+            identifier: 'KAT-231',
+            state: 'In Progress',
+          }),
+        ),
+      ],
+    ])
+
+    expect(
+      shouldDispatch(
+        issue,
+        createState({
+          max_concurrent_agents: 1,
+          running,
+        }),
+        selectionOptions,
       ),
     ).toBe(false)
   })
