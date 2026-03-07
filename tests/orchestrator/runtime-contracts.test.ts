@@ -22,58 +22,69 @@ const issueFixture: Issue = {
   updated_at: '2026-03-07T00:00:00Z',
 }
 
+function createRunningEntry(issue: Issue): RunningEntry {
+  return {
+    issue,
+    identifier: issue.identifier,
+    workerPromise: Promise.resolve({
+      attempt: {
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        attempt: null,
+        workspace_path: '/tmp/symphony/KAT-230',
+        started_at: '2026-03-07T00:00:00Z',
+        status: 'running',
+      },
+      session: null,
+      outcome: {
+        kind: 'normal',
+        reason_code: 'stopped_non_active_state',
+        turns_executed: 0,
+        final_issue_state: null,
+      },
+    }),
+    retry_attempt: null,
+    started_at: '2026-03-07T00:00:00Z',
+    session_id: null,
+    codex_app_server_pid: null,
+    last_codex_event: null,
+    last_codex_timestamp: null,
+    last_codex_message: null,
+    codex_input_tokens: 0,
+    codex_output_tokens: 0,
+    codex_total_tokens: 0,
+    last_reported_input_tokens: 0,
+    last_reported_output_tokens: 0,
+    last_reported_total_tokens: 0,
+  }
+}
+
+function createState(overrides: Partial<OrchestratorState> = {}): OrchestratorState {
+  return {
+    poll_interval_ms: 30_000,
+    max_concurrent_agents: 5,
+    running: new Map(),
+    claimed: new Set(),
+    retry_attempts: new Map(),
+    completed: new Set(),
+    codex_totals: {
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      seconds_running: 0,
+    },
+    codex_rate_limits: null,
+    ...overrides,
+  }
+}
+
 describe('orchestrator runtime contracts', () => {
   it('supports concrete running entries and derived claim state', async () => {
-    const runningEntry: RunningEntry = {
-      issue: issueFixture,
-      identifier: issueFixture.identifier,
-      workerPromise: Promise.resolve({
-        attempt: {
-          issue_id: issueFixture.id,
-          issue_identifier: issueFixture.identifier,
-          attempt: null,
-          workspace_path: '/tmp/symphony/KAT-230',
-          started_at: '2026-03-07T00:00:00Z',
-          status: 'running',
-        },
-        session: null,
-        outcome: {
-          kind: 'normal',
-          reason_code: 'stopped_non_active_state',
-          turns_executed: 0,
-          final_issue_state: null,
-        },
-      }),
-      retry_attempt: null,
-      started_at: '2026-03-07T00:00:00Z',
-      session_id: null,
-      codex_app_server_pid: null,
-      last_codex_event: null,
-      last_codex_timestamp: null,
-      last_codex_message: null,
-      codex_input_tokens: 0,
-      codex_output_tokens: 0,
-      codex_total_tokens: 0,
-      last_reported_input_tokens: 0,
-      last_reported_output_tokens: 0,
-      last_reported_total_tokens: 0,
-    }
-
-    const state: OrchestratorState = {
-      poll_interval_ms: 30_000,
-      max_concurrent_agents: 5,
+    const runningEntry = createRunningEntry(issueFixture)
+    const state = createState({
       running: new Map([[issueFixture.id, runningEntry]]),
       claimed: new Set([issueFixture.id]),
-      retry_attempts: new Map(),
-      completed: new Set(),
-      codex_totals: {
-        input_tokens: 0,
-        output_tokens: 0,
-        total_tokens: 0,
-        seconds_running: 0,
-      },
-      codex_rate_limits: null,
-    }
+    })
 
     const claimState: OrchestratorClaimState = deriveClaimState(
       issueFixture.id,
@@ -84,5 +95,57 @@ describe('orchestrator runtime contracts', () => {
     expect(state.running.get(issueFixture.id)).toBe(runningEntry)
     expect(claimState).toBe('claimed_running')
     expect(deriveClaimState('issue-2', state)).toBe('unclaimed')
+  })
+
+  it('derives claimed_retry_queued from retry ownership', () => {
+    const state = createState({
+      retry_attempts: new Map([
+        [
+          issueFixture.id,
+          {
+            issue_id: issueFixture.id,
+            identifier: issueFixture.identifier,
+            attempt: 1,
+            due_at_ms: 1_234,
+            timer_handle: null,
+            error: 'retry me',
+          },
+        ],
+      ]),
+    })
+
+    expect(deriveClaimState(issueFixture.id, state)).toBe('claimed_retry_queued')
+  })
+
+  it('derives released from completed bookkeeping when no active ownership remains', () => {
+    const state = createState({
+      completed: new Set([issueFixture.id]),
+      claimed: new Set([issueFixture.id]),
+    })
+
+    expect(deriveClaimState(issueFixture.id, state)).toBe('released')
+  })
+
+  it('prefers running over retry and released when memberships overlap', () => {
+    const runningEntry = createRunningEntry(issueFixture)
+    const state = createState({
+      running: new Map([[issueFixture.id, runningEntry]]),
+      retry_attempts: new Map([
+        [
+          issueFixture.id,
+          {
+            issue_id: issueFixture.id,
+            identifier: issueFixture.identifier,
+            attempt: 2,
+            due_at_ms: 2_468,
+            timer_handle: null,
+            error: null,
+          },
+        ],
+      ]),
+      completed: new Set([issueFixture.id]),
+    })
+
+    expect(deriveClaimState(issueFixture.id, state)).toBe('claimed_running')
   })
 })
