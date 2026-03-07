@@ -67,7 +67,7 @@ describe('bootstrap service internals', () => {
     ).rejects.toThrow('agent runner not enabled in bootstrap mode')
   })
 
-  it('supports noop orchestrator stop in bootstrap mode', async () => {
+  it('supports orchestrator stop in bootstrap mode', async () => {
     const service = createService()
     await expect(service.orchestrator.stop()).resolves.toBeUndefined()
   })
