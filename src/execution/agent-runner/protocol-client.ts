@@ -1,3 +1,4 @@
+import { makeSessionId } from '../../domain/normalization.js'
 import {
   AGENT_RUNNER_ERROR_CODES,
   AgentRunnerError,
@@ -7,6 +8,10 @@ export interface SessionStartResult {
   threadId: string
   turnId: string
   sessionId: string
+}
+
+export interface ThreadStartResult {
+  threadId: string
 }
 
 interface ProtocolClientDeps {
@@ -22,6 +27,21 @@ interface StartSessionInput {
   prompt: string
   approvalPolicy?: string
   threadSandbox?: string
+  turnSandboxPolicy?: unknown
+}
+
+interface StartThreadInput {
+  cwd: string
+  approvalPolicy?: string
+  threadSandbox?: string
+}
+
+interface StartTurnInput {
+  cwd: string
+  threadId: string
+  title: string
+  prompt: string
+  approvalPolicy?: string
   turnSandboxPolicy?: unknown
 }
 
@@ -50,14 +70,16 @@ export function createProtocolClient(deps: ProtocolClientDeps) {
   }
 
   return {
-    async startSession(input: StartSessionInput): Promise<SessionStartResult> {
+    async initializeSession(): Promise<void> {
       await request('initialize', {
         clientInfo: { name: 'symphony', version: '1.0' },
         capabilities: {},
       })
 
       deps.sendLine(JSON.stringify({ method: 'initialized', params: {} }))
+    },
 
+    async startThread(input: StartThreadInput): Promise<ThreadStartResult> {
       const thread = (await request('thread/start', {
         approvalPolicy: input.approvalPolicy,
         sandbox: input.threadSandbox,
@@ -69,8 +91,12 @@ export function createProtocolClient(deps: ProtocolClientDeps) {
         throw new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.RESPONSE_ERROR)
       }
 
+      return { threadId }
+    },
+
+    async startTurn(input: StartTurnInput): Promise<SessionStartResult> {
       const turn = (await request('turn/start', {
-        threadId,
+        threadId: input.threadId,
         input: [{ type: 'text', text: input.prompt }],
         cwd: input.cwd,
         title: input.title,
@@ -83,7 +109,35 @@ export function createProtocolClient(deps: ProtocolClientDeps) {
         throw new AgentRunnerError(AGENT_RUNNER_ERROR_CODES.RESPONSE_ERROR)
       }
 
-      return { threadId, turnId, sessionId: `${threadId}-${turnId}` }
+      return { threadId: input.threadId, turnId, sessionId: makeSessionId(input.threadId, turnId) }
+    },
+
+    async startSession(input: StartSessionInput): Promise<SessionStartResult> {
+      await this.initializeSession()
+      const threadInput: StartThreadInput = { cwd: input.cwd }
+      if (input.approvalPolicy) {
+        threadInput.approvalPolicy = input.approvalPolicy
+      }
+      if (input.threadSandbox) {
+        threadInput.threadSandbox = input.threadSandbox
+      }
+
+      const thread = await this.startThread(threadInput)
+
+      const turnInput: StartTurnInput = {
+        cwd: input.cwd,
+        threadId: thread.threadId,
+        title: input.title,
+        prompt: input.prompt,
+      }
+      if (input.approvalPolicy) {
+        turnInput.approvalPolicy = input.approvalPolicy
+      }
+      if (input.turnSandboxPolicy !== undefined) {
+        turnInput.turnSandboxPolicy = input.turnSandboxPolicy
+      }
+
+      return this.startTurn(turnInput)
     },
   }
 }

@@ -88,4 +88,11 @@ describe('service bootstrap wiring', () => {
       consoleErrorSpy.mockRestore()
     }
   })
+
+  it('builds a concrete worker attempt runner in bootstrap wiring', () => {
+    const service = createService()
+
+    expect(service).toHaveProperty('workerAttemptRunner')
+    expect(typeof service.workerAttemptRunner.run).toBe('function')
+  })
 })

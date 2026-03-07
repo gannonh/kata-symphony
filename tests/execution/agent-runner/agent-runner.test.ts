@@ -101,6 +101,7 @@ describe('agent runner', () => {
     expect(result.session?.thread_id).toBe('thread-1')
     expect(result.session?.turn_id).toBe('turn-1')
     expect(result.session?.codex_total_tokens).toBe(12)
+    expect(result.session?.turn_count).toBe(1)
   })
 
   it('maps read timeout to response_timeout', async () => {
