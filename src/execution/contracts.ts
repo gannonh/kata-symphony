@@ -8,6 +8,7 @@ export type {
 } from './prompt/contracts.js'
 export { PROMPT_ERROR_KINDS } from './prompt/contracts.js'
 export type {
+  WorkerAttemptCodexEvent,
   WorkerAttemptOutcome,
   WorkerAttemptRunOptions,
   WorkerAttemptResult,

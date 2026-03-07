@@ -5,6 +5,7 @@ import type { WorkspaceManager } from '../contracts.js'
 import type { AgentSessionClient } from '../agent-runner/session-client.js'
 import type {
   WorkerAttemptAbnormalReasonCode,
+  WorkerAttemptCodexEvent,
   WorkerAttemptNormalReasonCode,
   WorkerAttemptOutcome,
   WorkerAttemptResult,
@@ -31,7 +32,7 @@ export interface WorkerAttemptRunnerDeps {
   workflowTemplate: string
   activeStates: string[]
   maxTurns: number
-  onCodexEvent?: (event: unknown) => void
+  onCodexEvent?: (event: WorkerAttemptCodexEvent) => void
 }
 
 function toErrorMessage(error: unknown): string {
@@ -170,14 +171,15 @@ export function createWorkerAttemptRunner(
 
             threadId = turnStart.threadId
             try {
-              onCodexEvent?.({
+              const codexEvent: WorkerAttemptCodexEvent = {
                 issue_id: issue.id,
                 issue_identifier: issue.identifier,
                 event: 'turn_completed',
                 turn_number: turnNumber,
                 timestamp: new Date().toISOString(),
                 session: runtimeState.client.getLatestSession(),
-              })
+              }
+              onCodexEvent?.(codexEvent)
             } catch {
               // Callback failures must not alter attempt outcome
             }

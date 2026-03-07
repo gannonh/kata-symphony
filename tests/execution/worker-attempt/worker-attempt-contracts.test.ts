@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import type {
+  WorkerAttemptCodexEvent,
   WorkerAttemptRunOptions,
   WorkerAttemptRunner,
 } from '../../../src/execution/contracts.js'
@@ -27,7 +28,9 @@ describe('worker attempt contracts', () => {
 
   it('adds a worker-attempt runner contract to the execution layer with per-run codex callbacks', () => {
     const options = {
-      onCodexEvent(_event) {},
+      onCodexEvent(event: WorkerAttemptCodexEvent) {
+        expect(event.event).toBe('turn_completed')
+      },
     } satisfies WorkerAttemptRunOptions
 
     const runner: WorkerAttemptRunner = {

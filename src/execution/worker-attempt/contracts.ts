@@ -49,8 +49,17 @@ export interface WorkerAttemptResult {
   outcome: WorkerAttemptOutcome
 }
 
+export interface WorkerAttemptCodexEvent {
+  issue_id: string
+  issue_identifier: string
+  event: 'turn_completed'
+  turn_number: number
+  timestamp: string
+  session: LiveSession | null
+}
+
 export interface WorkerAttemptRunOptions {
-  onCodexEvent?: (event: unknown) => void
+  onCodexEvent?: (event: WorkerAttemptCodexEvent) => void
 }
 
 export interface WorkerAttemptRunner {

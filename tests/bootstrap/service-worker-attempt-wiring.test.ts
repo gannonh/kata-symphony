@@ -1,4 +1,20 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { createWorkerAttemptRunner } from '../../src/execution/worker-attempt/run-worker-attempt.js'
+
+const issue = {
+  id: 'issue-1',
+  identifier: 'KAT-229',
+  title: 'Worker pipeline',
+  description: null,
+  priority: 1,
+  state: 'Review',
+  branch_name: null,
+  url: null,
+  labels: [],
+  blocked_by: [],
+  created_at: null,
+  updated_at: null,
+}
 
 const harness = vi.hoisted(() => {
   const startSession = vi.fn().mockResolvedValue({
@@ -77,20 +93,7 @@ describe('bootstrap worker attempt runner wiring', () => {
       const service = createService()
 
       const result = await service.workerAttemptRunner.run(
-        {
-          id: 'issue-1',
-          identifier: 'KAT-229',
-          title: 'Worker pipeline',
-          description: null,
-          priority: 1,
-          state: 'Review',
-          branch_name: null,
-          url: null,
-          labels: [],
-          blocked_by: [],
-          created_at: null,
-          updated_at: null,
-        },
+        issue,
         null,
       )
 
@@ -123,20 +126,7 @@ describe('bootstrap worker attempt runner wiring', () => {
     const service = createService()
 
     await service.workerAttemptRunner.run(
-      {
-        id: 'issue-1',
-        identifier: 'KAT-229',
-        title: 'Worker pipeline',
-        description: null,
-        priority: 1,
-        state: 'Review',
-        branch_name: null,
-        url: null,
-        labels: [],
-        blocked_by: [],
-        created_at: null,
-        updated_at: null,
-      },
+      issue,
       null,
       { onCodexEvent },
     )
@@ -149,5 +139,40 @@ describe('bootstrap worker attempt runner wiring', () => {
         turn_number: 1,
       }),
     )
+  })
+
+  it('prefers the per-run codex event callback over the constructor callback', async () => {
+    const constructorOnCodexEvent = vi.fn()
+    const perRunOnCodexEvent = vi.fn()
+
+    const runner = createWorkerAttemptRunner({
+      workspace: {
+        ensureWorkspace: vi.fn().mockResolvedValue({
+          path: '/tmp/ws/KAT-229',
+          workspace_key: 'KAT-229',
+          created_now: false,
+        }),
+        runBeforeRun: vi.fn().mockResolvedValue(undefined),
+        runAfterRun: vi.fn().mockResolvedValue(undefined),
+      },
+      tracker: {
+        fetchIssuesByIds: vi.fn().mockResolvedValue([issue]),
+      },
+      sessionClientFactory: () => ({
+        startSession: harness.startSession,
+        runTurn: harness.runTurn,
+        stopSession: harness.stopSession,
+        getLatestSession: harness.getLatestSession,
+      }),
+      workflowTemplate: 'Issue {{ issue.identifier }}',
+      activeStates: ['todo', 'in progress'],
+      maxTurns: 1,
+      onCodexEvent: constructorOnCodexEvent,
+    })
+
+    await runner.run(issue, null, { onCodexEvent: perRunOnCodexEvent })
+
+    expect(perRunOnCodexEvent).toHaveBeenCalledTimes(1)
+    expect(constructorOnCodexEvent).not.toHaveBeenCalled()
   })
 })
