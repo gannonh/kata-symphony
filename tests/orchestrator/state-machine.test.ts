@@ -453,7 +453,7 @@ describe('state-machine helpers', () => {
       kind: 'retry',
       issue_id: issue.id,
       identifier: issue.identifier,
-      attempt: 1,
+      attempt: 3,
       retry_kind: 'continuation',
       error: null,
     })

@@ -198,6 +198,27 @@ describe('shouldDispatch', () => {
     expect(shouldDispatch(issue, state, selectionOptions)).toBe(false)
   })
 
+  it('returns false when the issue is reserved in the retry queue', () => {
+    const issue = createIssue()
+    const state = createState({
+      retry_attempts: new Map([
+        [
+          issue.id,
+          {
+            issue_id: issue.id,
+            identifier: issue.identifier,
+            attempt: 2,
+            due_at_ms: 10_000,
+            timer_handle: null,
+            error: 'backoff pending',
+          },
+        ],
+      ]),
+    })
+
+    expect(shouldDispatch(issue, state, selectionOptions)).toBe(false)
+  })
+
   it('returns false when global slots are exhausted', () => {
     const issue = createIssue()
     const running = new Map<string, RunningEntry>([

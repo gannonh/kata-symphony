@@ -60,6 +60,10 @@ export function shouldDispatch(
     return false
   }
 
+  if (state.retry_attempts.has(issue.id)) {
+    return false
+  }
+
   if (getAvailableGlobalSlots(state) <= 0) {
     return false
   }

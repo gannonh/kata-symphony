@@ -20,6 +20,23 @@ vi.mock('../../src/orchestrator/runtime/index.js', async () => {
   }
 })
 
+interface Deferred<T> {
+  promise: Promise<T>
+  resolve: (value: T | PromiseLike<T>) => void
+}
+
+function createDeferred<T>(): Deferred<T> {
+  let resolve: Deferred<T>['resolve'] = () => {}
+  const promise = new Promise<T>((innerResolve) => {
+    resolve = innerResolve
+  })
+
+  return {
+    promise,
+    resolve,
+  }
+}
+
 describe('createOrchestrator', () => {
   interface MockRunPollTickOptions {
     state: OrchestratorState
@@ -241,12 +258,57 @@ describe('createOrchestrator', () => {
     const startPromise = orchestrator.start()
     await Promise.resolve()
 
-    await orchestrator.stop()
+    let stopSettled = false
+    const stopPromise = orchestrator.stop().then(() => {
+      stopSettled = true
+    })
+    await Promise.resolve()
+    expect(stopSettled).toBe(false)
+
     resolveTick()
     await startPromise
+    await stopPromise
 
     expect(setTimeoutSpy).not.toHaveBeenCalled()
     setTimeoutSpy.mockRestore()
+  })
+
+  it('waits for the active tick to finish and skips dispatch once stop is requested', async () => {
+    const { createOrchestrator } = await import('../../src/orchestrator/service.js')
+    const issue = createIssue()
+    const tickDeferred = createDeferred<void>()
+    const workerAttemptRunner = {
+      run: vi.fn(async () => {
+        throw new Error('worker should not start after stop')
+      }),
+    }
+
+    harness.runPollTick.mockImplementationOnce(async (options) => {
+      const typedOptions = options as MockRunPollTickOptions
+      await tickDeferred.promise
+      return typedOptions.dispatchIssue(typedOptions.state, issue, null)
+    })
+
+    const orchestrator = createOrchestrator(
+      await createDeps({
+        workerAttemptRunner,
+      }),
+    )
+    const startPromise = orchestrator.start()
+    await Promise.resolve()
+
+    let stopSettled = false
+    const stopPromise = orchestrator.stop().then(() => {
+      stopSettled = true
+    })
+    await Promise.resolve()
+    expect(stopSettled).toBe(false)
+
+    tickDeferred.resolve()
+    await startPromise
+    await stopPromise
+
+    expect(workerAttemptRunner.run).not.toHaveBeenCalled()
   })
 
   it('returns immediately when a queued timer fires after stop', async () => {
@@ -446,6 +508,130 @@ describe('createOrchestrator', () => {
         issue_id: issue.id,
         intent_kind: 'release',
         error: 'worker exploded',
+      }),
+    )
+
+    await orchestrator.stop()
+  })
+
+  it('waits for in-flight worker lifecycle callbacks before stop returns', async () => {
+    const { createOrchestrator } = await import('../../src/orchestrator/service.js')
+    const issue = createIssue()
+    const workerDeferred = createDeferred<WorkerAttemptResult>()
+
+    harness.runPollTick.mockImplementation(async (options) => {
+      const typedOptions = options as MockRunPollTickOptions
+
+      if (
+        typedOptions.state.running.size === 0 &&
+        typedOptions.state.claimed.size === 0
+      ) {
+        return typedOptions.dispatchIssue(typedOptions.state, issue, null)
+      }
+
+      return typedOptions.state
+    })
+
+    const orchestrator = createOrchestrator(
+      await createDeps({
+        workerAttemptRunner: {
+          async run() {
+            return workerDeferred.promise
+          },
+        },
+      }),
+    )
+
+    await orchestrator.start()
+
+    let stopSettled = false
+    const stopPromise = orchestrator.stop().then(() => {
+      stopSettled = true
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(stopSettled).toBe(false)
+
+    workerDeferred.resolve({
+      attempt: {
+        issue_id: issue.id,
+        issue_identifier: issue.identifier,
+        attempt: null,
+        workspace_path: '/tmp/symphony/KAT-230',
+        started_at: '2026-03-07T00:00:00Z',
+        status: 'succeeded',
+      },
+      session: null,
+      outcome: {
+        kind: 'normal',
+        reason_code: 'stopped_max_turns_reached',
+        turns_executed: 1,
+        final_issue_state: 'Todo',
+      },
+    })
+    await stopPromise
+
+    expect(stopSettled).toBe(true)
+  })
+
+  it('logs and swallows worker lifecycle state update failures', async () => {
+    const { createOrchestrator } = await import('../../src/orchestrator/service.js')
+    const issue = createIssue()
+    const logger = {
+      info: vi.fn(() => {
+        throw new Error('log exploded')
+      }),
+      error: vi.fn(),
+    }
+
+    harness.runPollTick.mockImplementation(async (options) => {
+      const typedOptions = options as MockRunPollTickOptions
+
+      if (
+        typedOptions.state.running.size === 0 &&
+        typedOptions.state.claimed.size === 0
+      ) {
+        return typedOptions.dispatchIssue(typedOptions.state, issue, null)
+      }
+
+      return typedOptions.state
+    })
+
+    const orchestrator = createOrchestrator(
+      await createDeps({
+        logger,
+        workerAttemptRunner: {
+          async run() {
+            return {
+              attempt: {
+                issue_id: issue.id,
+                issue_identifier: issue.identifier,
+                attempt: null,
+                workspace_path: '/tmp/symphony/KAT-230',
+                started_at: '2026-03-07T00:00:00Z',
+                status: 'succeeded',
+              },
+              session: null,
+              outcome: {
+                kind: 'normal' as const,
+                reason_code: 'stopped_max_turns_reached' as const,
+                turns_executed: 1,
+                final_issue_state: 'Todo',
+              },
+            }
+          },
+        },
+      }),
+    )
+
+    await orchestrator.start()
+    await vi.advanceTimersByTimeAsync(30_000)
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'orchestrator_state_update_failed',
+      expect.objectContaining({
+        issue_id: issue.id,
+        error: 'log exploded',
       }),
     )
 

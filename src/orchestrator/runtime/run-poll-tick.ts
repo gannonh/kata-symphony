@@ -28,7 +28,6 @@ export async function runPollTick(
   let state = await options.reconcile(options.state)
 
   const gate = await runTickPreflightGate({
-    reconcile: async () => {},
     validate: options.validate,
     logFailure: options.logFailure,
   })
@@ -45,6 +44,8 @@ export async function runPollTick(
   }
 
   for (const issue of sortCandidatesForDispatch(issues)) {
+    // Candidates are already sorted, so once global capacity is full there is
+    // nothing left for the rest of the list to do.
     if (state.running.size >= state.max_concurrent_agents) {
       break
     }

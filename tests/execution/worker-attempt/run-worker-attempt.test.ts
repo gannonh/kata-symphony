@@ -509,6 +509,52 @@ describe('worker attempt runner', () => {
     expect(result.attempt.status).toBe('succeeded')
   })
 
+  it('does not let async onCodexEvent rejections alter the attempt outcome', async () => {
+    const deps = createBaseDeps()
+    const unhandledRejection = vi.fn()
+    process.once('unhandledRejection', unhandledRejection)
+
+    const onCodexEvent = vi.fn(async () => {
+      throw new Error('async callback exploded')
+    })
+
+    const runner = createWorkerAttemptRunner({
+      workspace: {
+        ensureWorkspace: deps.ensureWorkspace,
+        runBeforeRun: deps.runBeforeRun,
+        runAfterRun: deps.runAfterRun,
+      },
+      tracker: {
+        fetchIssuesByIds: vi.fn().mockResolvedValue([{ ...issue, state: 'Review' }]),
+      },
+      sessionClientFactory: () => ({
+        startSession: deps.startSession,
+        runTurn: deps.runTurn,
+        stopSession: deps.stopSession,
+        getLatestSession: deps.getLatestSession,
+      }),
+      workflowTemplate: 'Issue {{ issue.identifier }}',
+      activeStates: ['todo', 'in progress'],
+      maxTurns: 3,
+      onCodexEvent,
+    })
+
+    const result = await runner.run(issue, null)
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve)
+    })
+    process.removeListener('unhandledRejection', unhandledRejection)
+
+    expect(onCodexEvent).toHaveBeenCalledTimes(1)
+    expect(unhandledRejection).not.toHaveBeenCalled()
+    expect(result.outcome).toMatchObject({
+      kind: 'normal',
+      reason_code: 'stopped_non_active_state',
+      turns_executed: 1,
+    })
+    expect(result.attempt.status).toBe('succeeded')
+  })
+
   it('maps workspace provisioning failures before a workspace exists', async () => {
     const deps = createBaseDeps()
     deps.ensureWorkspace.mockRejectedValueOnce(new Error('workspace unavailable'))

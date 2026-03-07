@@ -150,7 +150,7 @@ export function deriveWorkerExitIntent(
       kind: 'retry',
       issue_id: issueId,
       identifier,
-      attempt: 1,
+      attempt: (runningEntry.retry_attempt ?? 0) + 1,
       retry_kind: 'continuation',
       error: null,
     }

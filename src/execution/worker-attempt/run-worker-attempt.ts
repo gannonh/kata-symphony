@@ -32,7 +32,7 @@ export interface WorkerAttemptRunnerDeps {
   workflowTemplate: string
   activeStates: string[]
   maxTurns: number
-  onCodexEvent?: (event: WorkerAttemptCodexEvent) => void
+  onCodexEvent?: (event: WorkerAttemptCodexEvent) => void | Promise<void>
 }
 
 function toErrorMessage(error: unknown): string {
@@ -179,7 +179,7 @@ export function createWorkerAttemptRunner(
                 timestamp: new Date().toISOString(),
                 session: runtimeState.client.getLatestSession(),
               }
-              onCodexEvent?.(codexEvent)
+              void Promise.resolve(onCodexEvent?.(codexEvent)).catch(() => {})
             } catch {
               // Callback failures must not alter attempt outcome
             }

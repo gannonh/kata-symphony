@@ -59,7 +59,7 @@ export interface WorkerAttemptCodexEvent {
 }
 
 export interface WorkerAttemptRunOptions {
-  onCodexEvent?: (event: WorkerAttemptCodexEvent) => void
+  onCodexEvent?: (event: WorkerAttemptCodexEvent) => void | Promise<void>
 }
 
 export interface WorkerAttemptRunner {
