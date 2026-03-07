@@ -71,6 +71,8 @@ Aggregate evidence for the full harness PR including all review fix rounds.
 ## Canonical Docs Updated
 
 - `AGENTS.md`
+- `docs/harness/change-evidence-schema.md`
+- `docs/harness/context-map.yaml`
 - `PLANS.md`
 - `QUALITY_SCORE.md`
 
