@@ -20,11 +20,21 @@ describe('service bootstrap wiring', () => {
   it('creates dependency graph and passes startup preflight before bootstrap', async () => {
     const service = createService()
     const snapshot = service.config.getSnapshot()
+    const loggerInfoSpy = vi.fn()
+    service.logger.info = loggerInfoSpy
 
     expect(snapshot.tracker.kind).toBe('linear')
     expect(snapshot.tracker.api_key).toBe(process.env.LINEAR_API_KEY)
     expect(snapshot.agent.max_retry_backoff_ms).toBeGreaterThan(0)
     await expect(startService(service)).resolves.toBeUndefined()
+    expect(loggerInfoSpy).toHaveBeenCalledWith(
+      'Symphony bootstrap ok',
+      expect.objectContaining({
+        mode: 'bootstrap',
+        orchestration_enabled: true,
+      }),
+    )
+    await service.orchestrator.stop()
   })
 
   it('blocks bootstrap when startup preflight validation fails', async () => {
@@ -94,5 +104,46 @@ describe('service bootstrap wiring', () => {
 
     expect(service).toHaveProperty('workerAttemptRunner')
     expect(typeof service.workerAttemptRunner.run).toBe('function')
+  })
+
+  it('passes the worker attempt runner into orchestrator wiring', async () => {
+    vi.resetModules()
+    const createOrchestrator = vi.fn(() => ({
+      start: vi.fn(async () => {}),
+      stop: vi.fn(async () => {}),
+    }))
+
+    vi.doMock('../../src/orchestrator/service.js', async () => {
+      const actual =
+        await vi.importActual<typeof import('../../src/orchestrator/service.js')>(
+          '../../src/orchestrator/service.js',
+        )
+
+      return {
+        ...actual,
+        createOrchestrator,
+      }
+    })
+
+    try {
+      const { createService: createServiceWithMock } = await import(
+        '../../src/bootstrap/service.js'
+      )
+      const service = createServiceWithMock()
+
+      expect(createOrchestrator).toHaveBeenCalledTimes(1)
+      expect(createOrchestrator).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: service.config,
+          tracker: service.tracker,
+          workspace: service.workspace,
+          agentRunner: service.agentRunner,
+          workerAttemptRunner: service.workerAttemptRunner,
+          logger: service.logger,
+        }),
+      )
+    } finally {
+      vi.doUnmock('../../src/orchestrator/service.js')
+    }
   })
 })

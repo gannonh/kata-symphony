@@ -1,7 +1,6 @@
 import type { DispatchPreflightError, DispatchPreflightResult } from './contracts.js'
 
 export interface RunTickPreflightGateOptions {
-  reconcile: () => Promise<void>
   validate: () => Promise<DispatchPreflightResult>
   logFailure: (errors: DispatchPreflightError[]) => void | Promise<void>
 }
@@ -22,8 +21,6 @@ const VALIDATE_THROW_FAILURE: DispatchPreflightError[] = [
 export async function runTickPreflightGate(
   options: RunTickPreflightGateOptions,
 ): Promise<RunTickPreflightGateResult> {
-  await options.reconcile()
-
   let result: DispatchPreflightResult
   try {
     result = await options.validate()

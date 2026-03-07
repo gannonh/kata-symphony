@@ -9,13 +9,14 @@ import { createAgentSessionClient } from '../execution/agent-runner/index.js'
 import { createWorkerAttemptRunner } from '../execution/worker-attempt/index.js'
 import { createWorkspaceManager } from '../execution/workspace/index.js'
 import type { Logger } from '../observability/contracts.js'
-import { createNoopOrchestrator } from '../orchestrator/contracts.js'
+import type { Orchestrator } from '../orchestrator/contracts.js'
 import {
   logPreflightFailure,
   validateDispatchPreflight,
   type DispatchPreflightError,
   type DispatchPreflightResult,
 } from '../orchestrator/preflight/index.js'
+import { createOrchestrator } from '../orchestrator/service.js'
 import type { TrackerClient } from '../tracker/contracts.js'
 import { loadWorkflowDefinition } from '../workflow/index.js'
 
@@ -37,7 +38,7 @@ export interface ServiceBootstrap {
   agentRunner: AgentRunner
   workerAttemptRunner: WorkerAttemptRunner
   logger: Logger
-  orchestrator: ReturnType<typeof createNoopOrchestrator>
+  orchestrator: Orchestrator
 }
 
 export class StartupPreflightError extends Error {
@@ -110,16 +111,14 @@ export function createService(): ServiceBootstrap {
         codex: snapshot.codex,
         workspacePath,
       }),
-    onCodexEvent(event) {
-      logger.info('worker_attempt_codex_event', event as Record<string, unknown>)
-    },
   })
 
-  const orchestrator = createNoopOrchestrator({
+  const orchestrator = createOrchestrator({
     config,
     tracker,
     workspace,
     agentRunner,
+    workerAttemptRunner,
     logger,
   })
 
@@ -151,6 +150,6 @@ export async function startService(
   await service.orchestrator.start()
   service.logger.info('Symphony bootstrap ok', {
     mode: 'bootstrap',
-    orchestration_enabled: false,
+    orchestration_enabled: true,
   })
 }

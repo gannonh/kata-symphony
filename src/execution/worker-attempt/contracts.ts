@@ -49,6 +49,23 @@ export interface WorkerAttemptResult {
   outcome: WorkerAttemptOutcome
 }
 
+export interface WorkerAttemptCodexEvent {
+  issue_id: string
+  issue_identifier: string
+  event: 'turn_completed'
+  turn_number: number
+  timestamp: string
+  session: LiveSession | null
+}
+
+export interface WorkerAttemptRunOptions {
+  onCodexEvent?: (event: WorkerAttemptCodexEvent) => void | Promise<void>
+}
+
 export interface WorkerAttemptRunner {
-  run(issue: Issue, attempt: number | null): Promise<WorkerAttemptResult>
+  run(
+    issue: Issue,
+    attempt: number | null,
+    options?: WorkerAttemptRunOptions,
+  ): Promise<WorkerAttemptResult>
 }

@@ -1,4 +1,20 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
+import { createWorkerAttemptRunner } from '../../src/execution/worker-attempt/run-worker-attempt.js'
+
+const issue = {
+  id: 'issue-1',
+  identifier: 'KAT-229',
+  title: 'Worker pipeline',
+  description: null,
+  priority: 1,
+  state: 'Review',
+  branch_name: null,
+  url: null,
+  labels: [],
+  blocked_by: [],
+  created_at: null,
+  updated_at: null,
+}
 
 const harness = vi.hoisted(() => {
   const startSession = vi.fn().mockResolvedValue({
@@ -68,7 +84,7 @@ describe('bootstrap worker attempt runner wiring', () => {
     vi.clearAllMocks()
   })
 
-  it('creates the session client from the workspace path and logs codex events during a run', async () => {
+  it('creates the session client from the workspace path without defaulting codex events to the logger', async () => {
     vi.resetModules()
     const consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
 
@@ -77,20 +93,7 @@ describe('bootstrap worker attempt runner wiring', () => {
       const service = createService()
 
       const result = await service.workerAttemptRunner.run(
-        {
-          id: 'issue-1',
-          identifier: 'KAT-229',
-          title: 'Worker pipeline',
-          description: null,
-          priority: 1,
-          state: 'Review',
-          branch_name: null,
-          url: null,
-          labels: [],
-          blocked_by: [],
-          created_at: null,
-          updated_at: null,
-        },
+        issue,
         null,
       )
 
@@ -103,14 +106,7 @@ describe('bootstrap worker attempt runner wiring', () => {
       expect(harness.startSession).toHaveBeenCalledTimes(1)
       expect(harness.runTurn).not.toHaveBeenCalled()
       expect(harness.stopSession).toHaveBeenCalledTimes(1)
-      expect(consoleLogSpy).toHaveBeenCalledWith(
-        'worker_attempt_codex_event',
-        expect.objectContaining({
-          issue_identifier: 'KAT-229',
-          event: 'turn_completed',
-          turn_number: 1,
-        }),
-      )
+      expect(consoleLogSpy).not.toHaveBeenCalled()
       expect(result.outcome).toMatchObject({
         kind: 'normal',
         reason_code: 'stopped_non_active_state',
@@ -120,5 +116,63 @@ describe('bootstrap worker attempt runner wiring', () => {
     } finally {
       consoleLogSpy.mockRestore()
     }
+  })
+
+  it('lets each worker attempt provide its own codex event callback', async () => {
+    vi.resetModules()
+    const onCodexEvent = vi.fn()
+
+    const { createService } = await import('../../src/bootstrap/service.js')
+    const service = createService()
+
+    await service.workerAttemptRunner.run(
+      issue,
+      null,
+      { onCodexEvent },
+    )
+
+    expect(onCodexEvent).toHaveBeenCalledTimes(1)
+    expect(onCodexEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        issue_identifier: 'KAT-229',
+        event: 'turn_completed',
+        turn_number: 1,
+      }),
+    )
+  })
+
+  it('prefers the per-run codex event callback over the constructor callback', async () => {
+    const constructorOnCodexEvent = vi.fn()
+    const perRunOnCodexEvent = vi.fn()
+
+    const runner = createWorkerAttemptRunner({
+      workspace: {
+        ensureWorkspace: vi.fn().mockResolvedValue({
+          path: '/tmp/ws/KAT-229',
+          workspace_key: 'KAT-229',
+          created_now: false,
+        }),
+        runBeforeRun: vi.fn().mockResolvedValue(undefined),
+        runAfterRun: vi.fn().mockResolvedValue(undefined),
+      },
+      tracker: {
+        fetchIssuesByIds: vi.fn().mockResolvedValue([issue]),
+      },
+      sessionClientFactory: () => ({
+        startSession: harness.startSession,
+        runTurn: harness.runTurn,
+        stopSession: harness.stopSession,
+        getLatestSession: harness.getLatestSession,
+      }),
+      workflowTemplate: 'Issue {{ issue.identifier }}',
+      activeStates: ['todo', 'in progress'],
+      maxTurns: 1,
+      onCodexEvent: constructorOnCodexEvent,
+    })
+
+    await runner.run(issue, null, { onCodexEvent: perRunOnCodexEvent })
+
+    expect(perRunOnCodexEvent).toHaveBeenCalledTimes(1)
+    expect(constructorOnCodexEvent).not.toHaveBeenCalled()
   })
 })

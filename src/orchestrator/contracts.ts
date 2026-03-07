@@ -1,5 +1,9 @@
 import type { ConfigProvider } from '../config/contracts.js'
-import type { AgentRunner, WorkspaceManager } from '../execution/contracts.js'
+import type {
+  AgentRunner,
+  WorkerAttemptRunner,
+  WorkspaceManager,
+} from '../execution/contracts.js'
 import type { Logger } from '../observability/contracts.js'
 import type { TrackerClient } from '../tracker/contracts.js'
 export type {
@@ -8,6 +12,12 @@ export type {
   DispatchPreflightResult,
 } from './preflight/index.js'
 export { isDispatchPreflightFailure } from './preflight/index.js'
+export type {
+  OrchestratorClaimState,
+  OrchestratorState,
+  RunningEntry,
+} from './runtime/index.js'
+export { deriveClaimState } from './runtime/index.js'
 
 export interface Orchestrator {
   start(): Promise<void>
@@ -19,6 +29,7 @@ export interface OrchestratorDeps {
   tracker: TrackerClient
   workspace: WorkspaceManager
   agentRunner: AgentRunner
+  workerAttemptRunner: WorkerAttemptRunner
   logger: Logger
 }
 
