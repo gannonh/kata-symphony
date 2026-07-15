@@ -125,8 +125,6 @@ coverage/
 .kata/debug.log
 
 # Local planning artifacts
-
-
 apps/symphony/docs/plans/
 apps/symphony/docs/specs/
 apps/symphony/superpowers/
@@ -135,5 +133,6 @@ apps/cli/docs/plans/
 apps/cli/docs/specs/
 apps/cli/docs/superpowers/
 
-# Kata CLI generated files
+# artifacts
 .agents/kata-setup-manifest.json
+apps/desktop/release/
