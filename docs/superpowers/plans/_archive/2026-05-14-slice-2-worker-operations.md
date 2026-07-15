@@ -1,3 +1,11 @@
+---
+type: Plan
+title: Slice 2 Worker Operations
+description: Archived implementation plan: Slice 2 Worker Operations.
+tags: [archive]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # Pi Symphony Extension Slice 2 Worker Operations Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

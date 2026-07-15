@@ -1,3 +1,11 @@
+---
+type: Plan
+title: Cli Linear Core Implementation Plan
+description: Archived implementation plan: Cli Linear Core Implementation Plan.
+tags: [archive]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # CLI Linear Core Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

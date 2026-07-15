@@ -1,3 +1,11 @@
+---
+type: Plan
+title: Pi Skills Migraqtion
+description: Archived implementation plan: Pi Skills Migraqtion.
+tags: [archive]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 
 We are migrating Kata CLI away from its current implementation as a custom CLI built on top of the Pi coding agent.
 

@@ -1,8 +1,18 @@
+---
+type: Spec
+title: Pi Symphony Extension Design
+description: Design for a Pi extension to initialize, launch, monitor, and steer Symphony.
+tags: [symphony, pi, extension]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # Pi Symphony Extension Design
 
 Date: 2026-05-14
 Package: `@kata-sh/pi-symphony-extension`
 Source: `apps/symphony/pi-extension`
+
+Related: [Wave 4 Shared Context and Diagnostics Plan](/superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md). Roadmap: [specs/index.md](/specs/index.md).
 
 ## Goal
 

@@ -1,3 +1,11 @@
+---
+type: Reference
+title: Kata Cli Skill Platform Gap Assessment
+description: Archived reference document: Kata Cli Skill Platform Gap Assessment.
+tags: [archive, cli]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # Kata CLI Skill Platform Gap Assessment
 
 Date: `2026-04-27`

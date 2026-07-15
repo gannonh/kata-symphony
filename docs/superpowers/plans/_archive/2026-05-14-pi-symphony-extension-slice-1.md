@@ -1,3 +1,11 @@
+---
+type: Plan
+title: Pi Symphony Extension Slice 1
+description: Archived implementation plan: Pi Symphony Extension Slice 1.
+tags: [archive]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # Pi Symphony Extension Slice 1 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

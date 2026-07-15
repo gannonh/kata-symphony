@@ -1,3 +1,11 @@
+---
+type: Spec
+title: Cli Linear Core Design
+description: Archived spec document: Cli Linear Core Design.
+tags: [archive, cli]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # CLI Linear Core Design
 
 **Date:** 2026-05-06

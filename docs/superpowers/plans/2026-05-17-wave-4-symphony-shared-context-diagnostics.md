@@ -1,3 +1,11 @@
+---
+type: Plan
+title: Wave 4 Symphony Shared Context and Diagnostics
+description: Implementation plan for Wave 4 dashboard parity: shared context and diagnostics.
+tags: [symphony, pi, dashboard]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # Wave 4 Symphony Shared Context and Diagnostics Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
@@ -7,6 +15,8 @@
 **Architecture:** Keep HTTP contracts and validators in `http-client.ts`, model transformation in `console-model.ts`, runtime state in `runtime.ts`, and rendering and key handling in `console.ts`. The console stays a single Pi widget with one unified selection index across issues, escalations, and shared context rows.
 
 **Tech Stack:** TypeScript, Vitest, Node HTTP mock server, Pi extension APIs, `ws` for Symphony event streams.
+
+Related: [Pi Symphony Extension Design](/superpowers/specs/2026-05-14-pi-symphony-extension-design.md). Roadmap: [specs/index.md](/specs/index.md).
 
 ---
 

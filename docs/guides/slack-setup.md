@@ -1,3 +1,11 @@
+---
+type: Guide
+title: Slack channel setup
+description: Connect a Slack workspace to Kata Agents for channel read/respond.
+tags: [slack, channels, setup]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # Slack Channel Setup
 
 Connect a Slack workspace to Kata Agents so the agent can read and respond to messages in your Slack channels.

@@ -1,3 +1,11 @@
+---
+type: Plan
+title: Symphony Linear Execution Implementation Plan
+description: Archived implementation plan: Symphony Linear Execution Implementation Plan.
+tags: [archive]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # Symphony Linear Execution Implementation Plan
 
 > **Superseded:** Use `docs/superpowers/specs/2026-05-07-symphony-linear-execution-and-backend-uat-design.md` for current planning. This plan references removed Symphony skill distribution paths and is retained as historical context.

@@ -1,3 +1,11 @@
+---
+type: Guide
+title: Issue tracker: GitHub
+description: GitHub Issues conventions for gannonh/kata; PRs are not a triage surface.
+tags: [github, issues, agents]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # Issue tracker: GitHub
 
 Issues and PRDs for this repo live as GitHub issues. Use the `gh` CLI for all operations.

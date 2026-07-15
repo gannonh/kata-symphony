@@ -1,3 +1,11 @@
+---
+type: Spec
+title: Symphony Linear Execution And Backend Uat Design
+description: Archived spec document: Symphony Linear Execution And Backend Uat Design.
+tags: [archive, symphony]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # Symphony Linear Execution And Backend UAT Design
 
 **Date:** 2026-05-07

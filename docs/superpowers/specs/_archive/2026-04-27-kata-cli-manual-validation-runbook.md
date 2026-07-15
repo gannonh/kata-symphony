@@ -1,3 +1,11 @@
+---
+type: Runbook
+title: Kata Cli Manual Validation Runbook
+description: Archived runbook document: Kata Cli Manual Validation Runbook.
+tags: [archive, cli]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # Kata CLI Phase A Manual Validation Runbook
 
 Date: `2026-04-28`

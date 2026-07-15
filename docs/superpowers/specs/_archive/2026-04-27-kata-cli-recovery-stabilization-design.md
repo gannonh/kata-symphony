@@ -1,3 +1,11 @@
+---
+type: Spec
+title: Kata Cli Recovery Stabilization Design
+description: Archived spec document: Kata Cli Recovery Stabilization Design.
+tags: [archive, cli]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # Kata CLI Recovery and Stabilization Design
 
 Date: `2026-04-27`

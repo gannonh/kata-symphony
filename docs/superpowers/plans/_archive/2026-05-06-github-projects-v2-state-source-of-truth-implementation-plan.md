@@ -1,3 +1,11 @@
+---
+type: Plan
+title: Github Projects V2 State Source Of Truth Implementation Plan
+description: Archived implementation plan: Github Projects V2 State Source Of Truth Implementation Plan.
+tags: [archive]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # GitHub Projects v2 State Source Of Truth Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

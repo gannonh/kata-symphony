@@ -1,3 +1,11 @@
+---
+type: Spec
+title: Kata Cli Skill Platform Design
+description: Archived spec document: Kata Cli Skill Platform Design.
+tags: [archive, cli]
+timestamp: 2026-07-15T20:00:00Z
+---
+
 # Kata CLI Skill Platform Design
 
 **Date:** 2026-04-26
