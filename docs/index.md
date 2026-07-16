@@ -8,6 +8,7 @@ Open Knowledge Format (OKF) bundle for the Kata monorepo: Kata CLI (`apps/cli`) 
 
 # Roadmap
 
+* [Symphony Software Factory Platform PRD](specs/symphony-software-factory-platform-prd.md) - product direction and vertical-slice roadmap
 * [Specs roadmap](specs/) - active, planned, and completed work (links into historical Superpowers plans/specs)
 * [ADRs](adrs/) - architecture decision records (seeded; add ADRs as decisions land)
 

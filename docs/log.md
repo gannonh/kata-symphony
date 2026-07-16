@@ -1,5 +1,8 @@
 # Docs Update Log
 
+## 2026-07-16
+* **Roadmap**: Added the [Symphony Software Factory Platform PRD](/specs/symphony-software-factory-platform-prd.md) and promoted it in the OKF roadmap.
+
 ## 2026-07-15
 * **Initialization**: Created OKF v0.1 bundle structure (`index.md`, `log.md`, `specs/`, `adrs/`, `guides/`, `domains/`).
 * **Move**: Relocated Slack setup guide to [guides/slack-setup.md](/guides/slack-setup.md).
