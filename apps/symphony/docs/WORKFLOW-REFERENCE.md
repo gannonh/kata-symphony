@@ -500,7 +500,11 @@ server:
 # Preview is the safe rollout path: collect metrics and review artifacts, then
 # promote to automatic after doctor checks and sample agreement look healthy.
 #
-# `prompt` is resolved relative to this WORKFLOW.md directory. Route labels must
+# `prompt` is resolved relative to this WORKFLOW.md directory (same anchor as
+# `prompts.*` and hooks). `workspace.root` / local `workspace.repo` stay
+# relative to the process cwd (typically the repository root), and are
+# canonicalized before triage clones so values like `repo: .` stay stable.
+# Route labels must
 # be distinct and must not equal `intake_label`. Optional `state` values must exist
 # on the Projects v2 Status field.
 #

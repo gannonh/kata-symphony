@@ -5,8 +5,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::domain::{AgentBackend, ServiceConfig};
+use crate::domain::{AgentBackend, Issue, ServiceConfig};
 use crate::error::{Result, SymphonyError};
+use crate::path_safety;
+use crate::repo_url::repo_is_remote;
 use crate::triage::domain::{
     FactoryError, FactoryEventRecord, FactoryRunStatus, PublicationMode, PublicationStatus,
     TRIAGE_STAGE_NAME,
@@ -20,8 +22,8 @@ use crate::triage::publisher::{
     IneligiblePublishRequest, PreviewPublishRequest, PreviewPublisher, TriageCommentPort,
 };
 use crate::triage::runner::{
-    effective_pi_model, TriageRunner, TriageRunnerFailureKind, TriageRunnerOutcome,
-    TriageRunnerRequest, TriageRunnerSuccess,
+    effective_pi_model, TriageHarness, TriageIssueIdentity, TriageRunner,
+    TriageRunnerFailureKind, TriageRunnerOutcome, TriageRunnerRequest, TriageRunnerSuccess,
 };
 use crate::triage::store::{
     ClaimAttemptRequest, CreatePublicationIntentRequest, FactoryRunStore, StoreArtifactRequest,
@@ -164,21 +166,21 @@ where
             .await?;
         summary.issues_seen = issues.len() as u32;
 
-        let prompt = load_prompt(&self.config.workflow_dir, &service.triage.prompt)?;
-        let harness = triage_harness(service.agent_backend).to_string();
+        let prompt_template = load_prompt(&self.config.workflow_dir, &service.triage.prompt)?;
+        let harness = triage_harness(service.agent_backend);
         let model = triage_model(service);
         let configuration_revision = configuration_revision(&ConfigurationRevisionInput {
-            prompt,
+            prompt: prompt_template.clone(),
             turn_timeout_ms: service.triage.turn_timeout_ms,
             max_attempts: service.triage.max_attempts,
-            harness: harness.clone(),
+            harness: triage_harness_name(harness).to_string(),
             model: model.clone(),
             routes: service.triage.routes.clone(),
         });
         let mapping_hash = route_mapping_hash(&service.triage.routes);
         let command = triage_command(service)?;
         let repo_path = require_repo_path(service)?;
-        let workspace_root = PathBuf::from(&service.workspace.root);
+        let workspace_root = resolve_workspace_path(&service.workspace.root, "workspace.root")?;
 
         for mut issue in issues {
             if issue.comments.is_empty() {
@@ -199,7 +201,8 @@ where
                 .handle_in_project(
                     &issue,
                     service,
-                    &harness,
+                    &prompt_template,
+                    harness,
                     model.as_deref(),
                     &configuration_revision,
                     &mapping_hash,
@@ -386,7 +389,8 @@ where
         &mut self,
         issue: &TriageIntakeIssue,
         service: &ServiceConfig,
-        harness: &str,
+        prompt_template: &str,
+        harness: TriageHarness,
         model: Option<&str>,
         configuration_revision: &str,
         mapping_hash: &str,
@@ -434,7 +438,7 @@ where
             issue_revision: issue_rev.clone(),
             configuration_revision: configuration_revision.to_string(),
             owner_instance: self.config.owner_instance.clone(),
-            harness: harness.to_string(),
+            harness: triage_harness_name(harness).to_string(),
             model: model.map(str::to_string),
             workspace_path: None,
             output_path: None,
@@ -467,6 +471,7 @@ where
             }),
         )?;
 
+        let rendered_prompt = render_triage_prompt(prompt_template, issue, service)?;
         let outcome = self
             .executor
             .execute(TriageRunnerRequest {
@@ -474,8 +479,16 @@ where
                 workspace_root: workspace_root.to_path_buf(),
                 repo_path: repo_path.to_path_buf(),
                 command: command.to_vec(),
+                prompt: rendered_prompt,
                 turn_timeout_ms: service.triage.turn_timeout_ms,
                 model: model.map(str::to_string),
+                harness,
+                issue: TriageIssueIdentity {
+                    id: issue.issue_id.clone(),
+                    identifier: issue.identifier.clone(),
+                    title: issue.title.clone(),
+                },
+                codex: (harness == TriageHarness::Codex).then(|| service.codex.clone()),
             })
             .await?;
 
@@ -677,14 +690,76 @@ fn require_repo_path(service: &ServiceConfig) -> Result<PathBuf> {
                 "workspace.repo local path is required for triage".to_string(),
             )
         })?;
-    Ok(PathBuf::from(repo))
+    if repo_is_remote(repo) {
+        return Err(SymphonyError::TriageError(
+            "workspace.repo must be a local path for triage (remote URLs are not supported)"
+                .to_string(),
+        ));
+    }
+    // Resolve against process cwd once. Triage clones with cwd set to the empty
+    // workspace directory, so a bare "." would otherwise mean that empty dir.
+    resolve_workspace_path(repo, "workspace.repo")
 }
 
-fn triage_harness(backend: AgentBackend) -> &'static str {
-    match backend {
-        AgentBackend::KataCli => "pi",
-        AgentBackend::Codex => "codex",
+fn resolve_workspace_path(configured: &str, field: &str) -> Result<PathBuf> {
+    let trimmed = configured.trim();
+    if trimmed.is_empty() {
+        return Err(SymphonyError::TriageError(format!(
+            "{field} cannot be empty"
+        )));
     }
+    path_safety::canonicalize(Path::new(trimmed)).map_err(|err| {
+        SymphonyError::TriageError(format!("failed to resolve {field} '{trimmed}': {err}"))
+    })
+}
+
+fn triage_harness(backend: AgentBackend) -> TriageHarness {
+    match backend {
+        AgentBackend::KataCli => TriageHarness::Pi,
+        AgentBackend::Codex => TriageHarness::Codex,
+    }
+}
+
+fn triage_harness_name(harness: TriageHarness) -> &'static str {
+    match harness {
+        TriageHarness::Pi => "pi",
+        TriageHarness::Codex => "codex",
+    }
+}
+
+/// Render the triage prompt template with issue context (Liquid, strict mode).
+fn render_triage_prompt(
+    template: &str,
+    issue: &TriageIntakeIssue,
+    service: &ServiceConfig,
+) -> Result<String> {
+    let domain_issue = Issue {
+        id: issue.issue_id.clone(),
+        identifier: issue.identifier.clone(),
+        title: issue.title.clone(),
+        description: Some(issue.body.clone()),
+        priority: None,
+        state: String::new(),
+        branch_name: None,
+        url: Some(format!(
+            "https://{}/{}/issues/{}",
+            issue.forge_host, issue.repository, issue.issue_number
+        )),
+        assignee_id: None,
+        labels: issue.labels.clone(),
+        blocked_by: Vec::new(),
+        assigned_to_worker: true,
+        created_at: Some(issue.created_at),
+        updated_at: Some(issue.updated_at),
+        children_count: 0,
+        parent_identifier: None,
+    };
+    crate::prompt_builder::render_prompt(
+        template,
+        &domain_issue,
+        None,
+        service.workspace.base_branch.as_deref(),
+    )
 }
 
 fn triage_command(service: &ServiceConfig) -> Result<Vec<String>> {
@@ -1227,5 +1302,38 @@ mod tests {
         assert_eq!(summary.reconciled_intents, 1);
         assert_eq!(*comments.create_count.lock().unwrap(), 1);
         assert!(*comments.list_count.lock().unwrap() >= 1);
+    }
+
+    #[test]
+    fn require_repo_path_resolves_dot_against_process_cwd() {
+        let mut service = ServiceConfig::default();
+        service.workspace.repo = Some(".".to_string());
+
+        let resolved = require_repo_path(&service).expect("relative repo should resolve");
+        let cwd = std::env::current_dir().expect("cwd");
+        let expected = path_safety::canonicalize(&cwd).expect("cwd canonicalize");
+
+        assert!(resolved.is_absolute(), "resolved path must be absolute");
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn require_repo_path_rejects_remote_urls() {
+        let mut service = ServiceConfig::default();
+        service.workspace.repo = Some("https://github.com/org/repo.git".to_string());
+
+        let err = require_repo_path(&service).expect_err("remote repo must fail");
+        assert!(
+            err.to_string().contains("local path"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_workspace_path_expands_relative_root() {
+        let resolved =
+            resolve_workspace_path(".symphony/workspaces", "workspace.root").expect("resolve");
+        assert!(resolved.is_absolute());
+        assert!(resolved.ends_with(std::path::Path::new(".symphony/workspaces")));
     }
 }

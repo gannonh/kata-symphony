@@ -26,7 +26,8 @@ tracker:
 polling:
   interval_ms: 30000
 workspace:
-  # These relative paths assume you run Symphony from the repository root.
+  # Relative to process cwd (run Symphony from the repository root).
+  # Prompts/hooks are relative to this WORKFLOW.md directory instead.
   root: .symphony/workspaces
   repo: .
   git_strategy: worktree
