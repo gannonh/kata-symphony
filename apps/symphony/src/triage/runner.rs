@@ -266,6 +266,7 @@ fn clone_local_workspace(repo: &Path, workspace: &Path) -> std::result::Result<(
     let output = std::process::Command::new("git")
         .arg("clone")
         .arg("--local")
+        .arg("--no-hardlinks")
         .arg(repo)
         .arg(".")
         .current_dir(workspace)
