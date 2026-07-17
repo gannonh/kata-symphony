@@ -118,3 +118,24 @@ This repository maintains an [OKF](https://github.com/GoogleCloudPlatform/knowle
 - After substantial work, PRs, behavior changes, architecture decisions, migrations, or documentation moves, update the OKF bundle and add concise entries to the relevant `log.md` files.
 - Maintain Markdown cross-links between related OKF concepts so future agents can traverse decisions, specs, architecture, runbooks, guides, and references.
 - Every non-reserved Markdown file under `./docs` should have OKF frontmatter with at least a non-empty `type` field. `index.md` and `log.md` are reserved navigation/history files.
+
+## Cursor Cloud specific instructions
+
+Standard commands live in the `## Commands`/`## Testing` sections above; the notes below are only non-obvious caveats for this environment. The startup update script runs `pnpm install`.
+
+### Toolchain
+
+- The VM's default `node` is `/exec-daemon/node` (Node 22, injected first on `PATH`); it satisfies the CLI `engines >=20.6` so `pnpm`/tests run fine on it. Node `24.15.0` (from `.node-version`) is installed via `nvm` for CI/pre-push parity — the pre-push hook auto-selects it from `~/.nvm`.
+- `pnpm` is provided by corepack (`pnpm@10.6.2`). Bun `1.3.8` (`~/.bun/bin`, added to `~/.bashrc`) is only needed for `test:coverage`/`test:watch` scripts and CI; the main `turbo run test` path uses Vitest, not Bun.
+- Symphony needs Rust stable ≥1.85 (a transitive dep requires the `edition2024` Cargo feature); the pinned image's Rust 1.83 fails to build. `rustup` default is set to current stable. Building Symphony also requires system OpenSSL headers (`libssl-dev` + `pkg-config`), already installed.
+
+### Kata Symphony (Rust)
+
+- Use `cargo build` (debug) for faster iteration; binary is `apps/symphony/target/debug/symphony`. First build/`cargo test` are slow (~30s+ each).
+- Do NOT run the committed `.symphony/WORKFLOW.md` directly — it points at maintainer-local `/Volumes/EVO` paths and the `pi` agent (not installed). Instead `symphony init` a scratch dir, point `tracker` at a real project, and run `symphony <workflow> --no-tui --port 8080`. Dashboard is `http://127.0.0.1:8080/`, JSON state at `/api/v1/state`.
+- To bring up the dashboard without dispatching agents (no `pi`/`codex` on PATH), set `tracker.active_states` to a placeholder that no board column matches — the orchestrator polls the real backend but dispatches nothing.
+
+### Kata CLI
+
+- Build with `pnpm --dir apps/cli run build`, then run `node apps/cli/dist/loader.js <cmd>`. `health.check` is offline-safe; read ops (e.g. `issue.listOpen`) and `kata doctor` hit the live backend.
+- `GH_TOKEN` is present in the environment (authenticates as the repo owner against the real `gannonh/kata` GitHub Projects v2 board). Avoid write operations (`*.create`, `*.updateStatus`, `issue.updateStatus`) to keep the live board clean.
