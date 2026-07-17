@@ -461,7 +461,7 @@ pub struct FactoryRunAttemptHttp {
     pub status: String,
     pub configuration_revision: String,
     pub harness: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<chrono::DateTime<Utc>>,
@@ -470,7 +470,7 @@ pub struct FactoryRunAttemptHttp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
     pub usage: crate::triage::domain::StageUsage,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub error: Option<crate::triage::domain::FactoryError>,
 }
 
