@@ -21,6 +21,9 @@ use crate::error::{Result, SymphonyError};
 use crate::github::auth::{github_token_missing_message, resolve_github_token};
 use crate::notifications;
 use crate::repo_url::repo_is_remote;
+use crate::triage::domain::{
+    RouteMapping, StorageConfig, TriageConfig, TriageMode, TriageRoutesConfig,
+};
 
 // ── Key normalization and null-dropping ───────────────────────────────────────
 
@@ -356,6 +359,44 @@ struct RawSlackConfig {
     events: Option<Vec<String>>,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawStorageConfig {
+    path: Option<String>,
+    busy_timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawRouteMapping {
+    label: Option<String>,
+    state: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawTriageRoutes {
+    implement: Option<RawRouteMapping>,
+    spec: Option<RawRouteMapping>,
+    needs_information: Option<RawRouteMapping>,
+    park: Option<RawRouteMapping>,
+    human_owned: Option<RawRouteMapping>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawTriageConfig {
+    enabled: Option<bool>,
+    mode: Option<String>,
+    intake_label: Option<String>,
+    prompt: Option<String>,
+    model: Option<String>,
+    turn_timeout_ms: Option<u64>,
+    max_attempts: Option<u32>,
+    max_intake_pages: Option<u32>,
+    routes: Option<RawTriageRoutes>,
+}
+
 // ── Section extraction helper ─────────────────────────────────────────────────
 
 fn extract_section<T>(normalized: &Value, section: &str) -> Result<T>
@@ -517,6 +558,45 @@ fn parse_docker_codex_auth(value: &str) -> Result<DockerCodexAuth> {
     }
 }
 
+fn build_route_mapping(raw: Option<RawRouteMapping>, default: RouteMapping) -> RouteMapping {
+    match raw {
+        None => default,
+        Some(raw) => {
+            let label = raw
+                .label
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or(default.label);
+            let state = match raw.state {
+                Some(value) => {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    }
+                }
+                None => default.state,
+            };
+            RouteMapping { label, state }
+        }
+    }
+}
+
+fn build_triage_routes(
+    raw: Option<RawTriageRoutes>,
+    defaults: TriageRoutesConfig,
+) -> TriageRoutesConfig {
+    let raw = raw.unwrap_or_default();
+    TriageRoutesConfig {
+        implement: build_route_mapping(raw.implement, defaults.implement),
+        spec: build_route_mapping(raw.spec, defaults.spec),
+        needs_information: build_route_mapping(raw.needs_information, defaults.needs_information),
+        park: build_route_mapping(raw.park, defaults.park),
+        human_owned: build_route_mapping(raw.human_owned, defaults.human_owned),
+    }
+}
+
 // ── Validated config wrapper ──────────────────────────────────────────────────
 
 /// A [`ServiceConfig`] that has passed [`validate`].
@@ -571,6 +651,8 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
     let raw_shared_context: RawSharedContextConfig =
         extract_section(&normalized, "shared_context")?;
     let raw_supervisor: RawSupervisorConfig = extract_section(&normalized, "supervisor")?;
+    let raw_storage: RawStorageConfig = extract_section(&normalized, "storage")?;
+    let raw_triage: RawTriageConfig = extract_section(&normalized, "triage")?;
 
     let defaults = ServiceConfig::default();
     let has_kata_agent_section = normalized.get("kata_agent").is_some();
@@ -1194,6 +1276,66 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
             .unwrap_or(defaults.supervisor.steer_cooldown_ms),
     };
 
+    // ── StorageConfig ─────────────────────────────────────────────────────
+    let storage_path = raw_storage
+        .path
+        .map(|value| resolve_env(&value))
+        .map(|value| expand_tilde(value.trim()))
+        .filter(|value| !value.is_empty());
+    let storage = StorageConfig {
+        path: storage_path,
+        busy_timeout_ms: raw_storage
+            .busy_timeout_ms
+            .unwrap_or(defaults.storage.busy_timeout_ms),
+    };
+
+    // ── TriageConfig ──────────────────────────────────────────────────────
+    let triage_mode = match raw_triage.mode {
+        Some(value) => {
+            let resolved = resolve_env(&value);
+            let trimmed = resolved.trim();
+            TriageMode::parse(trimmed).ok_or_else(|| {
+                SymphonyError::InvalidWorkflowConfig(format!(
+                    "triage.mode must be 'preview' or 'automatic' (got '{trimmed}')"
+                ))
+            })?
+        }
+        None => defaults.triage.mode,
+    };
+    let triage_intake_label = raw_triage
+        .intake_label
+        .map(|value| resolve_env(&value))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| defaults.triage.intake_label.clone());
+    let triage_prompt = raw_triage
+        .prompt
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| defaults.triage.prompt.clone());
+    let triage_model = raw_triage
+        .model
+        .map(|value| resolve_env(&value))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    let triage = TriageConfig {
+        enabled: raw_triage.enabled.unwrap_or(defaults.triage.enabled),
+        mode: triage_mode,
+        intake_label: triage_intake_label,
+        prompt: triage_prompt,
+        model: triage_model,
+        turn_timeout_ms: raw_triage
+            .turn_timeout_ms
+            .unwrap_or(defaults.triage.turn_timeout_ms),
+        max_attempts: raw_triage
+            .max_attempts
+            .unwrap_or(defaults.triage.max_attempts),
+        max_intake_pages: raw_triage
+            .max_intake_pages
+            .unwrap_or(defaults.triage.max_intake_pages),
+        routes: build_triage_routes(raw_triage.routes, defaults.triage.routes.clone()),
+    };
+
     Ok(ServiceConfig {
         tracker,
         polling,
@@ -1209,6 +1351,8 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
         notifications,
         shared_context,
         supervisor,
+        storage,
+        triage,
     })
 }
 
@@ -1382,6 +1526,99 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
         return Err(SymphonyError::InvalidWorkflowConfig(
             "shared_context.max_entries must be greater than 0".to_string(),
         ));
+    }
+
+    if config.storage.busy_timeout_ms == 0 {
+        return Err(SymphonyError::InvalidWorkflowConfig(
+            "storage.busy_timeout_ms must be greater than 0".to_string(),
+        ));
+    }
+
+    if config.triage.enabled {
+        if tracker_kind != "github" {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "triage.enabled requires tracker.kind to be 'github' (GitHub Projects v2 only for A1)"
+                    .to_string(),
+            ));
+        }
+
+        if config.triage.intake_label.trim().is_empty() {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "triage.intake_label must be non-empty when triage is enabled".to_string(),
+            ));
+        }
+
+        if config.triage.prompt.trim().is_empty() {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "triage.prompt must be non-empty when triage is enabled".to_string(),
+            ));
+        }
+
+        if config.triage.turn_timeout_ms == 0 {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "triage.turn_timeout_ms must be greater than 0".to_string(),
+            ));
+        }
+
+        if config.triage.max_attempts == 0 {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "triage.max_attempts must be greater than 0".to_string(),
+            ));
+        }
+
+        if config.triage.max_intake_pages == 0 {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "triage.max_intake_pages must be greater than 0".to_string(),
+            ));
+        }
+
+        if config.agent_backend == AgentBackend::Codex && config.triage.model.is_some() {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "triage.model is not supported when agent.name is 'codex'".to_string(),
+            ));
+        }
+
+        let route_labels = [
+            ("implement", config.triage.routes.implement.label.as_str()),
+            ("spec", config.triage.routes.spec.label.as_str()),
+            (
+                "needs_information",
+                config.triage.routes.needs_information.label.as_str(),
+            ),
+            ("park", config.triage.routes.park.label.as_str()),
+            (
+                "human_owned",
+                config.triage.routes.human_owned.label.as_str(),
+            ),
+        ];
+
+        for (route, label) in route_labels {
+            if label.trim().is_empty() {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "triage.routes.{route}.label must be non-empty when triage is enabled"
+                )));
+            }
+        }
+
+        let intake = config.triage.intake_label.trim();
+        for (route, label) in route_labels {
+            if label.trim() == intake {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "triage.routes.{route}.label must not equal triage.intake_label ('{intake}')"
+                )));
+            }
+        }
+
+        let mut seen: Vec<&str> = Vec::with_capacity(route_labels.len());
+        for (route, label) in route_labels {
+            let normalized = label.trim();
+            if seen.contains(&normalized) {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "triage route labels must be distinct; duplicate label '{normalized}' on route '{route}'"
+                )));
+            }
+            seen.push(normalized);
+        }
     }
 
     Ok(ValidatedServiceConfig(config.clone()))

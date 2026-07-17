@@ -106,6 +106,13 @@ pub enum SymphonyError {
     #[error("pi-agent error: {0}")]
     PiAgentError(String),
 
+    // ── Triage / Storage ────────────────────────────────────────────────
+    #[error("triage error: {0}")]
+    TriageError(String),
+
+    #[error("storage error: {0}")]
+    StorageError(String),
+
     // ── SSH ────────────────────────────────────────────────────────────
     #[error("ssh launch failed: {0}")]
     SshLaunchFailed(String),

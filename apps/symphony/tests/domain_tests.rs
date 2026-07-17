@@ -120,6 +120,8 @@ fn test_service_config_defaults_match_spec() {
         notifications: None,
         shared_context: SharedContextConfig::default(),
         supervisor: SupervisorConfig::default(),
+        storage: symphony::triage::domain::StorageConfig::default(),
+        triage: symphony::triage::domain::TriageConfig::default(),
     };
 
     // Polling §5.3.2
@@ -157,6 +159,20 @@ fn test_service_config_defaults_match_spec() {
     assert!(!cfg.supervisor.enabled);
     assert!(cfg.supervisor.model.is_none());
     assert_eq!(cfg.supervisor.steer_cooldown_ms, 120_000);
+
+    // Storage / triage A1 defaults
+    assert_eq!(cfg.storage.path, None);
+    assert_eq!(cfg.storage.busy_timeout_ms, 5_000);
+    assert!(!cfg.triage.enabled);
+    assert_eq!(
+        cfg.triage.mode,
+        symphony::triage::domain::TriageMode::Preview
+    );
+    assert_eq!(cfg.triage.intake_label, "needs-triage");
+    assert_eq!(cfg.triage.prompt, "prompts/triage.md");
+    assert_eq!(cfg.triage.turn_timeout_ms, 900_000);
+    assert_eq!(cfg.triage.max_attempts, 3);
+    assert_eq!(cfg.triage.max_intake_pages, 100);
 }
 
 #[test]

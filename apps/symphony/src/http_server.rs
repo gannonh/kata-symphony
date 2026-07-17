@@ -59,6 +59,16 @@ where
     }
 }
 
+/// Read-only factory-run queries for the A1 HTTP surface.
+pub trait FactoryRunQuery: Send + Sync {
+    fn get_run(&self, run_id: &str) -> Result<Option<FactoryRunHttpResponse>, String>;
+    fn get_run_by_issue(
+        &self,
+        issue_identifier: &str,
+    ) -> Result<Option<FactoryRunHttpResponse>, String>;
+    fn triage_metrics(&self) -> Result<FactoryRunMetricsHttpResponse, String>;
+}
+
 // ── Trait implementations for orchestrator types ───────────────────────
 
 impl SnapshotSource for SnapshotHandle {
@@ -125,6 +135,7 @@ pub struct HttpServerState {
     event_hub: EventHub,
     shared_context_store: SharedContextStore,
     steer_sender: Option<SteerSender>,
+    factory_run_query: Option<Arc<dyn FactoryRunQuery>>,
     event_stream_config: EventStreamConfig,
     event_stream_counters: Arc<EventStreamCounters>,
     next_client_id: Arc<AtomicU64>,
@@ -159,6 +170,7 @@ impl HttpServerState {
             event_hub,
             shared_context_store: SharedContextStore::default(),
             steer_sender: None,
+            factory_run_query: None,
             event_stream_config,
             event_stream_counters: Arc::new(EventStreamCounters::default()),
             next_client_id: Arc::new(AtomicU64::new(0)),
@@ -172,6 +184,11 @@ impl HttpServerState {
 
     pub fn with_steer_sender(mut self, steer_sender: SteerSender) -> Self {
         self.steer_sender = Some(steer_sender);
+        self
+    }
+
+    pub fn with_factory_run_query(mut self, factory_run_query: Arc<dyn FactoryRunQuery>) -> Self {
+        self.factory_run_query = Some(factory_run_query);
         self
     }
 
@@ -401,6 +418,193 @@ struct EventFilterQuery {
     severity: Option<String>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct FactoryRunsListQuery {
+    issue: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct FactoryRunsMetricsQuery {
+    stage: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactoryRunHttpResponse {
+    pub run_id: String,
+    pub forge_host: String,
+    pub repository: String,
+    pub issue: FactoryRunIssueHttp,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_stage: Option<String>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub updated_at: chrono::DateTime<Utc>,
+    pub attempts: Vec<FactoryRunAttemptHttp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<FactoryRunArtifactHttp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<FactoryRunPublicationHttp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunIssueHttp {
+    pub id: String,
+    pub identifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunAttemptHttp {
+    pub stage_run_id: String,
+    pub attempt: u32,
+    pub status: String,
+    pub configuration_revision: String,
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    pub usage: crate::triage::domain::StageUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::triage::domain::FactoryError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunArtifactHttp {
+    pub artifact_id: String,
+    pub schema_version: u32,
+    pub route: String,
+    pub risk_class: String,
+    pub rationale: String,
+    pub evidence: Vec<crate::triage::domain::TriageEvidence>,
+    pub next_action: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clarification_question: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reproduction: Option<crate::triage::domain::ReproductionSummary>,
+    pub received_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunPublicationHttp {
+    pub intent_id: String,
+    pub mode: String,
+    pub status: String,
+    pub completed_steps: Vec<String>,
+    pub route_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_state: Option<String>,
+    pub retry_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::triage::domain::FactoryError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactoryRunMetricsHttpResponse {
+    pub stage: String,
+    pub total_attempts: u64,
+    pub completed_attempts: u64,
+    pub failed_attempts: u64,
+    pub ineligible_issues: u64,
+    pub route_counts: std::collections::BTreeMap<String, u64>,
+    pub correction_count: u64,
+    pub correction_rate: f64,
+    pub duration: crate::triage::domain::TriageMetricsDuration,
+    pub tokens_by_harness_model:
+        std::collections::BTreeMap<String, crate::triage::domain::TriageMetricsTokenTotals>,
+}
+
+/// Build the HTTP factory-run response from durable store records.
+pub fn factory_run_http_response(
+    run: &crate::triage::domain::FactoryRunRecord,
+    attempts: &[crate::triage::domain::StageRunRecord],
+    artifact: Option<&crate::triage::domain::ArtifactRecord>,
+    publication: Option<&crate::triage::domain::PublicationIntentRecord>,
+) -> FactoryRunHttpResponse {
+    FactoryRunHttpResponse {
+        run_id: run.run_id.clone(),
+        forge_host: run.forge_host.clone(),
+        repository: run.repository.clone(),
+        issue: FactoryRunIssueHttp {
+            id: run.issue_id.clone(),
+            identifier: run.issue_identifier.clone(),
+            revision: run.issue_revision.clone(),
+        },
+        status: run.status.as_str().to_string(),
+        current_stage: run.current_stage.clone(),
+        created_at: run.created_at,
+        updated_at: run.updated_at,
+        attempts: attempts
+            .iter()
+            .map(|attempt| {
+                let duration_ms = match (attempt.started_at, attempt.completed_at) {
+                    (Some(start), Some(end)) => {
+                        Some((end - start).num_milliseconds().max(0) as u64)
+                    }
+                    _ => None,
+                };
+                FactoryRunAttemptHttp {
+                    stage_run_id: attempt.stage_run_id.clone(),
+                    attempt: attempt.attempt,
+                    status: attempt.status.as_str().to_string(),
+                    configuration_revision: attempt.configuration_revision.clone(),
+                    harness: attempt.harness.clone(),
+                    model: attempt.model.clone(),
+                    started_at: attempt.started_at,
+                    completed_at: attempt.completed_at,
+                    duration_ms,
+                    usage: attempt.usage.clone(),
+                    error: attempt.error.clone(),
+                }
+            })
+            .collect(),
+        artifact: artifact.map(|record| FactoryRunArtifactHttp {
+            artifact_id: record.artifact_id.clone(),
+            schema_version: record.artifact.schema_version,
+            route: record.artifact.route.as_str().to_string(),
+            risk_class: record.artifact.risk_class.as_str().to_string(),
+            rationale: record.artifact.rationale.clone(),
+            evidence: record.artifact.evidence.clone(),
+            next_action: record.artifact.next_action.clone(),
+            clarification_question: record.artifact.clarification_question.clone(),
+            reproduction: record.artifact.reproduction.clone(),
+            received_at: record.received_at,
+        }),
+        publication: publication.map(|intent| FactoryRunPublicationHttp {
+            intent_id: intent.intent_id.clone(),
+            mode: intent.mode.as_str().to_string(),
+            status: intent.status.as_str().to_string(),
+            completed_steps: intent.completed_steps.clone(),
+            route_label: intent.route_label.clone(),
+            project_state: intent.project_state.clone(),
+            retry_count: intent.retry_count,
+            error: intent.last_error.clone(),
+        }),
+    }
+}
+
+pub fn factory_run_metrics_http_response(
+    metrics: crate::triage::domain::TriageMetricsAggregate,
+) -> FactoryRunMetricsHttpResponse {
+    FactoryRunMetricsHttpResponse {
+        stage: crate::triage::domain::TRIAGE_STAGE_NAME.to_string(),
+        total_attempts: metrics.total_attempts,
+        completed_attempts: metrics.completed_attempts,
+        failed_attempts: metrics.failed_attempts,
+        ineligible_issues: metrics.ineligible_issues,
+        route_counts: metrics.route_counts,
+        correction_count: metrics.correction_count,
+        correction_rate: metrics.correction_rate,
+        duration: metrics.duration,
+        tokens_by_harness_model: metrics.tokens_by_harness_model,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventFilterError {
     pub field: &'static str,
@@ -488,6 +692,9 @@ pub fn build_router(state: HttpServerState) -> Router {
             post(post_escalation_respond),
         )
         .route("/api/v1/steer", post(post_steer))
+        .route("/api/v1/factory-runs/metrics", get(get_factory_run_metrics))
+        .route("/api/v1/factory-runs/{run_id}", get(get_factory_run_by_id))
+        .route("/api/v1/factory-runs", get(get_factory_runs))
         .route("/api/v1/{issue_identifier}", get(get_issue))
         .route("/api/v1/refresh", post(post_refresh))
         .fallback(api_not_found)
@@ -1994,6 +2201,165 @@ fn parse_severity_filter(raw: Option<&str>) -> Result<BTreeSet<EventSeverity>, E
     }
 
     Ok(severities)
+}
+
+async fn get_factory_run_by_id(
+    State(state): State<HttpServerState>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let Some(query) = state.factory_run_query.as_ref() else {
+        return factory_store_unavailable().into_response();
+    };
+
+    match query.get_run(run_id.trim()) {
+        Ok(Some(run)) => Json(run).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorEnvelope {
+                error: ApiError {
+                    code: "factory_run_not_found",
+                    message: format!("Factory run '{run_id}' was not found"),
+                    status: StatusCode::NOT_FOUND.as_u16(),
+                    details: None,
+                },
+            }),
+        )
+            .into_response(),
+        Err(message) => factory_query_failed(&message).into_response(),
+    }
+}
+
+async fn get_factory_runs(
+    State(state): State<HttpServerState>,
+    Query(params): Query<FactoryRunsListQuery>,
+) -> impl IntoResponse {
+    let Some(query) = state.factory_run_query.as_ref() else {
+        return factory_store_unavailable().into_response();
+    };
+
+    let Some(issue) = params
+        .issue
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorEnvelope {
+                error: ApiError {
+                    code: "invalid_query",
+                    message: "Query parameter 'issue' is required".to_string(),
+                    status: StatusCode::BAD_REQUEST.as_u16(),
+                    details: Some(serde_json::json!({ "field": "issue" })),
+                },
+            }),
+        )
+            .into_response();
+    };
+
+    if !looks_like_factory_issue_identifier(issue) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorEnvelope {
+                error: ApiError {
+                    code: "invalid_query",
+                    message: format!("Query parameter 'issue' value '{issue}' is invalid"),
+                    status: StatusCode::BAD_REQUEST.as_u16(),
+                    details: Some(serde_json::json!({ "field": "issue", "value": issue })),
+                },
+            }),
+        )
+            .into_response();
+    }
+
+    match query.get_run_by_issue(issue) {
+        Ok(run) => Json(run).into_response(),
+        Err(message) => factory_query_failed(&message).into_response(),
+    }
+}
+
+async fn get_factory_run_metrics(
+    State(state): State<HttpServerState>,
+    Query(params): Query<FactoryRunsMetricsQuery>,
+) -> impl IntoResponse {
+    let Some(query) = state.factory_run_query.as_ref() else {
+        return factory_store_unavailable().into_response();
+    };
+
+    let stage = params.stage.as_deref().map(str::trim).unwrap_or("");
+    if stage != crate::triage::domain::TRIAGE_STAGE_NAME {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorEnvelope {
+                error: ApiError {
+                    code: "invalid_query",
+                    message: "Query parameter 'stage' must be 'triage'".to_string(),
+                    status: StatusCode::BAD_REQUEST.as_u16(),
+                    details: Some(serde_json::json!({
+                        "field": "stage",
+                        "value": params.stage,
+                    })),
+                },
+            }),
+        )
+            .into_response();
+    }
+
+    match query.triage_metrics() {
+        Ok(metrics) => Json(metrics).into_response(),
+        Err(message) => factory_query_failed(&message).into_response(),
+    }
+}
+
+fn factory_store_unavailable() -> (StatusCode, Json<ApiErrorEnvelope>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ApiErrorEnvelope {
+            error: ApiError {
+                code: "factory_store_unavailable",
+                message: "Factory run store is not configured".to_string(),
+                status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+                details: None,
+            },
+        }),
+    )
+}
+
+fn factory_query_failed(message: &str) -> (StatusCode, Json<ApiErrorEnvelope>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiErrorEnvelope {
+            error: ApiError {
+                code: "factory_query_failed",
+                message: message.to_string(),
+                status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                details: None,
+            },
+        }),
+    )
+}
+
+fn looks_like_factory_issue_identifier(candidate: &str) -> bool {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() || trimmed.len() > 200 {
+        return false;
+    }
+    if looks_like_issue_identifier(trimmed) {
+        return true;
+    }
+    // GitHub-style identifiers: "#123" or "kata#123"
+    if let Some(number) = trimmed.strip_prefix('#') {
+        return !number.is_empty() && number.chars().all(|c| c.is_ascii_digit());
+    }
+    if let Some((prefix, number)) = trimmed.rsplit_once('#') {
+        return !prefix.is_empty()
+            && prefix
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+            && !number.is_empty()
+            && number.chars().all(|c| c.is_ascii_digit());
+    }
+    false
 }
 
 async fn get_issue(

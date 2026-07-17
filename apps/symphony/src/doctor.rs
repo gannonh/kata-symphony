@@ -1071,6 +1071,389 @@ pub async fn check_orphans(
     results
 }
 
+pub fn check_triage(config: &ServiceConfig, workflow_path: &Path) -> Vec<DoctorCheckResult> {
+    let mut results = Vec::new();
+
+    if !config.triage.enabled {
+        results.push(DoctorCheckResult::skipped(
+            "Triage",
+            "triage.enabled is false — triage checks skipped",
+        ));
+        return results;
+    }
+
+    let workflow_dir = workflow_path.parent().unwrap_or(Path::new("."));
+    let forge_host = "github.com";
+    let owner = config.tracker.repo_owner.as_deref().unwrap_or("unknown");
+    let repo = config.tracker.repo_name.as_deref().unwrap_or("unknown");
+    let storage_path =
+        crate::triage::storage_path::resolve_storage_path(&config.storage, forge_host, owner, repo);
+    let lock_path = crate::triage::storage_path::lock_path_for_storage(&storage_path);
+
+    if let Some(parent) = storage_path.parent() {
+        match fs::create_dir_all(parent) {
+            Ok(()) => {
+                let probe = parent.join(".symphony-doctor-write-probe");
+                match fs::write(&probe, b"ok") {
+                    Ok(()) => {
+                        let _ = fs::remove_file(&probe);
+                        results.push(DoctorCheckResult::pass(
+                            "Triage Storage",
+                            format!("Storage path writable at {}", storage_path.display()),
+                        ));
+                    }
+                    Err(err) => results.push(DoctorCheckResult::error(
+                        "Triage Storage",
+                        format!("Storage parent {} is not writable: {err}", parent.display()),
+                    )),
+                }
+            }
+            Err(err) => results.push(DoctorCheckResult::error(
+                "Triage Storage",
+                format!(
+                    "Could not create storage parent {}: {err}",
+                    parent.display()
+                ),
+            )),
+        }
+    } else {
+        results.push(DoctorCheckResult::error(
+            "Triage Storage",
+            format!(
+                "Storage path {} has no parent directory",
+                storage_path.display()
+            ),
+        ));
+    }
+
+    if let Some(lock_parent) = lock_path.parent() {
+        match fs::create_dir_all(lock_parent) {
+            Ok(()) => {
+                use fs2::FileExt;
+                use std::fs::OpenOptions;
+                match OpenOptions::new()
+                    .create(true)
+                    .truncate(false)
+                    .read(true)
+                    .write(true)
+                    .open(&lock_path)
+                {
+                    Ok(file) => match file.try_lock_exclusive() {
+                        Ok(()) => {
+                            let _ = file.unlock();
+                            results.push(DoctorCheckResult::pass(
+                                "Triage Lock",
+                                format!(
+                                    "Exclusive lock available at {}",
+                                    lock_path.display()
+                                ),
+                            ));
+                        }
+                        Err(err) => results.push(DoctorCheckResult::error(
+                            "Triage Lock",
+                            format!(
+                                "Could not acquire exclusive lock {}: {err}. Another Symphony instance may hold the triage store.",
+                                lock_path.display()
+                            ),
+                        )),
+                    },
+                    Err(err) => results.push(DoctorCheckResult::error(
+                        "Triage Lock",
+                        format!("Could not open lock file {}: {err}", lock_path.display()),
+                    )),
+                }
+            }
+            Err(err) => results.push(DoctorCheckResult::error(
+                "Triage Lock",
+                format!(
+                    "Could not create lock parent {}: {err}",
+                    lock_parent.display()
+                ),
+            )),
+        }
+    }
+
+    let prompt_path = resolve_prompt_path(workflow_dir, &config.triage.prompt);
+    if prompt_path.is_file() {
+        results.push(DoctorCheckResult::pass(
+            "Triage Prompt",
+            format!("Prompt file exists at {}", prompt_path.display()),
+        ));
+    } else {
+        results.push(DoctorCheckResult::error(
+            "Triage Prompt",
+            format!(
+                "triage.prompt points to missing file {} — create prompts/triage.md or update the path",
+                prompt_path.display()
+            ),
+        ));
+    }
+
+    if config.triage.intake_label.trim().is_empty() {
+        results.push(DoctorCheckResult::error(
+            "Triage Intake",
+            "triage.intake_label must be non-empty",
+        ));
+    } else {
+        results.push(DoctorCheckResult::pass(
+            "Triage Intake",
+            format!("Intake label '{}'", config.triage.intake_label.trim()),
+        ));
+    }
+
+    let route_labels = [
+        ("implement", config.triage.routes.implement.label.trim()),
+        ("spec", config.triage.routes.spec.label.trim()),
+        (
+            "needs_information",
+            config.triage.routes.needs_information.label.trim(),
+        ),
+        ("park", config.triage.routes.park.label.trim()),
+        ("human_owned", config.triage.routes.human_owned.label.trim()),
+    ];
+    let mut seen = HashSet::new();
+    let mut duplicate = None;
+    let mut empty_route = None;
+    for (route, label) in route_labels {
+        if label.is_empty() {
+            empty_route = Some(route);
+            break;
+        }
+        if !seen.insert(label.to_ascii_lowercase()) {
+            duplicate = Some((route, label.to_string()));
+            break;
+        }
+    }
+    if let Some(route) = empty_route {
+        results.push(DoctorCheckResult::error(
+            "Triage Routes",
+            format!("triage.routes.{route}.label must be non-empty"),
+        ));
+    } else if let Some((route, label)) = duplicate {
+        results.push(DoctorCheckResult::error(
+            "Triage Routes",
+            format!("Route labels must be distinct; duplicate '{label}' on route '{route}'"),
+        ));
+    } else {
+        results.push(DoctorCheckResult::pass(
+            "Triage Routes",
+            "Route labels are present and distinct",
+        ));
+    }
+
+    let agent_command_configured =
+        !config.pi_agent.command.is_empty() || !config.codex.command.is_empty();
+    if !agent_command_configured {
+        results.push(DoctorCheckResult::warning(
+            "Triage Harness Auth",
+            "isolated harness authentication: deferred deep check (agent command empty)",
+        ));
+    } else if !prompt_path.is_file() {
+        results.push(DoctorCheckResult::warning(
+            "Triage Harness Auth",
+            "isolated harness authentication: deferred deep check (triage prompt missing)",
+        ));
+    } else {
+        results.push(DoctorCheckResult::warning(
+            "Triage Harness Auth",
+            "isolated harness authentication: deferred deep check",
+        ));
+    }
+
+    results
+}
+
+pub async fn check_triage_github(config: &ServiceConfig) -> Vec<DoctorCheckResult> {
+    let mut results = Vec::new();
+
+    if !config.triage.enabled {
+        return results;
+    }
+
+    let tracker_kind = config.tracker.kind.as_deref().unwrap_or("linear");
+    if tracker_kind != "github" {
+        results.push(DoctorCheckResult::error(
+            "Triage GitHub",
+            "triage.enabled requires tracker.kind=github",
+        ));
+        return results;
+    }
+
+    let Some(resolved_token) = resolve_github_token(&config.tracker) else {
+        results.push(DoctorCheckResult::error(
+            "Triage Labels",
+            github_token_missing_message(),
+        ));
+        return results;
+    };
+
+    let Some(repo_owner) = config
+        .tracker
+        .repo_owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        results.push(DoctorCheckResult::error(
+            "Triage Labels",
+            "tracker.repo_owner is required for triage label checks",
+        ));
+        return results;
+    };
+    let Some(repo_name) = config
+        .tracker
+        .repo_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        results.push(DoctorCheckResult::error(
+            "Triage Labels",
+            "tracker.repo_name is required for triage label checks",
+        ));
+        return results;
+    };
+
+    let label_prefix = config
+        .tracker
+        .label_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("symphony");
+    let endpoint = {
+        let endpoint = config.tracker.endpoint.trim();
+        if endpoint.is_empty() {
+            "https://api.github.com"
+        } else {
+            endpoint
+        }
+    };
+
+    let client = GithubClient::with_base_url(
+        resolved_token.token,
+        repo_owner.to_string(),
+        repo_name.to_string(),
+        label_prefix.to_string(),
+        endpoint,
+    );
+
+    let expected_labels: Vec<String> = {
+        let mut labels = vec![config.triage.intake_label.trim().to_string()];
+        labels.extend(config.triage.routes.managed_labels());
+        labels
+            .into_iter()
+            .filter(|label| !label.trim().is_empty())
+            .collect()
+    };
+
+    match client.list_labels().await {
+        Ok(labels) => {
+            let normalized: BTreeSet<String> = labels
+                .iter()
+                .map(|label| label.name.trim().to_ascii_lowercase())
+                .filter(|label| !label.is_empty())
+                .collect();
+            let mut missing = Vec::new();
+            for expected in &expected_labels {
+                if !normalized.contains(&expected.to_ascii_lowercase()) {
+                    missing.push(expected.clone());
+                }
+            }
+            if missing.is_empty() {
+                results.push(DoctorCheckResult::pass(
+                    "Triage Labels",
+                    "Intake and route labels exist on the repository",
+                ));
+            } else {
+                for label in missing {
+                    results.push(DoctorCheckResult::error(
+                        "Triage Labels",
+                        format!(
+                            "Label '{label}' not found on repository — create it before enabling triage"
+                        ),
+                    ));
+                }
+            }
+        }
+        Err(err) => results.push(DoctorCheckResult::error(
+            "Triage Labels",
+            format!("Failed to list repository labels: {err}"),
+        )),
+    }
+
+    let configured_states: Vec<String> = [
+        config.triage.routes.implement.state.as_deref(),
+        config.triage.routes.spec.state.as_deref(),
+        config.triage.routes.needs_information.state.as_deref(),
+        config.triage.routes.park.state.as_deref(),
+        config.triage.routes.human_owned.state.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .filter(|value| !value.is_empty())
+    .map(str::to_string)
+    .collect();
+
+    if configured_states.is_empty() {
+        results.push(DoctorCheckResult::skipped(
+            "Triage Project States",
+            "No route project states configured",
+        ));
+        return results;
+    }
+
+    let Some(project_number) = config.tracker.github_project_number else {
+        results.push(DoctorCheckResult::error(
+            "Triage Project States",
+            "Route states are configured but tracker.github_project_number is missing",
+        ));
+        return results;
+    };
+
+    let projects_client = ProjectsV2Client::new(client);
+    match projects_client
+        .resolve_status_field(repo_owner, project_number)
+        .await
+    {
+        Ok(status_field) => {
+            let option_names: BTreeSet<String> = status_field
+                .options
+                .iter()
+                .map(|option| option.name.trim().to_ascii_lowercase())
+                .collect();
+            let mut missing = Vec::new();
+            for state in &configured_states {
+                if !option_names.contains(&state.to_ascii_lowercase()) {
+                    missing.push(state.clone());
+                }
+            }
+            if missing.is_empty() {
+                results.push(DoctorCheckResult::pass(
+                    "Triage Project States",
+                    "Configured route states exist on the Projects v2 Status field",
+                ));
+            } else {
+                for state in missing {
+                    results.push(DoctorCheckResult::error(
+                        "Triage Project States",
+                        format!(
+                            "Projects v2 Status option '{state}' is missing — add it to the project or update triage.routes.*.state"
+                        ),
+                    ));
+                }
+            }
+        }
+        Err(err) => results.push(DoctorCheckResult::error(
+            "Triage Project States",
+            format!("Failed to resolve Projects v2 Status field: {err}"),
+        )),
+    }
+
+    results
+}
+
 pub fn format_results(results: &[DoctorCheckResult]) -> String {
     let mut lines = vec!["Symphony Doctor".to_string()];
 
@@ -1520,6 +1903,53 @@ mod tests {
                 && result
                     .message
                     .contains("notifications.slack.events contains unsupported value")
+        }));
+    }
+
+    #[test]
+    fn test_check_triage_skipped_when_disabled() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let workflow_path = temp_dir.path().join("WORKFLOW.md");
+        fs::write(&workflow_path, "---\ntracker:\n  kind: github\n---\n").expect("write");
+        let mut config = ServiceConfig::default();
+        config.triage.enabled = false;
+
+        let results = check_triage(&config, &workflow_path);
+        assert!(results
+            .iter()
+            .any(|result| { result.status == CheckStatus::Skipped && result.name == "Triage" }));
+    }
+
+    #[test]
+    fn test_check_triage_reports_missing_prompt() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let workflow_path = temp_dir.path().join("WORKFLOW.md");
+        fs::write(&workflow_path, "---\ntracker:\n  kind: github\n---\n").expect("write");
+        let mut config = ServiceConfig::default();
+        config.triage.enabled = true;
+        config.tracker.kind = Some("github".to_string());
+        config.tracker.repo_owner = Some("acme".to_string());
+        config.tracker.repo_name = Some("widgets".to_string());
+        config.storage.path = Some(
+            temp_dir
+                .path()
+                .join("state")
+                .join("triage.sqlite3")
+                .to_string_lossy()
+                .to_string(),
+        );
+
+        let results = check_triage(&config, &workflow_path);
+        assert!(results.iter().any(|result| {
+            result.status == CheckStatus::Error
+                && result.name == "Triage Prompt"
+                && result.message.contains("missing file")
+        }));
+        assert!(results.iter().any(|result| {
+            result.status == CheckStatus::Pass && result.name == "Triage Storage"
+        }));
+        assert!(results.iter().any(|result| {
+            result.status == CheckStatus::Pass && result.name == "Triage Routes"
         }));
     }
 }

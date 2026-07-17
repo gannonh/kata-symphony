@@ -184,6 +184,33 @@ impl ProjectsV2Client {
         project_id: &str,
         status_option_ids: &[String],
     ) -> Result<Vec<ProjectItem>> {
+        self.query_items_paginated(project_id, status_option_ids, MAX_PAGES as u32, false)
+            .await
+    }
+
+    /// List every project item across all statuses, failing if pagination is truncated.
+    pub async fn query_all_items(
+        &self,
+        project_id: &str,
+        max_pages: u32,
+    ) -> Result<Vec<ProjectItem>> {
+        self.query_items_paginated(project_id, &[], max_pages, true)
+            .await
+    }
+
+    async fn query_items_paginated(
+        &self,
+        project_id: &str,
+        status_option_ids: &[String],
+        max_pages: u32,
+        fail_on_truncate: bool,
+    ) -> Result<Vec<ProjectItem>> {
+        if max_pages == 0 {
+            return Err(SymphonyError::GithubProjectsV2Error(
+                "Projects v2 pagination max_pages must be greater than zero".to_string(),
+            ));
+        }
+
         let mut items = Vec::new();
         let mut after: Option<String> = None;
         let status_filter: Option<HashSet<&str>> = if status_option_ids.is_empty() {
@@ -192,7 +219,7 @@ impl ProjectsV2Client {
             Some(status_option_ids.iter().map(String::as_str).collect())
         };
 
-        for _ in 0..MAX_PAGES {
+        for page_index in 0..max_pages {
             let variables = json!({
                 "projectId": project_id,
                 "first": PAGE_SIZE,
@@ -247,7 +274,11 @@ impl ProjectsV2Client {
                 });
             }
 
-            tracing::debug!(item_count = items.len(), "Projects v2 items queried");
+            tracing::debug!(
+                item_count = items.len(),
+                page_index,
+                "Projects v2 items queried"
+            );
 
             if node.items.page_info.has_next_page {
                 after = node.items.page_info.end_cursor;
@@ -263,10 +294,12 @@ impl ProjectsV2Client {
         }
 
         if after.is_some() {
-            tracing::warn!(
-                max_pages = MAX_PAGES,
-                "Projects v2 item query truncated at page cap"
-            );
+            if fail_on_truncate {
+                return Err(SymphonyError::GithubProjectsV2Error(format!(
+                    "Projects v2 item query truncated at max_pages={max_pages}; refusing partial results"
+                )));
+            }
+            tracing::warn!(max_pages, "Projects v2 item query truncated at page cap");
         }
 
         Ok(items)

@@ -279,6 +279,7 @@ pub enum EventKind {
     SupervisorConflictDetected,
     SupervisorEscalated,
     SupervisorPatternDetected,
+    Triage,
 }
 
 impl EventKind {
@@ -299,6 +300,7 @@ impl EventKind {
             "supervisor_conflict_detected" => Some(Self::SupervisorConflictDetected),
             "supervisor_escalated" => Some(Self::SupervisorEscalated),
             "supervisor_pattern_detected" => Some(Self::SupervisorPatternDetected),
+            "triage" => Some(Self::Triage),
             _ => None,
         }
     }
@@ -320,6 +322,7 @@ impl EventKind {
             Self::SupervisorConflictDetected => "supervisor_conflict_detected",
             Self::SupervisorEscalated => "supervisor_escalated",
             Self::SupervisorPatternDetected => "supervisor_pattern_detected",
+            Self::Triage => "triage",
         }
     }
 
@@ -340,6 +343,7 @@ impl EventKind {
             "supervisor_conflict_detected",
             "supervisor_escalated",
             "supervisor_pattern_detected",
+            "triage",
         ]
     }
 }
@@ -576,6 +580,8 @@ pub struct ServiceConfig {
     pub notifications: Option<NotificationsConfig>,
     pub shared_context: SharedContextConfig,
     pub supervisor: SupervisorConfig,
+    pub storage: crate::triage::domain::StorageConfig,
+    pub triage: crate::triage::domain::TriageConfig,
 }
 
 /// Tracker configuration (spec §5.3.1).

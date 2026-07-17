@@ -50,6 +50,10 @@ pub const STARTER_ASSETS: &[StarterAsset] = &[
         contents: include_str!("../prompts/rework.md"),
     },
     StarterAsset {
+        path: ".symphony/prompts/triage.md",
+        contents: include_str!("../prompts/triage.md"),
+    },
+    StarterAsset {
         path: ".symphony/docs/WORKFLOW-REFERENCE.md",
         contents: include_str!("../docs/WORKFLOW-REFERENCE.md"),
     },
@@ -101,6 +105,7 @@ mod tests {
         assert!(paths.contains(&".symphony/.env.example"));
         assert!(paths.contains(&".symphony/prompts/system.md"));
         assert!(paths.contains(&".symphony/prompts/repo.md"));
+        assert!(paths.contains(&".symphony/prompts/triage.md"));
         assert!(paths.contains(&".symphony/docs/WORKFLOW-REFERENCE.md"));
         assert!(!paths.contains(&".symphony/prompts/repo-mono.md"));
         assert!(!paths.contains(&".symphony/prompts/repo-cli.md"));

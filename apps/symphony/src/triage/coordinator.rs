@@ -1,0 +1,1231 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use chrono::Utc;
+use uuid::Uuid;
+
+use crate::domain::{AgentBackend, ServiceConfig};
+use crate::error::{Result, SymphonyError};
+use crate::triage::domain::{
+    FactoryError, FactoryEventRecord, FactoryRunStatus, PublicationMode, PublicationStatus,
+    TRIAGE_STAGE_NAME,
+};
+use crate::triage::fingerprint::{
+    configuration_revision, issue_revision, route_mapping_hash, ConfigurationRevisionInput,
+    IssueCommentFingerprint, IssueMilestoneFingerprint, IssueRevisionInput, VerifiedTriageComment,
+};
+use crate::triage::intake::{TriageIntakeIssue, TriageIntakePort};
+use crate::triage::publisher::{
+    IneligiblePublishRequest, PreviewPublishRequest, PreviewPublisher, TriageCommentPort,
+};
+use crate::triage::runner::{
+    effective_pi_model, TriageRunner, TriageRunnerFailureKind, TriageRunnerOutcome,
+    TriageRunnerRequest, TriageRunnerSuccess,
+};
+use crate::triage::store::{
+    ClaimAttemptRequest, CreatePublicationIntentRequest, FactoryRunStore, StoreArtifactRequest,
+    UpsertFactoryRunRequest,
+};
+
+const PENDING_INTENT_BATCH: usize = 256;
+const INELIGIBLE_REMEDIATION: &str =
+    "Add the issue to the configured GitHub Project, then leave the intake label in place.";
+const DESIRED_KIND_PREVIEW: &str = "preview_comment";
+const DESIRED_KIND_INELIGIBLE: &str = "ineligible_diagnostic";
+
+/// Live triage event sink (optional). Durable events are always written to the store.
+pub trait EventEmitter: Send + Sync {
+    fn emit_triage_event(&self, event_name: &str, issue: Option<&str>, payload: serde_json::Value);
+}
+
+/// Executable triage stage. Production uses [`DefaultTriageExecutor`]; tests inject fakes.
+#[async_trait]
+pub trait TriageExecutor: Send + Sync {
+    async fn execute(&self, request: TriageRunnerRequest) -> Result<TriageRunnerOutcome>;
+}
+
+#[derive(Debug, Default)]
+pub struct DefaultTriageExecutor;
+
+#[async_trait]
+impl TriageExecutor for DefaultTriageExecutor {
+    async fn execute(&self, request: TriageRunnerRequest) -> Result<TriageRunnerOutcome> {
+        TriageRunner::run(request).await
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TriageCoordinatorConfig {
+    pub forge_host: String,
+    pub repository: String,
+    pub owner_instance: String,
+    pub workflow_dir: PathBuf,
+    pub project_display_name: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TriagePollSummary {
+    pub triage_enabled: bool,
+    pub issues_seen: u32,
+    pub attempts_started: u32,
+    pub attempts_completed: u32,
+    pub attempts_failed: u32,
+    pub ineligible: u32,
+    pub skipped: u32,
+    pub reconciled_intents: u32,
+}
+
+pub struct TriageCoordinator<S, I, C, X = DefaultTriageExecutor> {
+    store: S,
+    intake: I,
+    publisher: PreviewPublisher<C>,
+    executor: X,
+    config: TriageCoordinatorConfig,
+    events: Option<Arc<dyn EventEmitter>>,
+    max_pages: u32,
+}
+
+impl<S, I, C> TriageCoordinator<S, I, C, DefaultTriageExecutor>
+where
+    S: FactoryRunStore,
+    I: TriageIntakePort,
+    C: TriageCommentPort,
+{
+    pub fn new(store: S, intake: I, comments: C, config: TriageCoordinatorConfig) -> Self {
+        Self::with_executor(store, intake, comments, config, DefaultTriageExecutor)
+    }
+}
+
+impl<S, I, C, X> TriageCoordinator<S, I, C, X>
+where
+    S: FactoryRunStore,
+    I: TriageIntakePort,
+    C: TriageCommentPort,
+    X: TriageExecutor,
+{
+    pub fn with_executor(
+        store: S,
+        intake: I,
+        comments: C,
+        config: TriageCoordinatorConfig,
+        executor: X,
+    ) -> Self {
+        Self {
+            store,
+            intake,
+            publisher: PreviewPublisher::new(comments),
+            executor,
+            config,
+            events: None,
+            max_pages: 100,
+        }
+    }
+
+    pub fn with_events(mut self, events: Arc<dyn EventEmitter>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    pub fn store_mut(&mut self) -> &mut S {
+        &mut self.store
+    }
+
+    pub async fn reconcile_pending(&mut self) -> Result<()> {
+        self.reconcile_pending_intents(self.max_pages).await?;
+        Ok(())
+    }
+
+    /// Alias for [`Self::poll_once`].
+    pub async fn reconcile_and_intake(
+        &mut self,
+        service: &ServiceConfig,
+    ) -> Result<TriagePollSummary> {
+        self.poll_once(service).await
+    }
+
+    pub async fn poll_once(&mut self, service: &ServiceConfig) -> Result<TriagePollSummary> {
+        self.max_pages = service.triage.max_intake_pages.max(1);
+        let mut summary = TriagePollSummary {
+            triage_enabled: service.triage.enabled,
+            ..TriagePollSummary::default()
+        };
+
+        self.store.interrupt_stale_attempts()?;
+        summary.reconciled_intents = self.reconcile_pending_intents(self.max_pages).await?;
+
+        if !service.triage.enabled {
+            return Ok(summary);
+        }
+
+        let issues = self
+            .intake
+            .fetch_intake_issues(&service.triage.intake_label, self.max_pages)
+            .await?;
+        summary.issues_seen = issues.len() as u32;
+
+        let prompt = load_prompt(&self.config.workflow_dir, &service.triage.prompt)?;
+        let harness = triage_harness(service.agent_backend).to_string();
+        let model = triage_model(service);
+        let configuration_revision = configuration_revision(&ConfigurationRevisionInput {
+            prompt,
+            turn_timeout_ms: service.triage.turn_timeout_ms,
+            max_attempts: service.triage.max_attempts,
+            harness: harness.clone(),
+            model: model.clone(),
+            routes: service.triage.routes.clone(),
+        });
+        let mapping_hash = route_mapping_hash(&service.triage.routes);
+        let command = triage_command(service)?;
+        let repo_path = require_repo_path(service)?;
+        let workspace_root = PathBuf::from(&service.workspace.root);
+
+        for mut issue in issues {
+            if issue.comments.is_empty() {
+                issue.comments = self
+                    .intake
+                    .list_issue_comments(issue.issue_number, self.max_pages)
+                    .await?;
+            }
+
+            if !issue.in_project {
+                self.handle_ineligible(&issue, service, &mapping_hash)
+                    .await?;
+                summary.ineligible += 1;
+                continue;
+            }
+
+            let outcome = self
+                .handle_in_project(
+                    &issue,
+                    service,
+                    &harness,
+                    model.as_deref(),
+                    &configuration_revision,
+                    &mapping_hash,
+                    &command,
+                    &repo_path,
+                    &workspace_root,
+                )
+                .await?;
+            match outcome {
+                IssuePollOutcome::StartedCompleted => {
+                    summary.attempts_started += 1;
+                    summary.attempts_completed += 1;
+                }
+                IssuePollOutcome::StartedFailed => {
+                    summary.attempts_started += 1;
+                    summary.attempts_failed += 1;
+                }
+                IssuePollOutcome::Skipped => summary.skipped += 1,
+            }
+        }
+
+        Ok(summary)
+    }
+
+    async fn reconcile_pending_intents(&mut self, max_pages: u32) -> Result<u32> {
+        let pending = self.store.list_pending_intents(PENDING_INTENT_BATCH)?;
+        let mut reconciled = 0u32;
+        for intent in pending {
+            let Some(run) = self.store.get_run_by_id(&intent.run_id)? else {
+                continue;
+            };
+            let issue_number = parse_issue_number(&run.issue_id)?;
+            let kind = desired_kind(&intent.desired_effects);
+
+            if intent.artifact_id.is_some() || kind == Some(DESIRED_KIND_PREVIEW) {
+                let Some(artifact_id) = intent.artifact_id.as_deref() else {
+                    return Err(SymphonyError::TriageError(format!(
+                        "preview intent {} is missing artifact_id",
+                        intent.intent_id
+                    )));
+                };
+                let Some(artifact) = self.store.get_artifact_by_id(artifact_id)? else {
+                    return Err(SymphonyError::TriageError(format!(
+                        "artifact {artifact_id} missing for intent {}",
+                        intent.intent_id
+                    )));
+                };
+                let stage = self
+                    .store
+                    .get_stage_run(&artifact.stage_run_id)?
+                    .ok_or_else(|| {
+                        SymphonyError::TriageError(format!(
+                            "stage run {} missing for artifact {artifact_id}",
+                            artifact.stage_run_id
+                        ))
+                    })?;
+                self.publisher
+                    .reconcile_preview(
+                        &mut self.store,
+                        PreviewPublishRequest {
+                            intent: &intent,
+                            issue_number,
+                            run_id: &run.run_id,
+                            stage_run_id: &stage.stage_run_id,
+                            attempt: stage.attempt,
+                            artifact: &artifact.artifact,
+                            max_pages,
+                        },
+                    )
+                    .await?;
+                reconciled += 1;
+                continue;
+            }
+
+            if kind == Some(DESIRED_KIND_INELIGIBLE) {
+                let project_name = intent
+                    .desired_effects
+                    .get("project_name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(self.config.project_display_name.as_str());
+                let remediation = intent
+                    .desired_effects
+                    .get("remediation")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or(INELIGIBLE_REMEDIATION);
+                self.publisher
+                    .reconcile_ineligible_diagnostic(
+                        &mut self.store,
+                        IneligiblePublishRequest {
+                            intent: &intent,
+                            issue_number,
+                            run_id: &run.run_id,
+                            issue_identifier: &run.issue_identifier,
+                            project_name,
+                            remediation,
+                            max_pages,
+                        },
+                    )
+                    .await?;
+                reconciled += 1;
+            }
+        }
+        Ok(reconciled)
+    }
+
+    async fn handle_ineligible(
+        &mut self,
+        issue: &TriageIntakeIssue,
+        service: &ServiceConfig,
+        mapping_hash: &str,
+    ) -> Result<()> {
+        let run = self.store.upsert_factory_run(UpsertFactoryRunRequest {
+            forge_host: self.config.forge_host.clone(),
+            repository: self.config.repository.clone(),
+            issue_id: issue.issue_id.clone(),
+            issue_identifier: issue.identifier.clone(),
+            issue_revision: None,
+            status: FactoryRunStatus::Ineligible,
+            current_stage: Some(TRIAGE_STAGE_NAME.to_string()),
+        })?;
+
+        let existing = self.store.list_intents_for_run(&run.run_id)?;
+        let mut intent = existing
+            .into_iter()
+            .find(|record| desired_kind(&record.desired_effects) == Some(DESIRED_KIND_INELIGIBLE));
+        if intent.is_none() {
+            intent = Some(self.store.create_publication_intent(
+                CreatePublicationIntentRequest {
+                    run_id: run.run_id.clone(),
+                    artifact_id: None,
+                    mode: PublicationMode::Preview,
+                    intake_label: service.triage.intake_label.clone(),
+                    route_label: String::new(),
+                    project_state: None,
+                    route_mapping_hash: mapping_hash.to_string(),
+                    desired_effects: serde_json::json!({
+                        "kind": DESIRED_KIND_INELIGIBLE,
+                        "project_name": self.config.project_display_name,
+                        "remediation": INELIGIBLE_REMEDIATION,
+                    }),
+                    observed_baseline: serde_json::json!({}),
+                    expected_projection: serde_json::json!({}),
+                },
+            )?);
+        }
+
+        let intent = intent.expect("diagnostic intent present");
+        if intent.status != PublicationStatus::Applied {
+            self.publisher
+                .reconcile_ineligible_diagnostic(
+                    &mut self.store,
+                    IneligiblePublishRequest {
+                        intent: &intent,
+                        issue_number: issue.issue_number,
+                        run_id: &run.run_id,
+                        issue_identifier: &issue.identifier,
+                        project_name: &self.config.project_display_name,
+                        remediation: INELIGIBLE_REMEDIATION,
+                        max_pages: self.max_pages,
+                    },
+                )
+                .await?;
+        }
+
+        let payload = serde_json::json!({
+            "run_id": run.run_id,
+            "stage_run_id": serde_json::Value::Null,
+            "status": "ineligible",
+            "error_code": "not_in_project",
+            "publication_intent_id": intent.intent_id,
+        });
+        self.emit_event(
+            "triage_ineligible",
+            Some(&issue.identifier),
+            Some(&run.run_id),
+            None,
+            payload,
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_in_project(
+        &mut self,
+        issue: &TriageIntakeIssue,
+        service: &ServiceConfig,
+        harness: &str,
+        model: Option<&str>,
+        configuration_revision: &str,
+        mapping_hash: &str,
+        command: &[String],
+        repo_path: &Path,
+        workspace_root: &Path,
+    ) -> Result<IssuePollOutcome> {
+        let existing_run = self.store.get_run_by_issue(
+            &self.config.forge_host,
+            &self.config.repository,
+            &issue.issue_id,
+        )?;
+        let verified = match existing_run.as_ref() {
+            Some(run) => verified_comments_from_store(&self.store, &run.run_id)?,
+            None => Vec::new(),
+        };
+        let issue_rev = issue_revision(&build_issue_revision_input(issue, service, verified));
+
+        if let Some(run) = existing_run.as_ref() {
+            if self
+                .store
+                .get_artifact_for_revision(&run.run_id, &issue_rev, configuration_revision)?
+                .is_some()
+            {
+                return Ok(IssuePollOutcome::Skipped);
+            }
+            let attempts = self.store.list_stage_attempts_for_revision(
+                &run.run_id,
+                &issue_rev,
+                configuration_revision,
+            )?;
+            if attempts.iter().any(|attempt| !attempt.status.is_terminal()) {
+                return Ok(IssuePollOutcome::Skipped);
+            }
+            if attempts.len() as u32 >= service.triage.max_attempts {
+                return Ok(IssuePollOutcome::Skipped);
+            }
+        }
+
+        let stage = match self.store.claim_attempt(ClaimAttemptRequest {
+            forge_host: self.config.forge_host.clone(),
+            repository: self.config.repository.clone(),
+            issue_id: issue.issue_id.clone(),
+            issue_identifier: issue.identifier.clone(),
+            issue_revision: issue_rev.clone(),
+            configuration_revision: configuration_revision.to_string(),
+            owner_instance: self.config.owner_instance.clone(),
+            harness: harness.to_string(),
+            model: model.map(str::to_string),
+            workspace_path: None,
+            output_path: None,
+            pid: None,
+            process_group_id: None,
+            process_start_token: None,
+            executable_identity: None,
+        }) {
+            Ok(stage) => stage,
+            Err(err) => {
+                // Concurrent nonterminal claim or unique constraint — treat as skip.
+                if matches!(err, SymphonyError::StorageError(_)) {
+                    return Ok(IssuePollOutcome::Skipped);
+                }
+                return Err(err);
+            }
+        };
+
+        self.emit_event(
+            "triage_started",
+            Some(&issue.identifier),
+            Some(&stage.run_id),
+            Some(&stage.stage_run_id),
+            serde_json::json!({
+                "run_id": stage.run_id,
+                "stage_run_id": stage.stage_run_id,
+                "status": "running",
+                "error_code": serde_json::Value::Null,
+                "attempt": stage.attempt,
+            }),
+        )?;
+
+        let outcome = self
+            .executor
+            .execute(TriageRunnerRequest {
+                attempt_id: stage.stage_run_id.clone(),
+                workspace_root: workspace_root.to_path_buf(),
+                repo_path: repo_path.to_path_buf(),
+                command: command.to_vec(),
+                turn_timeout_ms: service.triage.turn_timeout_ms,
+                model: model.map(str::to_string),
+            })
+            .await?;
+
+        match outcome {
+            TriageRunnerOutcome::Success(success) => {
+                self.complete_preview_success(
+                    issue,
+                    service,
+                    &stage.stage_run_id,
+                    &issue_rev,
+                    configuration_revision,
+                    mapping_hash,
+                    success,
+                )
+                .await?;
+                Ok(IssuePollOutcome::StartedCompleted)
+            }
+            TriageRunnerOutcome::Failure(failure) => {
+                let error = factory_error_from_runner(&failure.kind, &failure.message);
+                self.store
+                    .fail_attempt(&stage.stage_run_id, error.clone())?;
+                let attempts = self.store.list_stage_attempts_for_revision(
+                    &stage.run_id,
+                    &issue_rev,
+                    configuration_revision,
+                )?;
+                if attempts.len() as u32 >= service.triage.max_attempts {
+                    self.store
+                        .mark_run_status(&stage.run_id, FactoryRunStatus::Failed)?;
+                }
+                self.emit_event(
+                    "triage_failed",
+                    Some(&issue.identifier),
+                    Some(&stage.run_id),
+                    Some(&stage.stage_run_id),
+                    serde_json::json!({
+                        "run_id": stage.run_id,
+                        "stage_run_id": stage.stage_run_id,
+                        "status": "failed",
+                        "error_code": error.code,
+                        "attempt": stage.attempt,
+                    }),
+                )?;
+                Ok(IssuePollOutcome::StartedFailed)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn complete_preview_success(
+        &mut self,
+        issue: &TriageIntakeIssue,
+        service: &ServiceConfig,
+        stage_run_id: &str,
+        issue_revision: &str,
+        configuration_revision: &str,
+        mapping_hash: &str,
+        success: TriageRunnerSuccess,
+    ) -> Result<()> {
+        let bytes_len = serde_json::to_vec(&success.artifact)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(0);
+        let artifact = self.store.store_artifact(StoreArtifactRequest {
+            stage_run_id: stage_run_id.to_string(),
+            issue_revision: issue_revision.to_string(),
+            configuration_revision: configuration_revision.to_string(),
+            route_mapping_hash: mapping_hash.to_string(),
+            artifact: success.artifact.clone(),
+            bytes_len,
+            usage: success.usage,
+        })?;
+
+        let route_mapping = service.triage.routes.mapping_for(success.artifact.route);
+        let intent = self
+            .store
+            .create_publication_intent(CreatePublicationIntentRequest {
+                run_id: artifact.run_id.clone(),
+                artifact_id: Some(artifact.artifact_id.clone()),
+                mode: PublicationMode::Preview,
+                intake_label: service.triage.intake_label.clone(),
+                route_label: route_mapping.label.clone(),
+                project_state: route_mapping.state.clone(),
+                route_mapping_hash: mapping_hash.to_string(),
+                desired_effects: serde_json::json!({
+                    "kind": DESIRED_KIND_PREVIEW,
+                    "route": success.artifact.route.as_str(),
+                }),
+                observed_baseline: serde_json::json!({
+                    "labels": issue.labels,
+                }),
+                expected_projection: serde_json::json!({
+                    "labels": issue.labels,
+                }),
+            })?;
+
+        self.emit_event(
+            "triage_completed",
+            Some(&issue.identifier),
+            Some(&artifact.run_id),
+            Some(stage_run_id),
+            serde_json::json!({
+                "run_id": artifact.run_id,
+                "stage_run_id": stage_run_id,
+                "artifact_id": artifact.artifact_id,
+                "publication_intent_id": intent.intent_id,
+                "route": success.artifact.route.as_str(),
+                "status": "completed",
+                "error_code": serde_json::Value::Null,
+            }),
+        )?;
+        self.emit_event(
+            "triage_publication_started",
+            Some(&issue.identifier),
+            Some(&artifact.run_id),
+            Some(stage_run_id),
+            serde_json::json!({
+                "run_id": artifact.run_id,
+                "stage_run_id": stage_run_id,
+                "artifact_id": artifact.artifact_id,
+                "publication_intent_id": intent.intent_id,
+                "route": success.artifact.route.as_str(),
+                "status": "pending",
+                "error_code": serde_json::Value::Null,
+            }),
+        )?;
+
+        let stage = self.store.get_stage_run(stage_run_id)?.ok_or_else(|| {
+            SymphonyError::TriageError(format!("stage run {stage_run_id} missing after store"))
+        })?;
+        self.publisher
+            .reconcile_preview(
+                &mut self.store,
+                PreviewPublishRequest {
+                    intent: &intent,
+                    issue_number: issue.issue_number,
+                    run_id: &artifact.run_id,
+                    stage_run_id,
+                    attempt: stage.attempt,
+                    artifact: &success.artifact,
+                    max_pages: self.max_pages,
+                },
+            )
+            .await?;
+
+        self.store
+            .mark_run_status(&artifact.run_id, FactoryRunStatus::Completed)?;
+        Ok(())
+    }
+
+    fn emit_event(
+        &mut self,
+        event_name: &str,
+        issue: Option<&str>,
+        run_id: Option<&str>,
+        stage_run_id: Option<&str>,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        if let Some(emitter) = &self.events {
+            emitter.emit_triage_event(event_name, issue, payload.clone());
+        }
+        self.store.record_event(FactoryEventRecord {
+            event_id: Uuid::now_v7().to_string(),
+            run_id: run_id.map(str::to_string),
+            stage_run_id: stage_run_id.map(str::to_string),
+            event_type: event_name.to_string(),
+            timestamp: Utc::now(),
+            payload,
+        })?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IssuePollOutcome {
+    StartedCompleted,
+    StartedFailed,
+    Skipped,
+}
+
+fn load_prompt(workflow_dir: &Path, relative: &str) -> Result<String> {
+    let path = workflow_dir.join(relative);
+    std::fs::read_to_string(&path).map_err(|err| {
+        SymphonyError::TriageError(format!(
+            "failed to read triage prompt {}: {err}",
+            path.display()
+        ))
+    })
+}
+
+fn require_repo_path(service: &ServiceConfig) -> Result<PathBuf> {
+    let repo = service
+        .workspace
+        .repo
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            SymphonyError::TriageError(
+                "workspace.repo local path is required for triage".to_string(),
+            )
+        })?;
+    Ok(PathBuf::from(repo))
+}
+
+fn triage_harness(backend: AgentBackend) -> &'static str {
+    match backend {
+        AgentBackend::KataCli => "pi",
+        AgentBackend::Codex => "codex",
+    }
+}
+
+fn triage_command(service: &ServiceConfig) -> Result<Vec<String>> {
+    let command = match service.agent_backend {
+        AgentBackend::KataCli => service.pi_agent.command.clone(),
+        AgentBackend::Codex => service.codex.command.clone(),
+    };
+    if command.is_empty() {
+        return Err(SymphonyError::TriageError(
+            "triage agent command cannot be empty".to_string(),
+        ));
+    }
+    Ok(command)
+}
+
+fn triage_model(service: &ServiceConfig) -> Option<String> {
+    match service.agent_backend {
+        AgentBackend::KataCli => effective_pi_model(
+            service.triage.model.as_deref(),
+            service.pi_agent.model.as_deref(),
+        ),
+        AgentBackend::Codex => None,
+    }
+}
+
+fn desired_kind(value: &serde_json::Value) -> Option<&str> {
+    value.get("kind").and_then(|kind| kind.as_str())
+}
+
+fn parse_issue_number(issue_id: &str) -> Result<u64> {
+    issue_id.parse::<u64>().map_err(|err| {
+        SymphonyError::TriageError(format!("invalid factory run issue_id '{issue_id}': {err}"))
+    })
+}
+
+fn verified_comments_from_store(
+    store: &dyn FactoryRunStore,
+    run_id: &str,
+) -> Result<Vec<VerifiedTriageComment>> {
+    let mut out = Vec::new();
+    for identity in store.list_verified_comment_identities(run_id)? {
+        let Ok(comment_id) = identity.comment_id.parse::<u64>() else {
+            continue;
+        };
+        out.push(VerifiedTriageComment {
+            comment_id,
+            intent_id: identity.intent_id,
+            publisher_login: identity.publisher_login,
+        });
+    }
+    Ok(out)
+}
+
+fn build_issue_revision_input(
+    issue: &TriageIntakeIssue,
+    service: &ServiceConfig,
+    verified_triage_comments: Vec<VerifiedTriageComment>,
+) -> IssueRevisionInput {
+    IssueRevisionInput {
+        title: issue.title.clone(),
+        body: issue.body.clone(),
+        labels: issue.labels.clone(),
+        managed_labels: service.triage.routes.managed_labels(),
+        intake_label: service.triage.intake_label.clone(),
+        assignees: issue.assignees.clone(),
+        milestone: issue
+            .milestone
+            .as_ref()
+            .map(|milestone| IssueMilestoneFingerprint {
+                number: milestone.number,
+                title: milestone.title.clone(),
+            }),
+        comments: issue
+            .comments
+            .iter()
+            .map(|comment| IssueCommentFingerprint {
+                id: comment.id,
+                author_login: comment.author_login.clone(),
+                body: comment.body.clone(),
+                created_at: comment.created_at.to_rfc3339(),
+                updated_at: comment.updated_at.to_rfc3339(),
+            })
+            .collect(),
+        verified_triage_comments,
+    }
+}
+
+fn factory_error_from_runner(kind: &TriageRunnerFailureKind, message: &str) -> FactoryError {
+    let (code, retryable) = match kind {
+        TriageRunnerFailureKind::Setup => ("triage_setup_failed", false),
+        TriageRunnerFailureKind::Spawn => ("triage_spawn_failed", true),
+        TriageRunnerFailureKind::Timeout => ("triage_timeout", true),
+        TriageRunnerFailureKind::NonZeroExit => ("triage_nonzero_exit", true),
+        TriageRunnerFailureKind::MissingOutput => ("triage_missing_output", true),
+        TriageRunnerFailureKind::InvalidArtifact => ("triage_invalid_artifact", true),
+        TriageRunnerFailureKind::Integrity => ("triage_integrity_failed", true),
+    };
+    FactoryError::new(
+        code,
+        "triage_runner",
+        format!("{message}. Fix the underlying cause and wait for the next triage poll retry."),
+        retryable,
+        None,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::github::client::{GithubIssueComment, GithubUser};
+    use crate::triage::domain::{
+        EvidenceKind, RiskClass, StageUsage, TriageArtifact, TriageEvidence, TriageRoute,
+        TRIAGE_SCHEMA_VERSION,
+    };
+    use crate::triage::intake::IntakeComment;
+    use crate::triage::integrity::RepoBaseline;
+    use crate::triage::store::SqliteFactoryStore;
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct RecordingEmitter {
+        events: Mutex<Vec<(String, Option<String>)>>,
+    }
+
+    impl EventEmitter for RecordingEmitter {
+        fn emit_triage_event(
+            &self,
+            event_name: &str,
+            issue: Option<&str>,
+            _payload: serde_json::Value,
+        ) {
+            self.events
+                .lock()
+                .unwrap()
+                .push((event_name.to_string(), issue.map(str::to_string)));
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeIntake {
+        issues: Mutex<Vec<TriageIntakeIssue>>,
+        comments: Mutex<HashMap<u64, Vec<IntakeComment>>>,
+    }
+
+    #[async_trait]
+    impl TriageIntakePort for Arc<FakeIntake> {
+        async fn fetch_intake_issues(
+            &self,
+            _intake_label: &str,
+            _max_pages: u32,
+        ) -> Result<Vec<TriageIntakeIssue>> {
+            Ok(self.issues.lock().unwrap().clone())
+        }
+
+        async fn list_issue_comments(
+            &self,
+            issue_number: u64,
+            _max_pages: u32,
+        ) -> Result<Vec<IntakeComment>> {
+            Ok(self
+                .comments
+                .lock()
+                .unwrap()
+                .get(&issue_number)
+                .cloned()
+                .unwrap_or_default())
+        }
+
+        async fn authenticated_login(&self) -> Result<String> {
+            Ok("symphony-bot".to_string())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeComments {
+        login: String,
+        comments: Mutex<HashMap<u64, GithubIssueComment>>,
+        next_id: Mutex<u64>,
+        create_count: Mutex<u32>,
+        list_count: Mutex<u32>,
+    }
+
+    impl FakeComments {
+        fn new(login: &str) -> Arc<Self> {
+            Arc::new(Self {
+                login: login.to_string(),
+                comments: Mutex::new(HashMap::new()),
+                next_id: Mutex::new(500),
+                create_count: Mutex::new(0),
+                list_count: Mutex::new(0),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl TriageCommentPort for Arc<FakeComments> {
+        async fn authenticated_login(&self) -> Result<String> {
+            Ok(self.login.clone())
+        }
+
+        async fn list_comments(
+            &self,
+            _issue_number: u64,
+            _max_pages: u32,
+        ) -> Result<Vec<GithubIssueComment>> {
+            *self.list_count.lock().unwrap() += 1;
+            let mut values: Vec<_> = self.comments.lock().unwrap().values().cloned().collect();
+            values.sort_by_key(|comment| comment.id);
+            Ok(values)
+        }
+
+        async fn get_comment(&self, comment_id: u64) -> Result<GithubIssueComment> {
+            self.comments
+                .lock()
+                .unwrap()
+                .get(&comment_id)
+                .cloned()
+                .ok_or_else(|| SymphonyError::GithubApiStatus {
+                    status: 404,
+                    message: "comment not found".to_string(),
+                })
+        }
+
+        async fn create_comment(
+            &self,
+            _issue_number: u64,
+            body: &str,
+        ) -> Result<GithubIssueComment> {
+            let mut next = self.next_id.lock().unwrap();
+            let id = *next;
+            *next += 1;
+            *self.create_count.lock().unwrap() += 1;
+            let comment = GithubIssueComment {
+                id,
+                user: Some(GithubUser {
+                    login: self.login.clone(),
+                }),
+                body: Some(body.to_string()),
+                html_url: None,
+                created_at: None,
+                updated_at: None,
+            };
+            self.comments.lock().unwrap().insert(id, comment.clone());
+            Ok(comment)
+        }
+
+        async fn update_comment(&self, comment_id: u64, body: &str) -> Result<GithubIssueComment> {
+            let mut comments = self.comments.lock().unwrap();
+            let comment =
+                comments
+                    .get_mut(&comment_id)
+                    .ok_or_else(|| SymphonyError::GithubApiStatus {
+                        status: 404,
+                        message: "comment not found".to_string(),
+                    })?;
+            comment.body = Some(body.to_string());
+            Ok(comment.clone())
+        }
+    }
+
+    struct FakeExecutor {
+        outcome: Mutex<Option<TriageRunnerOutcome>>,
+    }
+
+    impl FakeExecutor {
+        fn success(artifact: TriageArtifact) -> Self {
+            Self {
+                outcome: Mutex::new(Some(TriageRunnerOutcome::Success(TriageRunnerSuccess {
+                    artifact,
+                    usage: StageUsage::default(),
+                    workspace_path: PathBuf::from("/tmp/ws"),
+                    output_path: PathBuf::from("/tmp/out.json"),
+                    baseline: RepoBaseline {
+                        head: "abc".to_string(),
+                        submodules: BTreeMap::new(),
+                    },
+                }))),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl TriageExecutor for FakeExecutor {
+        async fn execute(&self, _request: TriageRunnerRequest) -> Result<TriageRunnerOutcome> {
+            Ok(self
+                .outcome
+                .lock()
+                .unwrap()
+                .take()
+                .expect("fake executor outcome"))
+        }
+    }
+
+    fn sample_artifact() -> TriageArtifact {
+        TriageArtifact {
+            schema_version: TRIAGE_SCHEMA_VERSION,
+            route: TriageRoute::Implement,
+            risk_class: RiskClass::Low,
+            rationale: "Bounded docs fix.".to_string(),
+            evidence: vec![TriageEvidence {
+                kind: EvidenceKind::Issue,
+                reference: "body".to_string(),
+                summary: "Exact file named.".to_string(),
+            }],
+            next_action: "Apply the change.".to_string(),
+            clarification_question: None,
+            reproduction: None,
+        }
+    }
+
+    fn sample_issue(in_project: bool, number: u64) -> TriageIntakeIssue {
+        TriageIntakeIssue {
+            issue_id: number.to_string(),
+            issue_number: number,
+            identifier: format!("#{number}"),
+            title: "Fix docs".to_string(),
+            body: "Update README".to_string(),
+            labels: vec!["needs-triage".to_string(), "bug".to_string()],
+            non_managed_labels: vec!["bug".to_string()],
+            assignees: vec![],
+            milestone: None,
+            comments: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            forge_host: "github.com".to_string(),
+            repository: "owner/repo".to_string(),
+            in_project,
+        }
+    }
+
+    fn service_config(enabled: bool, workflow_dir: &Path) -> ServiceConfig {
+        let mut service = ServiceConfig::default();
+        service.triage.enabled = enabled;
+        service.triage.prompt = "prompt.md".to_string();
+        service.workspace.repo = Some("/tmp/repo".to_string());
+        service.workspace.root = workflow_dir
+            .join("workspaces")
+            .to_string_lossy()
+            .to_string();
+        service.agent_backend = AgentBackend::KataCli;
+        service.pi_agent.command = vec!["pi".to_string(), "--mode".to_string(), "rpc".to_string()];
+        service
+    }
+
+    fn prep_workflow(temp: &tempfile::TempDir) -> PathBuf {
+        let workflow_dir = temp.path().join("workflow");
+        std::fs::create_dir_all(&workflow_dir).unwrap();
+        std::fs::write(workflow_dir.join("prompt.md"), "triage prompt").unwrap();
+        workflow_dir
+    }
+
+    fn open_store(temp: &tempfile::TempDir) -> SqliteFactoryStore {
+        SqliteFactoryStore::acquire_lock_and_migrate(&temp.path().join("state.db"), 5_000).unwrap()
+    }
+
+    #[tokio::test]
+    async fn off_project_writes_ineligible_diagnostic_without_attempt() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = prep_workflow(&temp);
+        let store = open_store(&temp);
+        let intake = Arc::new(FakeIntake::default());
+        intake.issues.lock().unwrap().push(sample_issue(false, 42));
+        let comments = FakeComments::new("symphony-bot");
+        let emitter = Arc::new(RecordingEmitter::default());
+        let mut coordinator = TriageCoordinator::with_executor(
+            store,
+            intake,
+            comments.clone(),
+            TriageCoordinatorConfig {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                owner_instance: "test-owner".to_string(),
+                workflow_dir: workflow_dir.clone(),
+                project_display_name: "Factory".to_string(),
+            },
+            FakeExecutor::success(sample_artifact()),
+        )
+        .with_events(emitter.clone());
+
+        let summary = coordinator
+            .poll_once(&service_config(true, &workflow_dir))
+            .await
+            .unwrap();
+
+        assert_eq!(summary.ineligible, 1);
+        assert_eq!(summary.attempts_started, 0);
+        assert_eq!(*comments.create_count.lock().unwrap(), 1);
+        let run = coordinator
+            .store_mut()
+            .get_run_by_issue("github.com", "owner/repo", "42")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, FactoryRunStatus::Ineligible);
+        assert!(coordinator
+            .store_mut()
+            .list_stage_runs(&run.run_id)
+            .unwrap()
+            .is_empty());
+        let events = emitter.events.lock().unwrap().clone();
+        assert!(events
+            .iter()
+            .any(|(name, issue)| name == "triage_ineligible" && issue.as_deref() == Some("#42")));
+        let body = comments
+            .comments
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .body
+            .clone()
+            .unwrap();
+        assert!(body.contains("not eligible for triage"));
+    }
+
+    #[tokio::test]
+    async fn in_project_preview_success_creates_intent_and_comment() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = prep_workflow(&temp);
+        let store = open_store(&temp);
+        let intake = Arc::new(FakeIntake::default());
+        intake.issues.lock().unwrap().push(sample_issue(true, 7));
+        let comments = FakeComments::new("symphony-bot");
+        let mut coordinator = TriageCoordinator::with_executor(
+            store,
+            intake,
+            comments.clone(),
+            TriageCoordinatorConfig {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                owner_instance: "test-owner".to_string(),
+                workflow_dir: workflow_dir.clone(),
+                project_display_name: "Factory".to_string(),
+            },
+            FakeExecutor::success(sample_artifact()),
+        );
+
+        let summary = coordinator
+            .poll_once(&service_config(true, &workflow_dir))
+            .await
+            .unwrap();
+
+        assert_eq!(summary.attempts_completed, 1);
+        assert_eq!(*comments.create_count.lock().unwrap(), 1);
+        let run = coordinator
+            .store_mut()
+            .get_run_by_issue("github.com", "owner/repo", "7")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, FactoryRunStatus::Completed);
+        let artifact = coordinator
+            .store_mut()
+            .get_latest_artifact(&run.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(artifact.artifact.route, TriageRoute::Implement);
+        let intent = coordinator
+            .store_mut()
+            .get_latest_publication(&run.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(intent.mode, PublicationMode::Preview);
+        assert_eq!(intent.status, PublicationStatus::Applied);
+        assert!(intent.comment_id.is_some());
+        let body = comments
+            .comments
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .body
+            .clone()
+            .unwrap();
+        assert!(body.contains("Symphony triage preview"));
+        assert!(body.contains(&intent.intent_id));
+    }
+
+    #[tokio::test]
+    async fn disabled_triage_still_reconciles_pending() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = prep_workflow(&temp);
+        let mut store = open_store(&temp);
+        let run = store
+            .upsert_factory_run(UpsertFactoryRunRequest {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                issue_id: "9".to_string(),
+                issue_identifier: "#9".to_string(),
+                issue_revision: None,
+                status: FactoryRunStatus::Ineligible,
+                current_stage: Some(TRIAGE_STAGE_NAME.to_string()),
+            })
+            .unwrap();
+        store
+            .create_publication_intent(CreatePublicationIntentRequest {
+                run_id: run.run_id,
+                artifact_id: None,
+                mode: PublicationMode::Preview,
+                intake_label: "needs-triage".to_string(),
+                route_label: String::new(),
+                project_state: None,
+                route_mapping_hash: "routes".to_string(),
+                desired_effects: serde_json::json!({
+                    "kind": DESIRED_KIND_INELIGIBLE,
+                    "project_name": "Factory",
+                    "remediation": INELIGIBLE_REMEDIATION,
+                }),
+                observed_baseline: serde_json::json!({}),
+                expected_projection: serde_json::json!({}),
+            })
+            .unwrap();
+
+        let intake = Arc::new(FakeIntake::default());
+        intake.issues.lock().unwrap().push(sample_issue(true, 9));
+        let comments = FakeComments::new("symphony-bot");
+        let mut coordinator = TriageCoordinator::with_executor(
+            store,
+            intake,
+            comments.clone(),
+            TriageCoordinatorConfig {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                owner_instance: "test-owner".to_string(),
+                workflow_dir: workflow_dir.clone(),
+                project_display_name: "Factory".to_string(),
+            },
+            FakeExecutor::success(sample_artifact()),
+        );
+
+        let summary = coordinator
+            .poll_once(&service_config(false, &workflow_dir))
+            .await
+            .unwrap();
+
+        assert!(!summary.triage_enabled);
+        assert_eq!(summary.issues_seen, 0);
+        assert_eq!(summary.attempts_started, 0);
+        assert_eq!(summary.reconciled_intents, 1);
+        assert_eq!(*comments.create_count.lock().unwrap(), 1);
+        assert!(*comments.list_count.lock().unwrap() >= 1);
+    }
+}
