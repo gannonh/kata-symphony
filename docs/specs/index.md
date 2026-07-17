@@ -5,6 +5,7 @@ Roadmap for planned and completed work. Historical Superpowers designs and plans
 # Active
 
 * [Symphony Software Factory Platform PRD](symphony-software-factory-platform-prd.md) - product requirements and vertical-slice roadmap for the full software factory platform
+* [A1 GitHub Issue Triage](2026-07-16-a1-github-issue-triage-design.md) - Draft design for durable repository-backed triage and visible issue routing
 * [Pi Symphony Extension Design](../superpowers/specs/2026-05-14-pi-symphony-extension-design.md) - Pi extension to init, launch, monitor, and steer Symphony
 * [Wave 4 Shared Context and Diagnostics Plan](../superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md) - dashboard parity for shared context + diagnostics
 
