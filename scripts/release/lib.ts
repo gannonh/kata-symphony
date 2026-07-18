@@ -37,6 +37,32 @@ export function bumpPatch(version: string): string {
   return formatSemverCore({ ...core, patch: core.patch + 1 });
 }
 
+/** Next free exact-semver under prefix, bumping patch while the git tag exists. */
+export function nextAvailableExactVersion(
+  startVersion: string,
+  tags: readonly string[],
+  prefix: string,
+  maxBumps = 100,
+): string {
+  let version = stripVersionPrefix(startVersion);
+  if (isPrerelease(version)) {
+    return version;
+  }
+
+  const tagSet = new Set(tags);
+  for (let i = 0; i <= maxBumps; i += 1) {
+    const tag = `${prefix}${version}`;
+    if (!tagSet.has(tag)) {
+      return version;
+    }
+    version = bumpPatch(version);
+  }
+
+  throw new Error(
+    `Could not find a free ${prefix}* version after ${maxBumps} patch bumps from ${startVersion}.`,
+  );
+}
+
 export function isPrerelease(version: string): boolean {
   return /[-+]/.test(version);
 }

@@ -8,6 +8,7 @@ import {
   isExecutedAsMain,
   latestMatchingTag,
   listGitTags,
+  nextAvailableExactVersion,
   npmDistTagForVersion,
   parseArgs,
   printOrWriteOutputs,
@@ -35,15 +36,21 @@ export function resolveStableVersion(options: {
 } {
   const prefix = options.product === "cli" ? "cli-v" : "symphony-v";
   const tags = options.tags ?? listGitTags();
-  let version = options.inputVersion
+  const explicitVersion = options.inputVersion
     ? stripVersionPrefix(options.inputVersion)
     : undefined;
+  let version = explicitVersion;
 
   if (!version) {
     if (options.product === "cli") {
-      // CLI is a single manual channel: default to package.json, never nightlies.
+      // CLI is a single manual channel: start from package.json, then auto-bump
+      // patch until cli-v* is free (so dispatch without version always ships new).
       if (options.packageVersion) {
-        version = stripVersionPrefix(options.packageVersion);
+        version = nextAvailableExactVersion(
+          options.packageVersion,
+          tags,
+          prefix,
+        );
       } else if (options.dryRun) {
         version = `0.0.0-dryrun.${options.runNumber}`;
       } else {
@@ -80,6 +87,12 @@ export function resolveStableVersion(options: {
 
   const isExactStable = /^\d+\.\d+\.\d+$/.test(version);
   const tag = `${prefix}${version}`;
+  if (explicitVersion && tags.includes(tag) && !options.dryRun) {
+    throw new Error(
+      `Tag ${tag} already exists. Pass a new version or omit version to auto-bump.`,
+    );
+  }
+
   const secondaryTag =
     options.product === "symphony" ? `pi-symphony-v${version}` : "";
   const name =

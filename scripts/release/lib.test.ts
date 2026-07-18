@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   bumpPatch,
   extractStableCoreFromNightlyTag,
+  nextAvailableExactVersion,
   npmDistTagForVersion,
   parseSemverCore,
   stripVersionPrefix,
@@ -153,7 +154,11 @@ describe("stable version resolution", () => {
     ).toThrow(/Cut a nightly first/);
   });
 
-  it("uses packageVersion for CLI and ignores nightlies", () => {
+  it("auto-bumps CLI packageVersion when the tag already exists", () => {
+    expect(
+      nextAvailableExactVersion("0.17.0", ["cli-v0.17.0", "cli-v0.17.1"], "cli-v"),
+    ).toBe("0.17.2");
+
     const resolved = resolveStableVersion({
       dryRun: false,
       runNumber: 3,
@@ -161,7 +166,19 @@ describe("stable version resolution", () => {
       tags: ["cli-v0.17.0", "cli-v0.18.0-nightly.20260718.1"],
       packageVersion: "0.17.0",
     });
-    expect(resolved.version).toBe("0.17.0");
-    expect(resolved.tag).toBe("cli-v0.17.0");
+    expect(resolved.version).toBe("0.17.1");
+    expect(resolved.tag).toBe("cli-v0.17.1");
+  });
+
+  it("rejects an explicit CLI version whose tag already exists", () => {
+    expect(() =>
+      resolveStableVersion({
+        inputVersion: "0.17.0",
+        dryRun: false,
+        runNumber: 1,
+        product: "cli",
+        tags: ["cli-v0.17.0"],
+      }),
+    ).toThrow(/already exists/);
   });
 });

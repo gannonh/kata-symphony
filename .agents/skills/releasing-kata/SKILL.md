@@ -15,7 +15,7 @@ Root `package.json` version is `0.0.0` — never touch it as a release version. 
 | --- | --- | --- | --- |
 | Symphony + Pi | **stable** | `workflow_dispatch` `channel=stable` | Explicit `version`, or latest `symphony-v*-nightly.*` core |
 | Symphony + Pi | **nightly** | Schedule every 3h on main (skips if HEAD unchanged) or `channel=nightly` | `{nextPatch}-nightly.YYYYMMDD.{run_number}` from `Cargo.toml` patch+1 |
-| CLI | **single (manual)** | `workflow_dispatch` only | Explicit `version`, or current `apps/cli/package.json` |
+| CLI | **single (manual)** | `workflow_dispatch` only | Explicit `version`, or auto-bump patch from `apps/cli/package.json` until `cli-v*` is free |
 
 CLI has no nightly and no channel picker.
 

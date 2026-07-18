@@ -10,20 +10,20 @@ CLI is **not** coupled to Symphony and has a **single manual release channel** (
 
 ## Version / dist-tags
 
-- Omit `version` → use current `apps/cli/package.json` version
-- Pass `version` → override (e.g. `0.18.0` or `0.18.0-alpha.0`)
+- Omit `version` → start from `apps/cli/package.json`, then auto-bump patch until `cli-v*` is free
+- Pass `version` → override (e.g. `0.18.0` or `0.18.0-alpha.0`); fails early if that tag already exists
 - Plain semver (`0.18.0`) → npm `latest`
 - Prerelease (`0.18.0-alpha.0`) → npm dist-tag from the prerelease id (`alpha`)
 
 ## Steps
 
-1. Land the code on `main` (no version-bump PR required). For an automatic version, ensure `apps/cli/package.json` already holds the intended release version, or pass `version` to override.
+1. Land the code on `main` (no version-bump PR required).
 2. Optional: add `## X.Y.Z` to `apps/cli/CHANGELOG.md`.
 3. Update docs when behavior changes (`apps/cli/README.md`, `AGENTS.md`, preferences docs as needed).
 4. Dispatch:
 
    ```bash
-   # Use package.json version
+   # Auto-bump to next free patch from package.json
    gh workflow run cli-release.yml
 
    # Override version
@@ -47,7 +47,7 @@ CLI is **not** coupled to Symphony and has a **single manual release channel** (
 
 ## What CI does
 
-1. **preflight**: resolve version (input or `apps/cli/package.json`); align package.json; tsc, tests, golden-path, build.
+1. **preflight**: resolve version (input, or auto-bump from `apps/cli/package.json`); align package.json; tsc, tests, golden-path, build.
 2. **publish**: build, golden-path gate, `npm publish`, create `cli-vX.Y.Z` tag + GitHub Release.
 3. **finalize** (non-prerelease only): commit `apps/cli/package.json` version on `main`.
 

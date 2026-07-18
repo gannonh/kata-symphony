@@ -1,12 +1,12 @@
 name: CLI Release
 
-# Manual-only CLI releases (single channel). Omit version to use apps/cli/package.json,
-# or pass version to override (including prereleases like 0.18.0-alpha.0).
+# Manual-only CLI releases (single channel). Omit version to auto-bump from
+# apps/cli/package.json to the next free cli-v* tag, or pass version to override.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. 0.18.0 or v0.18.0). Optional: defaults to apps/cli/package.json."
+        description: "Release version (e.g. 0.18.0). Optional: auto-bumps patch from package.json until cli-v* is free."
         required: false
         type: string
       dry_run:
