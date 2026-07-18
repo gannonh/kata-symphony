@@ -153,15 +153,15 @@ describe("stable version resolution", () => {
     ).toThrow(/Cut a nightly first/);
   });
 
-  it("falls back to packageVersion for CLI when no nightly exists", () => {
+  it("uses packageVersion for CLI and ignores nightlies", () => {
     const resolved = resolveStableVersion({
       dryRun: false,
       runNumber: 3,
       product: "cli",
-      tags: ["cli-v0.17.0"],
-      packageVersion: "0.18.0",
+      tags: ["cli-v0.17.0", "cli-v0.18.0-nightly.20260718.1"],
+      packageVersion: "0.17.0",
     });
-    expect(resolved.version).toBe("0.18.0");
-    expect(resolved.tag).toBe("cli-v0.18.0");
+    expect(resolved.version).toBe("0.17.0");
+    expect(resolved.tag).toBe("cli-v0.17.0");
   });
 });

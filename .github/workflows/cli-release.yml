@@ -1,12 +1,12 @@
 name: CLI Release
 
-# Manual-only CLI releases. Version is automatic from the latest CLI nightly
-# tag core when omitted, or can be overridden via the version input.
+# Manual-only CLI releases (single channel). Omit version to use apps/cli/package.json,
+# or pass version to override (including prereleases like 0.18.0-alpha.0).
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version (e.g. 0.18.0 or v0.18.0). Optional: defaults to latest cli nightly core when present."
+        description: "Release version (e.g. 0.18.0 or v0.18.0). Optional: defaults to apps/cli/package.json."
         required: false
         type: string
       dry_run:

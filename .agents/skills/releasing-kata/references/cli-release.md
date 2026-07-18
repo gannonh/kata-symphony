@@ -6,13 +6,14 @@ Changelog: `apps/cli/CHANGELOG.md`
 Tag format: `cli-vX.Y.Z` or `cli-vX.Y.Z-<prerelease>`  
 CI workflow: `cli-release.yml` (manual `workflow_dispatch` only)
 
-CLI is **not** coupled to Symphony and has **no** scheduled nightly.
+CLI is **not** coupled to Symphony and has a **single manual release channel** (no nightly).
 
-## Release channels / dist-tags
+## Version / dist-tags
 
-- Stable plain semver (`0.18.0`) → npm `latest`
+- Omit `version` → use current `apps/cli/package.json` version
+- Pass `version` → override (e.g. `0.18.0` or `0.18.0-alpha.0`)
+- Plain semver (`0.18.0`) → npm `latest`
 - Prerelease (`0.18.0-alpha.0`) → npm dist-tag from the prerelease id (`alpha`)
-- Version default order when `version` is omitted: latest `cli-v*-nightly.*` core (if any), else current `apps/cli/package.json` version
 
 ## Steps
 
@@ -22,7 +23,7 @@ CLI is **not** coupled to Symphony and has **no** scheduled nightly.
 4. Dispatch:
 
    ```bash
-   # Use package.json version (or latest cli nightly core if present)
+   # Use package.json version
    gh workflow run cli-release.yml
 
    # Override version
@@ -46,13 +47,13 @@ CLI is **not** coupled to Symphony and has **no** scheduled nightly.
 
 ## What CI does
 
-1. **preflight**: resolve version (input or latest `cli-v*-nightly.*` core); align package.json; tsc, tests, golden-path, build.
+1. **preflight**: resolve version (input or `apps/cli/package.json`); align package.json; tsc, tests, golden-path, build.
 2. **publish**: build, golden-path gate, `npm publish`, create `cli-vX.Y.Z` tag + GitHub Release.
-3. **finalize** (stable non-prerelease): commit `apps/cli/package.json` version on `main`.
+3. **finalize** (non-prerelease only): commit `apps/cli/package.json` version on `main`.
 
 ## Acceptance criteria
 
 - [ ] Published to npm under the expected dist-tag
 - [ ] Git tag `cli-vX.Y.Z` created
 - [ ] GitHub Release created
-- [ ] For stable: main package.json matches after finalize
+- [ ] For non-prerelease: main package.json matches after finalize

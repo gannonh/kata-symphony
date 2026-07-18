@@ -40,26 +40,37 @@ export function resolveStableVersion(options: {
     : undefined;
 
   if (!version) {
-    const latestNightly = latestMatchingTag(tags, [
-      new RegExp(`^${prefix}\\d+\\.\\d+\\.\\d+-nightly\\.\\d{8}\\.\\d+$`),
-    ]);
-    if (latestNightly) {
-      version = extractStableCoreFromNightlyTag(latestNightly, prefix);
-      if (!version) {
+    if (options.product === "cli") {
+      // CLI is a single manual channel: default to package.json, never nightlies.
+      if (options.packageVersion) {
+        version = stripVersionPrefix(options.packageVersion);
+      } else if (options.dryRun) {
+        version = `0.0.0-dryrun.${options.runNumber}`;
+      } else {
         throw new Error(
-          `Could not parse stable core from nightly tag '${latestNightly}'.`,
+          "No version input and no apps/cli/package.json version available. Pass version or ensure the package manifest is readable.",
         );
       }
-    } else if (options.packageVersion) {
-      // CLI has no scheduled nightly: fall back to the version currently in
-      // package.json so dispatch can omit `version` when the tree is ready.
-      version = stripVersionPrefix(options.packageVersion);
-    } else if (options.dryRun) {
-      version = `0.0.0-dryrun.${options.runNumber}`;
     } else {
-      throw new Error(
-        "No version input and no nightly tag to derive the stable version from. Cut a nightly first or pass version.",
-      );
+      const latestNightly = latestMatchingTag(tags, [
+        new RegExp(`^${prefix}\\d+\\.\\d+\\.\\d+-nightly\\.\\d{8}\\.\\d+$`),
+      ]);
+      if (latestNightly) {
+        version = extractStableCoreFromNightlyTag(latestNightly, prefix);
+        if (!version) {
+          throw new Error(
+            `Could not parse stable core from nightly tag '${latestNightly}'.`,
+          );
+        }
+      } else if (options.packageVersion) {
+        version = stripVersionPrefix(options.packageVersion);
+      } else if (options.dryRun) {
+        version = `0.0.0-dryrun.${options.runNumber}`;
+      } else {
+        throw new Error(
+          "No version input and no nightly tag to derive the stable version from. Cut a nightly first or pass version.",
+        );
+      }
     }
   }
 

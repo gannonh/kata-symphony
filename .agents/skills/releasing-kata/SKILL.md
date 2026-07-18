@@ -11,12 +11,13 @@ Root `package.json` version is `0.0.0` — never touch it as a release version. 
 
 ## Channels
 
-| Channel | How | Version |
-| --- | --- | --- |
-| **stable** | `workflow_dispatch` with `channel=stable` (Symphony) or CLI dispatch | Explicit `version` input, or derive from latest matching `*-nightly.*` tag core |
-| **nightly** | Schedule every 3h on main (Symphony only, skips if HEAD unchanged since last nightly) or manual `channel=nightly` | `{nextPatch}-nightly.YYYYMMDD.{run_number}` from current `Cargo.toml` patch+1 |
+| Target | Channel | How | Version |
+| --- | --- | --- | --- |
+| Symphony + Pi | **stable** | `workflow_dispatch` `channel=stable` | Explicit `version`, or latest `symphony-v*-nightly.*` core |
+| Symphony + Pi | **nightly** | Schedule every 3h on main (skips if HEAD unchanged) or `channel=nightly` | `{nextPatch}-nightly.YYYYMMDD.{run_number}` from `Cargo.toml` patch+1 |
+| CLI | **single (manual)** | `workflow_dispatch` only | Explicit `version`, or current `apps/cli/package.json` |
 
-CLI has **no nightly**. CLI releases are manual only. Omit `version` to use `apps/cli/package.json` (or a future `cli-v*-nightly.*` core); pass `version` to override.
+CLI has no nightly and no channel picker.
 
 ## Version semantics
 

@@ -18,7 +18,7 @@ No version input and no nightly tag to derive the stable version from.
 ```
 
 **Fix (Symphony):** Pass `-f version=X.Y.Z`, or cut a Symphony nightly first.  
-**Fix (CLI):** Omit `version` to use `apps/cli/package.json`, or pass `-f version=X.Y.Z` to override.
+**Fix (CLI):** Omit `version` to use `apps/cli/package.json`, or pass `-f version=X.Y.Z` to override. CLI has no nightly channel.
 
 ### Tag already exists
 
