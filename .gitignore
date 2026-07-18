@@ -136,3 +136,4 @@ apps/cli/docs/superpowers/
 # artifacts
 .agents/kata-setup-manifest.json
 apps/desktop/release/
+.pi-subagents/artifacts/
