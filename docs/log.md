@@ -1,6 +1,7 @@
 # Docs Update Log
 
 ## 2026-07-18
+* **Release model**: Switched to dispatch-driven releases (kata-code style). Symphony binary + Pi extension ship together at one version via `symphony-release.yml` (manual stable/nightly + 3h scheduled nightly). CLI stays independent via manual `cli-release.yml`. Removed push-to-main path-filter releases and standalone `pi-symphony-extension-release.yml`.
 * **A1 PR1 shipped**: Updated [A1 design](/specs/2026-07-16-a1-github-issue-triage-design.md), [factory PRD](/specs/symphony-software-factory-platform-prd.md), and [specs roadmap](/specs/index.md) after [#587](https://github.com/gannonh/kata-symphony/pull/587); added [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md) for triage durability and isolation decisions.
 
 ## 2026-07-17

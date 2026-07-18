@@ -1,76 +1,58 @@
 # CLI Release
 
-Package: `@kata-sh/cli`
-Version source: `apps/cli/package.json`
-Changelog: `apps/cli/CHANGELOG.md`
-Tag format: `cli-vX.Y.Z` or `cli-vX.Y.Z-alpha.N`
-CI workflow: `cli-release.yml`
+Package: `@kata-sh/cli`  
+Version source at publish time: workflow-aligned `apps/cli/package.json`  
+Changelog: `apps/cli/CHANGELOG.md`  
+Tag format: `cli-vX.Y.Z` or `cli-vX.Y.Z-<prerelease>`  
+CI workflow: `cli-release.yml` (manual `workflow_dispatch` only)
 
-## Release Channels
+CLI is **not** coupled to Symphony and has **no** scheduled nightly.
 
-- Stable releases use plain semver, for example `0.16.0`, and publish to npm with the `latest` dist-tag.
-- Prereleases use semver prerelease identifiers, for example `0.16.0-alpha.0`, `0.16.0-beta.0`, or `0.16.0-rc.0`.
-- The CLI release workflow derives the npm dist-tag from the prerelease identifier. `0.16.0-alpha.0` publishes as `@kata-sh/cli@alpha` and creates a GitHub prerelease.
-- Use prereleases for platform pivots where the skill/backend contract is ready for integration validation but downstream harnesses are still catching up.
+## Release channels / dist-tags
+
+- Stable plain semver (`0.18.0`) → npm `latest`
+- Prerelease (`0.18.0-alpha.0`) → npm dist-tag from the prerelease id (`alpha`)
+- Version default order when `version` is omitted: latest `cli-v*-nightly.*` core (if any), else current `apps/cli/package.json` version
 
 ## Steps
 
-1. **Verify clean state on main**
+1. Land the code on `main` (no version-bump PR required). For an automatic version, ensure `apps/cli/package.json` already holds the intended release version, or pass `version` to override.
+2. Optional: add `## X.Y.Z` to `apps/cli/CHANGELOG.md`.
+3. Update docs when behavior changes (`apps/cli/README.md`, `AGENTS.md`, preferences docs as needed).
+4. Dispatch:
 
    ```bash
-   git branch --show-current  # → main
-   git status                 # → clean
+   # Use package.json version (or latest cli nightly core if present)
+   gh workflow run cli-release.yml
+
+   # Override version
+   gh workflow run cli-release.yml -f version=0.18.0
+
+   # Prerelease
+   gh workflow run cli-release.yml -f version=0.18.0-alpha.0
+
+   # Dry run
+   gh workflow run cli-release.yml -f version=0.18.0 -f dry_run=true
    ```
 
-2. **Run pre-release checks**
+5. Verify:
 
    ```bash
-   cd apps/cli
-   npx tsc
-   npm test
-   ```
-
-3. **Bump version** in `apps/cli/package.json` only. For validation releases, prefer prerelease semver such as `0.16.0-alpha.0`.
-
-4. **Update `apps/cli/CHANGELOG.md`** and `apps/cli/README.md` and `apps/cli/AGENTS.md` with the new version's changes
-
-5. **Update essential documentation:**
-   1. Preferences Reference: `apps/cli/src/resources/extensions/kata/docs/preferences-reference.md` - Documents every preference field, its type, default, and behavior. Update when adding, removing, or renaming a preference field, changing a field's type or default, or changing how a preference affects runtime behavior.
-   2. Preferences Template: `apps/cli/src/resources/extensions/kata/templates/preferences.md` - YAML frontmatter template copied into new projects on init. Update when adding a new field (add with its default), removing a field, or changing a default value. Keep template and reference in sync: every field in the template should be documented in the reference, and vice versa.
-   3. Agent Context: `apps/cli/src/resources/AGENTS.md` - Tells the agent about CLI architecture, directory structure, extensions, and capabilities. Update when adding or removing extensions, commands, or skills; changing directory structure or file roles; changing how the agent interacts with the system; or adding new agent prompt templates.
-
-6. **Create release branch and PR**
-
-   ```bash
-   git checkout -b release/cli-vX.Y.Z
-   git add apps/cli/package.json apps/cli/CHANGELOG.md apps/cli/README.md apps/cli/AGENTS.md
-   git commit -m "chore(release): bump cli to X.Y.Z"
-   git push -u origin release/cli-vX.Y.Z
-   gh pr create --title "CLI vX.Y.Z" --body "CLI release vX.Y.Z"
-   ```
-
-7. **When approved, merge PR to main** — CI takes over from here
-
-8. **Verify the release**
-
-   ```bash
+   gh run list --workflow=cli-release.yml --limit 5
    gh release view cli-vX.Y.Z
    npm view @kata-sh/cli version
    npm view @kata-sh/cli dist-tags
    ```
 
-## What CI does after merge
+## What CI does
 
-`cli-release.yml` triggers on push to main:
-
-1. Compares `apps/cli/package.json` version against existing `cli-v*` tags — skips if tag exists
-2. Runs TypeScript check and tests
-3. Builds and publishes to npm (`npm publish --access public`). Prereleases publish under their prerelease dist-tag, for example `alpha`; stable releases publish under `latest`.
-4. Creates git tag `cli-vX.Y.Z` and GitHub Release
+1. **preflight**: resolve version (input or latest `cli-v*-nightly.*` core); align package.json; tsc, tests, golden-path, build.
+2. **publish**: build, golden-path gate, `npm publish`, create `cli-vX.Y.Z` tag + GitHub Release.
+3. **finalize** (stable non-prerelease): commit `apps/cli/package.json` version on `main`.
 
 ## Acceptance criteria
 
-- [ ] `apps/cli/package.json` version bumped
-- [ ] `apps/cli/CHANGELOG.md` updated
-- [ ] Published to npm (`npm view @kata-sh/cli version` for stable or `npm view @kata-sh/cli dist-tags` for prerelease)
+- [ ] Published to npm under the expected dist-tag
 - [ ] Git tag `cli-vX.Y.Z` created
+- [ ] GitHub Release created
+- [ ] For stable: main package.json matches after finalize

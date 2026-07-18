@@ -68,8 +68,8 @@ Pre-push hook runs `pnpm exec turbo run lint typecheck test --affected`, same co
 - `validate`: `turbo run lint typecheck test --affected` (JS/TS + Rust via Turborepo)
 - `gate`: aggregates results, sole required branch protection check
 
-Release workflows trigger on push to main with path filters:
-`cli-release.yml`, `symphony-release.yml`, `pi-symphony-extension-release.yml`
+Release workflows are manually dispatched (Symphony also has a scheduled nightly):
+`symphony-release.yml` (Symphony binary + Pi extension, shared version), `cli-release.yml` (CLI only).
 
 ## Tech Stack
 

@@ -1,53 +1,122 @@
 name: Symphony Release
 
+# Coupled Symphony binary + Pi extension release.
+# Manual dispatch for stable/nightly; scheduled nightlies every 3h when main moved.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'apps/symphony/**'
+  schedule:
+    - cron: "0 */3 * * *"
   workflow_dispatch:
+    inputs:
+      channel:
+        description: "Release channel"
+        required: false
+        default: stable
+        type: choice
+        options:
+          - stable
+          - nightly
+      version:
+        description: "Release version (e.g. 2.4.0 or v2.4.0). Optional: stable defaults to the latest nightly core; nightly ignores this."
+        required: false
+        type: string
+      dry_run:
+        description: "Build + validate only; create no tags, GitHub Releases, or npm publish"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
-  group: symphony-release-${{ github.sha }}
+  group: symphony-release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
-  check-version:
+  check_changes:
+    name: Check for changes since last nightly
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     outputs:
-      should_release: ${{ steps.check.outputs.should_release }}
-      version: ${{ steps.check.outputs.version }}
+      has_changes: ${{ steps.check.outputs.has_changes }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
-      - name: Check if Symphony version changed
-        id: check
+      - id: check
+        name: Compare HEAD to last symphony nightly tag
         run: |
-          CURRENT_VERSION=$(grep '^version' apps/symphony/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-
-          if git ls-remote --exit-code --tags --refs origin "refs/tags/symphony-v$CURRENT_VERSION" >/dev/null 2>&1; then
-            echo "Tag symphony-v$CURRENT_VERSION already exists, skipping release"
-            echo "should_release=false" >> $GITHUB_OUTPUT
-          else
-            echo "New Symphony version $CURRENT_VERSION detected, will release"
-            echo "should_release=true" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          last_nightly_tag="$(git for-each-ref --sort=-creatordate --format='%(refname:short)' --count=1 'refs/tags/symphony-v*-nightly.*')"
+          if [[ -z "$last_nightly_tag" ]]; then
+            echo "No previous nightly tag found. Proceeding with release."
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-  test:
-    needs: check-version
-    if: needs.check-version.outputs.should_release == 'true'
+          last_nightly_sha=$(git rev-parse "$last_nightly_tag^{commit}")
+          head_sha=$(git rev-parse HEAD)
+
+          if [[ "$last_nightly_sha" == "$head_sha" ]]; then
+            echo "No changes on main since last nightly release ($last_nightly_tag). Skipping."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changes detected on main since $last_nightly_tag ($last_nightly_sha → $head_sha). Proceeding."
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  preflight:
+    name: Preflight
+    needs: [check_changes]
+    if: |
+      !failure() && !cancelled() &&
+      (github.event_name != 'schedule' || needs.check_changes.outputs.has_changes == 'true')
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      release_channel: ${{ steps.release_meta.outputs.release_channel }}
+      version: ${{ steps.release_meta.outputs.version }}
+      tag: ${{ steps.release_meta.outputs.tag }}
+      secondary_tag: ${{ steps.release_meta.outputs.secondary_tag }}
+      release_name: ${{ steps.release_meta.outputs.name }}
+      secondary_name: ${{ steps.release_meta.outputs.secondary_name }}
+      short_sha: ${{ steps.release_meta.outputs.short_sha }}
+      previous_tag: ${{ steps.previous_tag.outputs.previous_tag }}
+      npm_tag: ${{ steps.release_meta.outputs.npm_tag }}
+      is_prerelease: ${{ steps.release_meta.outputs.is_prerelease }}
+      make_latest: ${{ steps.release_meta.outputs.make_latest }}
+      dry_run: ${{ steps.release_meta.outputs.dry_run }}
+      ref: ${{ github.sha }}
+    env:
+      TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+      TURBO_TEAM: ${{ vars.TURBO_TEAM }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: ".node-version"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.8"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.2
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Cargo
         uses: actions/cache@v5
@@ -56,18 +125,130 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             apps/symphony/target
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('apps/symphony/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-symphony-preflight-${{ hashFiles('apps/symphony/Cargo.lock') }}
 
-      - name: Run tests
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - id: release_meta
+        name: Resolve release version
+        shell: bash
+        env:
+          DISPATCH_CHANNEL: ${{ github.event.inputs.channel }}
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
+          DISPATCH_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          NIGHTLY_DATE: ${{ github.run_started_at }}
+          NIGHTLY_SHA: ${{ github.sha }}
+          NIGHTLY_RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" || ( "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_CHANNEL:-stable}" == "nightly" ) ]]; then
+            nightly_date="$(date -u -d "$NIGHTLY_DATE" +%Y%m%d)"
+
+            node --experimental-strip-types scripts/release/resolve-nightly-release.ts \
+              --date "$nightly_date" \
+              --run-number "$NIGHTLY_RUN_NUMBER" \
+              --sha "$NIGHTLY_SHA" \
+              --product symphony \
+              --github-output
+
+            version="$(grep '^version=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+            short_sha="$(grep '^short_sha=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+
+            {
+              echo "release_channel=nightly"
+              echo "secondary_tag=pi-symphony-v${version}"
+              echo "secondary_name=Pi Symphony Extension Nightly ${version} (${short_sha})"
+              echo "npm_tag=nightly"
+              echo "is_prerelease=true"
+              echo "make_latest=false"
+            } >> "$GITHUB_OUTPUT"
+
+            if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+              echo "dry_run=${DISPATCH_DRY_RUN:-false}" >> "$GITHUB_OUTPUT"
+            else
+              echo "dry_run=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            dry_run="${DISPATCH_DRY_RUN:-false}"
+            args=(
+              --product symphony
+              --run-number "$NIGHTLY_RUN_NUMBER"
+              --github-output
+            )
+            if [[ -n "${DISPATCH_VERSION:-}" ]]; then
+              args+=(--version "$DISPATCH_VERSION")
+            fi
+            if [[ "$dry_run" == "true" ]]; then
+              args+=(--dry-run)
+            fi
+
+            node --experimental-strip-types scripts/release/resolve-stable-version.ts "${args[@]}"
+            echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
+            echo "short_sha=$(echo "$NIGHTLY_SHA" | cut -c1-12)" >> "$GITHUB_OUTPUT"
+          fi
+
+          channel="$(grep '^release_channel=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          version="$(grep '^version=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          tag="$(grep '^tag=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          secondary_tag="$(grep '^secondary_tag=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          is_prerelease="$(grep '^is_prerelease=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          make_latest="$(grep '^make_latest=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          dry_run="$(grep '^dry_run=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+
+          {
+            echo "## Release parameters"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **channel** | \`$channel\` |"
+            echo "| **version** | \`$version\` |"
+            echo "| **symphony tag** | \`$tag\` |"
+            echo "| **pi tag** | \`$secondary_tag\` |"
+            echo "| **prerelease** | \`$is_prerelease\` |"
+            echo "| **make_latest** | \`$make_latest\` |"
+            echo "| **dry_run** | \`$dry_run\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Align package versions to release version
+        run: node --experimental-strip-types scripts/release/update-symphony-versions.ts "${{ steps.release_meta.outputs.version }}"
+
+      - name: Symphony tests
         run: cd apps/symphony && cargo test
 
-      - name: Clippy
+      - name: Symphony clippy
         run: cd apps/symphony && cargo clippy -- -D warnings
 
+      - name: Pi extension lint
+        run: pnpm --dir apps/symphony/pi-extension run lint
+
+      - name: Pi extension typecheck
+        run: pnpm --dir apps/symphony/pi-extension run typecheck
+
+      - name: Pi extension tests
+        run: pnpm --dir apps/symphony/pi-extension run test
+
+      - name: Pi extension pack dry-run
+        working-directory: apps/symphony/pi-extension
+        run: npm pack --dry-run
+
+      - id: previous_tag
+        name: Resolve previous release tag
+        run: |
+          node --experimental-strip-types scripts/release/resolve-previous-release-tag.ts \
+            --channel "${{ steps.release_meta.outputs.release_channel }}" \
+            --current-tag "${{ steps.release_meta.outputs.tag }}" \
+            --prefix symphony-v \
+            --github-output
+
   build:
-    needs: [check-version, test]
-    if: needs.check-version.outputs.should_release == 'true'
+    name: Build ${{ matrix.artifact }}
+    needs: [preflight]
+    if: |
+      !failure() && !cancelled() &&
+      needs.preflight.result == 'success'
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -80,9 +261,17 @@ jobs:
             target: x86_64-pc-windows-msvc
             artifact: symphony-windows-x86_64.exe
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: ".node-version"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -96,7 +285,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             apps/symphony/target
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-release-${{ hashFiles('apps/symphony/Cargo.lock') }}
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-symphony-release-${{ hashFiles('apps/symphony/Cargo.lock') }}
+
+      - name: Align package versions to release version
+        run: node --experimental-strip-types scripts/release/update-symphony-versions.ts "${{ needs.preflight.outputs.version }}"
 
       - name: Build release binary
         run: cd apps/symphony && cargo build --release --target ${{ matrix.target }}
@@ -114,48 +306,222 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}
+          if-no-files-found: error
+
+  publish_extension:
+    name: Publish Pi extension to npm
+    needs: [preflight, build]
+    if: |
+      !failure() && !cancelled() &&
+      needs.preflight.result == 'success' &&
+      needs.build.result == 'success' &&
+      needs.preflight.outputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
+      TURBO_TEAM: ${{ vars.TURBO_TEAM }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: ".node-version"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.8"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.2
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Align package versions to release version
+        run: node --experimental-strip-types scripts/release/update-symphony-versions.ts "${{ needs.preflight.outputs.version }}"
+
+      - name: Pack dry-run
+        working-directory: apps/symphony/pi-extension
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        working-directory: apps/symphony/pi-extension
+        run: npm publish --access public --tag "${{ needs.preflight.outputs.npm_tag }}"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   release:
-    needs: [check-version, build]
-    if: needs.check-version.outputs.should_release == 'true'
+    name: Publish GitHub Releases
+    needs: [preflight, build, publish_extension]
+    if: |
+      !failure() && !cancelled() &&
+      needs.preflight.result == 'success' &&
+      needs.build.result == 'success' &&
+      needs.publish_extension.result == 'success' &&
+      needs.preflight.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          fetch-depth: 0
 
-      - name: Create Git tag
-        run: |
-          VERSION=${{ needs.check-version.outputs.version }}
-          git tag "symphony-v$VERSION"
-          git push origin "symphony-v$VERSION"
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: ".node-version"
+
+      - name: Align package versions to release version
+        run: node --experimental-strip-types scripts/release/update-symphony-versions.ts "${{ needs.preflight.outputs.version }}"
 
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
           path: artifacts
 
-      - name: Extract changelog entry
+      - name: Create Symphony git tag
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.preflight.outputs.tag }}"
+          if git ls-remote --exit-code --tags --refs origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists on origin" >&2
+            exit 1
+          fi
+          git tag "$TAG" "${{ needs.preflight.outputs.ref }}"
+          git push origin "$TAG"
+
+      - name: Create Pi extension git tag
+        run: |
+          set -euo pipefail
+          TAG="${{ needs.preflight.outputs.secondary_tag }}"
+          if git ls-remote --exit-code --tags --refs origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists on origin" >&2
+            exit 1
+          fi
+          git tag "$TAG" "${{ needs.preflight.outputs.ref }}"
+          git push origin "$TAG"
+
+      - name: Extract Symphony changelog entry
         id: changelog
         run: |
-          VERSION=${{ needs.check-version.outputs.version }}
-          NOTES=$(sed -n "/^## ${VERSION}/,/^## /{ /^## ${VERSION}/d; /^## /d; p; }" apps/symphony/CHANGELOG.md)
+          set -euo pipefail
+          VERSION="${{ needs.preflight.outputs.version }}"
+          NOTES=$(sed -n "/^## ${VERSION}/,/^## /{ /^## ${VERSION}/d; /^## /d; p; }" apps/symphony/CHANGELOG.md || true)
           if [ -z "$NOTES" ]; then
-            echo "found=false" >> $GITHUB_OUTPUT
+            echo "found=false" >> "$GITHUB_OUTPUT"
           else
-            echo "$NOTES" > /tmp/release-notes.md
-            echo "found=true" >> $GITHUB_OUTPUT
+            printf '%s\n' "$NOTES" > /tmp/symphony-release-notes.md
+            echo "found=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+      - name: Create Symphony GitHub Release
+        if: needs.preflight.outputs.previous_tag != ''
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: symphony-v${{ needs.check-version.outputs.version }}
-          name: Symphony v${{ needs.check-version.outputs.version }}
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ needs.preflight.outputs.ref }}
+          name: ${{ needs.preflight.outputs.release_name }}
           files: |
             artifacts/symphony-linux-x86_64/symphony-linux-x86_64
             artifacts/symphony-macos-arm64/symphony-macos-arm64
             artifacts/symphony-windows-x86_64.exe/symphony-windows-x86_64.exe
-          body_path: ${{ steps.changelog.outputs.found == 'true' && '/tmp/release-notes.md' || '' }}
+          body_path: ${{ steps.changelog.outputs.found == 'true' && '/tmp/symphony-release-notes.md' || '' }}
           generate_release_notes: ${{ steps.changelog.outputs.found != 'true' }}
+          previous_tag: ${{ needs.preflight.outputs.previous_tag }}
+          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
+          make_latest: ${{ needs.preflight.outputs.make_latest }}
+          fail_on_unmatched_files: true
+
+      - name: Create first Symphony GitHub Release
+        if: needs.preflight.outputs.previous_tag == ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ needs.preflight.outputs.ref }}
+          name: ${{ needs.preflight.outputs.release_name }}
+          files: |
+            artifacts/symphony-linux-x86_64/symphony-linux-x86_64
+            artifacts/symphony-macos-arm64/symphony-macos-arm64
+            artifacts/symphony-windows-x86_64.exe/symphony-windows-x86_64.exe
+          body_path: ${{ steps.changelog.outputs.found == 'true' && '/tmp/symphony-release-notes.md' || '' }}
+          generate_release_notes: ${{ steps.changelog.outputs.found != 'true' }}
+          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
+          make_latest: ${{ needs.preflight.outputs.make_latest }}
+          fail_on_unmatched_files: true
+
+      - name: Create Pi extension GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.secondary_tag }}
+          target_commitish: ${{ needs.preflight.outputs.ref }}
+          name: ${{ needs.preflight.outputs.secondary_name }}
+          generate_release_notes: true
+          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
+          make_latest: false
+
+  finalize:
+    name: Finalize release versions on main
+    if: |
+      !failure() && !cancelled() &&
+      needs.preflight.result == 'success' &&
+      needs.release.result == 'success' &&
+      needs.preflight.outputs.release_channel == 'stable' &&
+      needs.preflight.outputs.dry_run != 'true' &&
+      needs.preflight.outputs.is_prerelease != 'true'
+    needs: [preflight, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: ".node-version"
+
+      - id: update_versions
+        name: Update version strings
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          node --experimental-strip-types scripts/release/update-symphony-versions.ts "$RELEASE_VERSION" --github-output
+
+      - name: Commit and push version bump
+        if: steps.update_versions.outputs.changed == 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          if git diff --quiet -- apps/symphony/Cargo.toml apps/symphony/pi-extension/package.json; then
+            echo "No version changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add apps/symphony/Cargo.toml apps/symphony/pi-extension/package.json
+          git commit -m "chore(release): prepare $RELEASE_TAG"
+          git push origin HEAD:main

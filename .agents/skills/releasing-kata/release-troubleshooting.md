@@ -1,82 +1,89 @@
 # Release Troubleshooting
 
-Common issues and solutions for Kata release flows.
+## Target sanity check
 
-## Target and namespace sanity check
+| Target | Workflow | Tags |
+| --- | --- | --- |
+| Symphony + Pi extension | `symphony-release.yml` | `symphony-v*`, `pi-symphony-v*` |
+| CLI | `cli-release.yml` | `cli-v*` |
 
-Before debugging CI, confirm the target identity is correct:
+Releases no longer trigger from push-to-main version bumps. If nothing runs after merge, dispatch the workflow.
 
-- CLI: `@kata-sh/cli`
-- Symphony: Rust binary release
-- Pi Symphony extension: `@kata-sh/pi-symphony-extension`
+## Common failures
 
-If the wrong target/version file is edited, release workflows may skip.
+### Stable version resolution failed
 
-## CLI publish issues
+```
+No version input and no nightly tag to derive the stable version from.
+```
+
+**Fix (Symphony):** Pass `-f version=X.Y.Z`, or cut a Symphony nightly first.  
+**Fix (CLI):** Omit `version` to use `apps/cli/package.json`, or pass `-f version=X.Y.Z` to override.
+
+### Tag already exists
+
+The publish job refuses to overwrite an existing tag. Bump the version input or wait for a new nightly run number.
 
 ### npm publish failed
 
-**Check:**
-
-1. `NPM_TOKEN` repository secret is set.
-2. `apps/cli/package.json` was bumped.
-3. Target version is new (no existing release tag).
+1. Confirm `NPM_TOKEN` repository secret.
+2. Confirm package is not `private: true`.
+3. Confirm the version is new on the registry:
 
 ```bash
-git tag -l 'cli-v*'
+npm view @kata-sh/cli versions --json
+npm view @kata-sh/pi-symphony-extension versions --json
 ```
 
-For CLI prereleases, confirm the package did not publish as `latest`:
-
-```bash
-npm view @kata-sh/cli dist-tags
-```
-
-### Workflow did not trigger
-
-Confirm the right path changed:
-
-- CLI: `apps/cli/**`
-
-## Symphony release issues
-
-### CI did not trigger
-
-**Check:**
-
-1. Changes are under `apps/symphony/**`
-2. `Cargo.toml` version changed
-3. `symphony-vX.Y.Z` tag does not already exist
-
-```bash
-git tag -l 'symphony-v*'
-rg -n '^version\s*=\s*"' apps/symphony/Cargo.toml
-```
-
-### Local build/test failures
+### Symphony binary build failed
 
 ```bash
 cd apps/symphony
 cargo test
 cargo clippy -- -D warnings
-cargo fmt --check
 cargo build --release
 ```
 
-## CI visibility commands
+### Pi extension validation failed
 
 ```bash
-# Recent release workflow runs
+pnpm --dir apps/symphony/pi-extension run lint
+pnpm --dir apps/symphony/pi-extension run typecheck
+pnpm --dir apps/symphony/pi-extension run test
+(cd apps/symphony/pi-extension && npm pack --dry-run)
+```
+
+### Scheduled nightly skipped
+
+Expected when `main` HEAD equals the commit of the latest `symphony-v*-nightly.*` tag. Force with:
+
+```bash
+gh workflow run symphony-release.yml -f channel=nightly
+```
+
+### Finalize commit did not land
+
+Branch protection may block `github-actions[bot]` pushes. Either allow the bot to push to `main`, or manually commit the version files from the release run workspace / re-run with an explicit follow-up PR.
+
+## Visibility
+
+```bash
 gh run list --workflow=cli-release.yml --limit 5
 gh run list --workflow=symphony-release.yml --limit 5
-gh run list --workflow=pi-symphony-extension-release.yml --limit 5
-
-# Inspect a run
 gh run view <run-id>
-
-# Watch current run
 gh run watch
-
-# List releases
 gh release list
+```
+
+## Local version helpers
+
+```bash
+node --experimental-strip-types scripts/release/resolve-nightly-release.ts \
+  --date 20260718 --run-number 1 --sha "$(git rev-parse HEAD)" --product symphony
+
+node --experimental-strip-types scripts/release/resolve-stable-version.ts \
+  --product symphony --version 2.4.0
+
+node --experimental-strip-types scripts/release/resolve-stable-version.ts \
+  --product cli --version 0.18.0
 ```

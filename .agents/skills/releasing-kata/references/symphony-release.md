@@ -1,63 +1,90 @@
-# Symphony Release
+# Symphony + Pi Extension Release
 
-Package: `symphony` (Rust binary)
-Version source: `apps/symphony/Cargo.toml`
-Changelog: `apps/symphony/CHANGELOG.md`
-Tag format: `symphony-vX.Y.Z`
-CI workflow: `symphony-release.yml`
+Coupled release of:
 
-## Steps
+| Artifact | Source | Tag |
+| --- | --- | --- |
+| Symphony binary | `apps/symphony` (Rust) | `symphony-vX.Y.Z` |
+| Pi Symphony extension | `apps/symphony/pi-extension` | `pi-symphony-vX.Y.Z` |
 
-1. **Verify clean state on main**
+Both always share the same version string. CI workflow: `symphony-release.yml`.
+
+Changelog (stable notes): `apps/symphony/CHANGELOG.md` (used when a `## X.Y.Z` section exists).
+
+## Triggers
+
+- **Scheduled nightly:** `cron: 0 */3 * * *` — only proceeds when `main` HEAD differs from the latest `symphony-v*-nightly.*` tag.
+- **Manual:** Actions → Symphony Release → Run workflow
+  - `channel`: `stable` | `nightly`
+  - `version`: optional for stable (defaults to latest nightly core)
+  - `dry_run`: build/test only; no tags, releases, or npm publish
+
+There is **no** push-to-main path filter release anymore.
+
+## Stable release steps
+
+1. Prefer cutting at least one successful nightly first so stable can omit `version`.
+2. Optional: update `apps/symphony/CHANGELOG.md` with a `## X.Y.Z` section on main (or accept auto-generated notes).
+3. Dispatch:
 
    ```bash
-   git branch --show-current  # → main
-   git status                 # → clean
+   # Derive version from latest symphony nightly core
+   gh workflow run symphony-release.yml -f channel=stable
+
+   # Or pin the version explicitly
+   gh workflow run symphony-release.yml -f channel=stable -f version=2.4.0
+
+   # Dry run
+   gh workflow run symphony-release.yml -f channel=stable -f version=2.4.0 -f dry_run=true
    ```
 
-2. **Run pre-release checks**
+4. Watch and verify:
 
    ```bash
-   cd apps/symphony
-   cargo test
-   cargo clippy -- -D warnings
-   cargo fmt --check
-   ```
-
-3. **Bump version** in `apps/symphony/Cargo.toml` only
-
-4. **Update `apps/symphony/CHANGELOG.md`** and `apps/symphony/README.md` with the new version's changes
-
-5. **Create release branch and PR**
-
-   ```bash
-   git checkout -b release/symphony-vX.Y.Z
-   git add apps/symphony/Cargo.toml apps/symphony/CHANGELOG.md
-   git commit -m "chore(release): bump symphony to X.Y.Z"
-   git push -u origin release/symphony-vX.Y.Z
-   gh pr create --title "Symphony vX.Y.Z" --body "Symphony release vX.Y.Z"
-   ```
-
-6. **When approved, merge PR to main** — CI takes over from here
-
-7. **Verify the release**
-
-   ```bash
+   gh run list --workflow=symphony-release.yml --limit 5
    gh release view symphony-vX.Y.Z
+   gh release view pi-symphony-vX.Y.Z
+   npm view @kata-sh/pi-symphony-extension version
+   npm view @kata-sh/pi-symphony-extension dist-tags
    ```
 
-## What CI does after merge
+## Nightly release steps
 
-`symphony-release.yml` triggers on push to main when `apps/symphony/**` changes:
+```bash
+# Manual nightly
+gh workflow run symphony-release.yml -f channel=nightly
 
-1. Reads version from `Cargo.toml`, compares against existing `symphony-v*` tags — skips if tag exists
-2. Runs `cargo test`
-3. Builds release binary (`cargo build --release`)
-4. Creates git tag `symphony-vX.Y.Z` and GitHub Release with binary attached
+# Dry run nightly
+gh workflow run symphony-release.yml -f channel=nightly -f dry_run=true
+```
+
+Scheduled nightlies run automatically every 3 hours when main has moved.
+
+## What CI does
+
+1. **check_changes** (schedule only): skip if no commits since last `symphony-v*-nightly.*`.
+2. **preflight**: resolve version; write the same version into `Cargo.toml` and `pi-extension/package.json` in the runner workspace; run cargo test/clippy and pi-extension lint/typecheck/test/pack.
+3. **build**: multi-OS release binaries with aligned version.
+4. **publish_extension**: `npm publish` `@kata-sh/pi-symphony-extension` with dist-tag `latest` / prerelease id / `nightly`.
+5. **release**: create dual tags + dual GitHub Releases (binaries on the Symphony release).
+6. **finalize** (stable non-prerelease only): commit version bump on `main` for Cargo.toml + pi-extension package.json.
+
+## Install forms (Pi extension)
+
+```bash
+pi install npm:@kata-sh/pi-symphony-extension
+pi install npm:@kata-sh/pi-symphony-extension@X.Y.Z
+pi install git:github.com/gannonh/kata
+pi install git:github.com/gannonh/kata@pi-symphony-vX.Y.Z
+pi -e ./apps/symphony/pi-extension
+```
+
+Root `package.json` stays `0.0.0` and exposes the extension via its `pi` manifest for monorepo git installs.
 
 ## Acceptance criteria
 
-- [ ] `apps/symphony/Cargo.toml` version bumped
-- [ ] `apps/symphony/CHANGELOG.md` updated
-- [ ] Git tag `symphony-vX.Y.Z` created
-- [ ] GitHub Release has binary attached
+- [ ] Tags `symphony-vX.Y.Z` and `pi-symphony-vX.Y.Z` exist on the same commit
+- [ ] GitHub Release `Symphony vX.Y.Z` has linux/mac/windows binaries
+- [ ] GitHub Release `Pi Symphony Extension vX.Y.Z` exists
+- [ ] npm has `@kata-sh/pi-symphony-extension@X.Y.Z` on the expected dist-tag
+- [ ] For stable: main has matching versions in `Cargo.toml` and pi-extension `package.json` after finalize

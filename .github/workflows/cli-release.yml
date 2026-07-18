@@ -1,75 +1,58 @@
 name: CLI Release
 
+# Manual-only CLI releases. Version is automatic from the latest CLI nightly
+# tag core when omitted, or can be overridden via the version input.
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'apps/cli/**'
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 0.18.0 or v0.18.0). Optional: defaults to latest cli nightly core when present."
+        required: false
+        type: string
+      dry_run:
+        description: "Build + validate only; create no tag, GitHub Release, or npm publish"
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
-  group: cli-release-${{ github.sha }}
+  group: cli-release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
-  check-version:
+  preflight:
+    name: Preflight
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     outputs:
-      should_release: ${{ steps.check.outputs.should_release }}
-      version: ${{ steps.check.outputs.version }}
-      npm_tag: ${{ steps.check.outputs.npm_tag }}
-      prerelease: ${{ steps.check.outputs.prerelease }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 2
-
-      - name: Check if CLI version changed
-        id: check
-        run: |
-          CURRENT_VERSION=$(node -p "require('./apps/cli/package.json').version")
-          echo "version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
-
-          if [[ "$CURRENT_VERSION" == *-* ]]; then
-            DIST_TAG="${CURRENT_VERSION#*-}"
-            DIST_TAG="${DIST_TAG%%.*}"
-            echo "npm_tag=$DIST_TAG" >> $GITHUB_OUTPUT
-            echo "prerelease=true" >> $GITHUB_OUTPUT
-          else
-            echo "npm_tag=latest" >> $GITHUB_OUTPUT
-            echo "prerelease=false" >> $GITHUB_OUTPUT
-          fi
-
-          if git ls-remote --exit-code --tags --refs origin "refs/tags/cli-v$CURRENT_VERSION" >/dev/null 2>&1; then
-            echo "Tag cli-v$CURRENT_VERSION already exists, skipping release"
-            echo "should_release=false" >> $GITHUB_OUTPUT
-          else
-            echo "New CLI version $CURRENT_VERSION detected, will release"
-            echo "should_release=true" >> $GITHUB_OUTPUT
-          fi
-
-  test:
-    needs: check-version
-    if: needs.check-version.outputs.should_release == 'true'
-    runs-on: ubuntu-latest
+      version: ${{ steps.release_meta.outputs.version }}
+      tag: ${{ steps.release_meta.outputs.tag }}
+      release_name: ${{ steps.release_meta.outputs.name }}
+      npm_tag: ${{ steps.release_meta.outputs.npm_tag }}
+      is_prerelease: ${{ steps.release_meta.outputs.is_prerelease }}
+      dry_run: ${{ steps.release_meta.outputs.dry_run }}
+      ref: ${{ github.sha }}
     env:
       TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
       TURBO_TEAM: ${{ vars.TURBO_TEAM }}
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        uses: actions/setup-node@v6
         with:
-          node-version-file: '.node-version'
+          node-version-file: ".node-version"
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
+        uses: oven-sh/setup-bun@v2
         with:
-          bun-version: '1.3.8'
+          bun-version: "1.3.8"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -78,6 +61,48 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      - id: release_meta
+        name: Resolve release version
+        shell: bash
+        env:
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
+          DISPATCH_DRY_RUN: ${{ github.event.inputs.dry_run }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          dry_run="${DISPATCH_DRY_RUN:-false}"
+          args=(
+            --product cli
+            --run-number "$RUN_NUMBER"
+            --github-output
+          )
+          if [[ -n "${DISPATCH_VERSION:-}" ]]; then
+            args+=(--version "$DISPATCH_VERSION")
+          fi
+          if [[ "$dry_run" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+
+          node --experimental-strip-types scripts/release/resolve-stable-version.ts "${args[@]}"
+          echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
+
+          version="$(grep '^version=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          tag="$(grep '^tag=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+          npm_tag="$(grep '^npm_tag=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
+
+          {
+            echo "## CLI release parameters"
+            echo "| | |"
+            echo "|---|---|"
+            echo "| **version** | \`$version\` |"
+            echo "| **tag** | \`$tag\` |"
+            echo "| **npm_tag** | \`$npm_tag\` |"
+            echo "| **dry_run** | \`$dry_run\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Align package version
+        run: node --experimental-strip-types scripts/release/update-cli-version.ts "${{ steps.release_meta.outputs.version }}"
 
       - name: TypeScript check
         run: pnpm --dir apps/cli exec tsc
@@ -88,10 +113,18 @@ jobs:
       - name: Run golden-path smoke test
         run: pnpm --dir apps/cli exec vitest run src/tests/golden-path.pi-github.vitest.test.ts
 
+      - name: Build
+        run: pnpm --dir apps/cli run build
+
   publish:
-    needs: [check-version, test]
-    if: needs.check-version.outputs.should_release == 'true'
+    name: Publish CLI
+    needs: [preflight]
+    if: |
+      !failure() && !cancelled() &&
+      needs.preflight.result == 'success' &&
+      needs.preflight.outputs.dry_run != 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     env:
@@ -99,18 +132,20 @@ jobs:
       TURBO_TEAM: ${{ vars.TURBO_TEAM }}
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
 
       - name: Setup Node.js
-        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        uses: actions/setup-node@v6
         with:
-          node-version-file: '.node-version'
-          registry-url: 'https://registry.npmjs.org'
+          node-version-file: ".node-version"
+          registry-url: "https://registry.npmjs.org"
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@4bc047ad259df6fc24a6c9b0f9a0cb08cf17fbe5 # v2.0.1
+        uses: oven-sh/setup-bun@v2
         with:
-          bun-version: '1.3.8'
+          bun-version: "1.3.8"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -120,47 +155,103 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Align package version
+        run: node --experimental-strip-types scripts/release/update-cli-version.ts "${{ needs.preflight.outputs.version }}"
+
       - name: Build
         run: pnpm --dir apps/cli run build
 
       - name: Run CLI golden-path release gate
-        run: |
-          pnpm --dir apps/cli run build
-          pnpm --dir apps/cli exec vitest run src/tests/golden-path.pi-github.vitest.test.ts
+        run: pnpm --dir apps/cli exec vitest run src/tests/golden-path.pi-github.vitest.test.ts
 
       - name: Publish to npm
         working-directory: apps/cli
-        run: npm publish --access public --tag "${{ needs.check-version.outputs.npm_tag }}"
+        run: npm publish --access public --tag "${{ needs.preflight.outputs.npm_tag }}"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Create Git tag
         run: |
-          VERSION=${{ needs.check-version.outputs.version }}
-          git tag "cli-v$VERSION"
-          git push origin "cli-v$VERSION"
+          set -euo pipefail
+          TAG="${{ needs.preflight.outputs.tag }}"
+          if git ls-remote --exit-code --tags --refs origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists on origin" >&2
+            exit 1
+          fi
+          git tag "$TAG" "${{ needs.preflight.outputs.ref }}"
+          git push origin "$TAG"
 
       - name: Extract changelog entry
         id: changelog
         run: |
-          VERSION=${{ needs.check-version.outputs.version }}
-          # Extract the section between ## $VERSION and the next ## heading
-          NOTES=$(sed -n "/^## ${VERSION}/,/^## /{ /^## ${VERSION}/d; /^## /d; p; }" apps/cli/CHANGELOG.md)
+          set -euo pipefail
+          VERSION="${{ needs.preflight.outputs.version }}"
+          NOTES=$(sed -n "/^## ${VERSION}/,/^## /{ /^## ${VERSION}/d; /^## /d; p; }" apps/cli/CHANGELOG.md || true)
           if [ -z "$NOTES" ]; then
-            echo "No changelog entry found for $VERSION, falling back to auto-generated notes"
-            echo "found=false" >> $GITHUB_OUTPUT
+            echo "found=false" >> "$GITHUB_OUTPUT"
           else
-            # Write to file to preserve newlines
-            echo "$NOTES" > /tmp/release-notes.md
-            echo "found=true" >> $GITHUB_OUTPUT
+            printf '%s\n' "$NOTES" > /tmp/cli-release-notes.md
+            echo "found=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@v2
         with:
-          tag_name: cli-v${{ needs.check-version.outputs.version }}
-          name: Kata CLI v${{ needs.check-version.outputs.version }}
-          body_path: ${{ steps.changelog.outputs.found == 'true' && '/tmp/release-notes.md' || '' }}
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ needs.preflight.outputs.ref }}
+          name: ${{ needs.preflight.outputs.release_name }}
+          body_path: ${{ steps.changelog.outputs.found == 'true' && '/tmp/cli-release-notes.md' || '' }}
           generate_release_notes: ${{ steps.changelog.outputs.found != 'true' }}
           make_latest: false
-          prerelease: ${{ needs.check-version.outputs.prerelease == 'true' }}
+          prerelease: ${{ needs.preflight.outputs.is_prerelease }}
+
+  finalize:
+    name: Finalize CLI version on main
+    if: |
+      !failure() && !cancelled() &&
+      needs.preflight.result == 'success' &&
+      needs.publish.result == 'success' &&
+      needs.preflight.outputs.dry_run != 'true' &&
+      needs.preflight.outputs.is_prerelease != 'true'
+    needs: [preflight, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: ".node-version"
+
+      - id: update_versions
+        name: Update version string
+        env:
+          RELEASE_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          node --experimental-strip-types scripts/release/update-cli-version.ts "$RELEASE_VERSION" --github-output
+
+      - name: Commit and push version bump
+        if: steps.update_versions.outputs.changed == 'true'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.preflight.outputs.tag }}
+        run: |
+          if git diff --quiet -- apps/cli/package.json; then
+            echo "No version changes to commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add apps/cli/package.json
+          git commit -m "chore(release): prepare $RELEASE_TAG"
+          git push origin HEAD:main
