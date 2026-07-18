@@ -1,17 +1,19 @@
 ---
 type: Spec
 title: A1 GitHub Issue Triage
-status: Draft
+status: Active
 description: Design for a durable, repository-backed GitHub triage stage that routes issues into Symphony's software factory.
 tags: [symphony, software-factory, triage, github]
-timestamp: 2026-07-16T17:41:35Z
+timestamp: 2026-07-18T16:45:00Z
 ---
 
 # A1 GitHub Issue Triage
 
 ## Status
 
-Draft
+Active — **PR1 (triage preview) shipped** in [#587](https://github.com/gannonh/kata-symphony/pull/587) (`80b3c215`). PR2 (automatic route publication) and PR3 (recovery and agreement measurement) remain open.
+
+Related decisions: [ADR-0001 A1 triage durability and isolation](/adrs/0001-a1-triage-durability-and-isolation.md).
 
 ## Goal
 
@@ -609,15 +611,19 @@ Startup output identifies whether triage is disabled, preview, or automatic and 
 
 ### Pull request 1: triage preview
 
-Delivers:
+**Shipped** in [#587](https://github.com/gannonh/kata-symphony/pull/587) (2026-07-18).
+
+Delivered:
 
 - storage and triage configuration;
 - SQLite migrations and durable records;
-- GitHub intake polling;
-- repository-backed runner and artifact validation;
-- durable preview-comment intent and restart-safe reconciler;
-- minimal HTTP read surface and events;
-- starter prompt, doctor checks, docs, tests, and preview UAT.
+- GitHub intake polling (Projects v2 membership by repository + number);
+- repository-backed Pi/Codex runner and artifact validation;
+- durable preview-comment intent and restart-safe reconciler (including orphaned-artifact recovery);
+- lease renewal during long-running turns;
+- isolated env/home with credential scrub after success;
+- minimal HTTP factory-run read surface and live triage session visibility;
+- starter prompt, doctor checks, docs, and focused tests.
 
 User value: maintainers can evaluate repository-backed triage decisions safely and establish a baseline without changing routing.
 

@@ -1,12 +1,12 @@
 # Architecture Decision Records
 
-No ADRs yet. Add durable decisions here as they are made (OKF concept docs with `type: ADR`).
+Durable architecture decisions (OKF concept docs with `type: ADR`).
 
 When `/domain-modeling` or architecture work records a decision, place it under this directory and list it below.
 
 # Accepted
 
-_None yet._
+* [ADR-0001 A1 triage durability and isolation](0001-a1-triage-durability-and-isolation.md) - SQLite factory runs, forge-host identity, Projects v2 membership keys, local runner isolation, lease renewal, preview intents
 
 # Proposed
 

@@ -5,17 +5,22 @@ Roadmap for planned and completed work. Historical Superpowers designs and plans
 # Active
 
 * [Symphony Software Factory Platform PRD](symphony-software-factory-platform-prd.md) - product requirements and vertical-slice roadmap for the full software factory platform
-* [A1 GitHub Issue Triage](2026-07-16-a1-github-issue-triage-design.md) - Draft design; **preview implementation in progress** (HTTP factory-run read API, doctor checks, starter assets)
+* [A1 GitHub Issue Triage](2026-07-16-a1-github-issue-triage-design.md) - Active design; **PR1 preview shipped** ([#587](https://github.com/gannonh/kata-symphony/pull/587)); next is PR2 automatic route publication, then PR3 recovery/agreement
 * [Pi Symphony Extension Design](../superpowers/specs/2026-05-14-pi-symphony-extension-design.md) - Pi extension to init, launch, monitor, and steer Symphony
 * [Wave 4 Shared Context and Diagnostics Plan](../superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md) - dashboard parity for shared context + diagnostics
 
 # Planned
 
-_None listed separately from active Superpowers docs._
+* A1 PR2: automatic route publication and implement handoff (see [A1 design delivery slices](2026-07-16-a1-github-issue-triage-design.md#delivery-slices))
+* A1 PR3: recovery and agreement measurement
 
 # Blocked
 
 _None recorded._
+
+# Completed (recent)
+
+* A1 PR1 triage preview — durable factory runs, intake, runner, preview comments, HTTP read API ([#587](https://github.com/gannonh/kata-symphony/pull/587); [ADR-0001](../adrs/0001-a1-triage-durability-and-isolation.md))
 
 # Completed (archived)
 
