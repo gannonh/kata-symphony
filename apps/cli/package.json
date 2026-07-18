@@ -1,6 +1,6 @@
 {
   "name": "@kata-sh/cli",
-  "version": "0.17.0",
+  "version": "0.17.1",
   "description": "Kata CLI runtime and backend contract bridge",
   "license": "MIT",
   "private": false,
