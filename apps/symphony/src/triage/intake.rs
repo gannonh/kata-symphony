@@ -170,9 +170,18 @@ impl TriageIntakePort for GithubTriageIntake {
             .projects
             .query_all_items(&status_field.project_id, max_pages)
             .await?;
-        let in_project_numbers: HashSet<u64> = project_items
+        // Issue numbers are only unique within a repository. Match on both
+        // repository and number so multi-repo projects cannot false-positive.
+        let configured_repository = self.repository();
+        let in_project_keys: HashSet<(String, u64)> = project_items
             .into_iter()
-            .map(|item| item.issue_number)
+            .map(|item| {
+                let repository = item
+                    .repository
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| configured_repository.clone());
+                (repository.to_ascii_lowercase(), item.issue_number)
+            })
             .collect();
 
         let mut results = Vec::new();
@@ -181,7 +190,8 @@ impl TriageIntakePort for GithubTriageIntake {
                 continue;
             }
             let comments = self.list_issue_comments(issue.number, max_pages).await?;
-            let in_project = in_project_numbers.contains(&issue.number);
+            let membership_key = (configured_repository.to_ascii_lowercase(), issue.number);
+            let in_project = in_project_keys.contains(&membership_key);
             results.push(self.normalize_issue(issue, comments, in_project, intake_label));
         }
         Ok(results)

@@ -32,6 +32,16 @@ fn issue_json(number: u64, labels: &[&str]) -> serde_json::Value {
 }
 
 fn project_items_page(issue_numbers: &[u64], has_next: bool, cursor: Option<&str>) -> String {
+    project_items_page_for_repo("kata-sh", "kata-mono", issue_numbers, has_next, cursor)
+}
+
+fn project_items_page_for_repo(
+    owner: &str,
+    repo: &str,
+    issue_numbers: &[u64],
+    has_next: bool,
+    cursor: Option<&str>,
+) -> String {
     let nodes: Vec<_> = issue_numbers
         .iter()
         .map(|number| {
@@ -39,6 +49,10 @@ fn project_items_page(issue_numbers: &[u64], has_next: bool, cursor: Option<&str
                 "id": format!("item-{number}"),
                 "content": {
                     "number": number,
+                    "repository": {
+                        "name": repo,
+                        "owner": { "login": owner }
+                    },
                     "blockedBy": { "nodes": [] }
                 },
                 "status": { "name": "Todo", "optionId": "opt_todo" },
@@ -279,6 +293,98 @@ async fn intake_intersects_project_membership_without_active_state() {
     assert_eq!(on_project.comments.len(), 1);
     assert_eq!(on_project.comments[0].author_login, "alice");
     assert_eq!(on_project.repository, "kata-sh/kata-mono");
+}
+
+#[tokio::test]
+async fn intake_project_membership_requires_matching_repository() {
+    let mut server = Server::new_async().await;
+    let github = github_client(&server);
+    let projects = ProjectsV2Client::new(github.clone());
+    let intake = GithubTriageIntake::new(
+        github,
+        projects,
+        "kata-sh",
+        "kata-mono",
+        42,
+        "github.com",
+        TriageRoutesConfig::default().managed_labels(),
+    );
+
+    let issues = server
+        .mock("GET", "/repos/kata-sh/kata-mono/issues")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("state".into(), "open".into()),
+            Matcher::UrlEncoded("labels".into(), "needs-triage".into()),
+            Matcher::UrlEncoded("per_page".into(), "100".into()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json!([issue_json(42, &["needs-triage"])]).to_string())
+        .create_async()
+        .await;
+
+    let fields = server
+        .mock("POST", "/graphql")
+        .match_body(Matcher::Regex("projectV2\\(number".to_string()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "data": {
+                    "user": null,
+                    "organization": {
+                        "projectV2": {
+                            "id": "project_42",
+                            "field": {
+                                "id": "status_field",
+                                "options": [{ "id": "opt_todo", "name": "Todo" }]
+                            }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    // Same issue number, different repository — must not count as in-project.
+    let items = server
+        .mock("POST", "/graphql")
+        .match_body(Matcher::Regex("node\\(id: \\$projectId\\)".to_string()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(project_items_page_for_repo(
+            "other-org",
+            "other-repo",
+            &[42],
+            false,
+            None,
+        ))
+        .create_async()
+        .await;
+
+    let comments = server
+        .mock("GET", "/repos/kata-sh/kata-mono/issues/42/comments")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body("[]")
+        .create_async()
+        .await;
+
+    let results = intake
+        .fetch_intake_issues("needs-triage", 10)
+        .await
+        .expect("intake should succeed");
+
+    issues.assert_async().await;
+    fields.assert_async().await;
+    items.assert_async().await;
+    comments.assert_async().await;
+
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].in_project);
 }
 
 #[tokio::test]

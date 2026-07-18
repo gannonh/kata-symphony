@@ -464,11 +464,16 @@ where
         let issue_rev = issue_revision(&build_issue_revision_input(issue, service, verified));
 
         if let Some(run) = existing_run.as_ref() {
-            if self
-                .store
-                .get_artifact_for_revision(&run.run_id, &issue_rev, configuration_revision)?
-                .is_some()
-            {
+            if let Some(artifact) = self.store.get_artifact_for_revision(
+                &run.run_id,
+                &issue_rev,
+                configuration_revision,
+            )? {
+                // Artifact may exist without a publication intent if the process
+                // crashed (or intent creation failed) after store_artifact.
+                // Ensure a preview intent exists and publish if still pending.
+                self.recover_orphaned_preview_artifact(issue, service, mapping_hash, &artifact)
+                    .await?;
                 return Ok(IssuePollOutcome::Skipped);
             }
             let attempts = self.store.list_stage_attempts_for_revision(
@@ -634,28 +639,8 @@ where
             usage: success.usage,
         })?;
 
-        let route_mapping = service.triage.routes.mapping_for(success.artifact.route);
-        let intent = self
-            .store
-            .create_publication_intent(CreatePublicationIntentRequest {
-                run_id: artifact.run_id.clone(),
-                artifact_id: Some(artifact.artifact_id.clone()),
-                mode: PublicationMode::Preview,
-                intake_label: service.triage.intake_label.clone(),
-                route_label: route_mapping.label.clone(),
-                project_state: route_mapping.state.clone(),
-                route_mapping_hash: mapping_hash.to_string(),
-                desired_effects: serde_json::json!({
-                    "kind": DESIRED_KIND_PREVIEW,
-                    "route": success.artifact.route.as_str(),
-                }),
-                observed_baseline: serde_json::json!({
-                    "labels": issue.labels,
-                }),
-                expected_projection: serde_json::json!({
-                    "labels": issue.labels,
-                }),
-            })?;
+        let intent =
+            self.ensure_preview_intent_for_artifact(issue, service, mapping_hash, &artifact)?;
 
         self.emit_event(
             "triage_completed",
@@ -706,6 +691,91 @@ where
             )
             .await?;
 
+        self.store
+            .mark_run_status(&artifact.run_id, FactoryRunStatus::Completed)?;
+        Ok(())
+    }
+
+    /// Ensure a preview publication intent exists for a stored artifact.
+    ///
+    /// If an intent already references this artifact, return it. Otherwise create
+    /// one so `reconcile_pending_intents` can surface the preview comment after a
+    /// crash between `store_artifact` and intent creation.
+    fn ensure_preview_intent_for_artifact(
+        &mut self,
+        issue: &TriageIntakeIssue,
+        service: &ServiceConfig,
+        mapping_hash: &str,
+        artifact: &crate::triage::domain::ArtifactRecord,
+    ) -> Result<crate::triage::domain::PublicationIntentRecord> {
+        let existing = self.store.list_intents_for_run(&artifact.run_id)?;
+        if let Some(intent) = existing.into_iter().find(|record| {
+            record.artifact_id.as_deref() == Some(artifact.artifact_id.as_str())
+                && desired_kind(&record.desired_effects) == Some(DESIRED_KIND_PREVIEW)
+        }) {
+            return Ok(intent);
+        }
+
+        let route_mapping = service.triage.routes.mapping_for(artifact.artifact.route);
+        self.store
+            .create_publication_intent(CreatePublicationIntentRequest {
+                run_id: artifact.run_id.clone(),
+                artifact_id: Some(artifact.artifact_id.clone()),
+                mode: PublicationMode::Preview,
+                intake_label: service.triage.intake_label.clone(),
+                route_label: route_mapping.label.clone(),
+                project_state: route_mapping.state.clone(),
+                route_mapping_hash: mapping_hash.to_string(),
+                desired_effects: serde_json::json!({
+                    "kind": DESIRED_KIND_PREVIEW,
+                    "route": artifact.artifact.route.as_str(),
+                }),
+                observed_baseline: serde_json::json!({
+                    "labels": issue.labels,
+                }),
+                expected_projection: serde_json::json!({
+                    "labels": issue.labels,
+                }),
+            })
+    }
+
+    /// Recover when a durable artifact exists without a published preview.
+    async fn recover_orphaned_preview_artifact(
+        &mut self,
+        issue: &TriageIntakeIssue,
+        service: &ServiceConfig,
+        mapping_hash: &str,
+        artifact: &crate::triage::domain::ArtifactRecord,
+    ) -> Result<()> {
+        let intent =
+            self.ensure_preview_intent_for_artifact(issue, service, mapping_hash, artifact)?;
+        if intent.status == PublicationStatus::Applied {
+            return Ok(());
+        }
+
+        let stage = self
+            .store
+            .get_stage_run(&artifact.stage_run_id)?
+            .ok_or_else(|| {
+                SymphonyError::TriageError(format!(
+                    "stage run {} missing for orphaned artifact {}",
+                    artifact.stage_run_id, artifact.artifact_id
+                ))
+            })?;
+        self.publisher
+            .reconcile_preview(
+                &mut self.store,
+                PreviewPublishRequest {
+                    intent: &intent,
+                    issue_number: issue.issue_number,
+                    run_id: &artifact.run_id,
+                    stage_run_id: &artifact.stage_run_id,
+                    attempt: stage.attempt,
+                    artifact: &artifact.artifact,
+                    max_pages: self.max_pages,
+                },
+            )
+            .await?;
         self.store
             .mark_run_status(&artifact.run_id, FactoryRunStatus::Completed)?;
         Ok(())
@@ -1312,6 +1382,102 @@ mod tests {
             .unwrap();
         assert!(body.contains("Symphony triage preview"));
         assert!(body.contains(&intent.intent_id));
+    }
+
+    #[tokio::test]
+    async fn orphaned_artifact_recreates_preview_intent_on_next_poll() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = prep_workflow(&temp);
+        let mut store = open_store(&temp);
+        let service = service_config(true, &workflow_dir);
+        let issue = sample_issue(true, 21);
+        let verified = Vec::new();
+        let issue_rev = issue_revision(&build_issue_revision_input(&issue, &service, verified));
+        let configuration_revision = configuration_revision(&ConfigurationRevisionInput {
+            prompt: "triage prompt".to_string(),
+            turn_timeout_ms: service.triage.turn_timeout_ms,
+            max_attempts: service.triage.max_attempts,
+            harness: "pi".to_string(),
+            model: None,
+            routes: service.triage.routes.clone(),
+        });
+        let mapping_hash = route_mapping_hash(&service.triage.routes);
+
+        let stage = store
+            .claim_attempt(ClaimAttemptRequest {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                issue_id: issue.issue_id.clone(),
+                issue_identifier: issue.identifier.clone(),
+                issue_revision: issue_rev.clone(),
+                configuration_revision: configuration_revision.clone(),
+                owner_instance: "test-owner".to_string(),
+                harness: "pi".to_string(),
+                model: None,
+                workspace_path: None,
+                output_path: None,
+                pid: None,
+                process_group_id: None,
+                process_start_token: None,
+                executable_identity: None,
+            })
+            .unwrap();
+        let artifact = store
+            .store_artifact(StoreArtifactRequest {
+                stage_run_id: stage.stage_run_id,
+                issue_revision: issue_rev,
+                configuration_revision,
+                route_mapping_hash: mapping_hash,
+                artifact: sample_artifact(),
+                bytes_len: 32,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+        // Simulate crash after store_artifact and before create_publication_intent.
+        assert!(store
+            .list_intents_for_run(&artifact.run_id)
+            .unwrap()
+            .is_empty());
+
+        let intake = Arc::new(FakeIntake::default());
+        intake.issues.lock().unwrap().push(issue);
+        let comments = FakeComments::new("symphony-bot");
+        let mut coordinator = TriageCoordinator::with_executor(
+            store,
+            intake,
+            comments.clone(),
+            TriageCoordinatorConfig {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                owner_instance: "test-owner".to_string(),
+                workflow_dir: workflow_dir.clone(),
+                project_display_name: "Factory".to_string(),
+            },
+            FakeExecutor::success(sample_artifact()),
+        );
+
+        let summary = coordinator.poll_once(&service).await.unwrap();
+
+        // No new attempt; orphaned artifact is recovered via a recreated intent.
+        assert_eq!(summary.attempts_started, 0);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(*comments.create_count.lock().unwrap(), 1);
+        let intent = coordinator
+            .store_mut()
+            .get_latest_publication(&artifact.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            intent.artifact_id.as_deref(),
+            Some(artifact.artifact_id.as_str())
+        );
+        assert_eq!(intent.status, PublicationStatus::Applied);
+        let run = coordinator
+            .store_mut()
+            .get_run_by_id(&artifact.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, FactoryRunStatus::Completed);
     }
 
     #[tokio::test]

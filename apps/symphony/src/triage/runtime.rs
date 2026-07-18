@@ -329,7 +329,8 @@ impl TriageRuntime {
             .ok_or(SymphonyError::MissingGithubApiToken)?;
         let token = resolved.token;
 
-        let forge_host = forge_host_from_endpoint(&config.tracker.endpoint);
+        let forge_host =
+            crate::triage::storage_path::forge_host_from_endpoint(&config.tracker.endpoint);
         let repository = format!("{owner}/{repo}");
         let storage_path = resolve_storage_path(&config.storage, &forge_host, owner, repo);
         tracing::info!(
@@ -408,11 +409,4 @@ impl TriageRuntime {
     pub async fn poll(&mut self, config: &ServiceConfig) -> Result<TriagePollSummary> {
         self.coordinator.poll_once(config).await
     }
-}
-
-fn forge_host_from_endpoint(endpoint: &str) -> String {
-    reqwest::Url::parse(endpoint)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .unwrap_or_else(|| "github.com".to_string())
 }

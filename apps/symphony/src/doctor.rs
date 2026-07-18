@@ -1083,11 +1083,16 @@ pub fn check_triage(config: &ServiceConfig, workflow_path: &Path) -> Vec<DoctorC
     }
 
     let workflow_dir = workflow_path.parent().unwrap_or(Path::new("."));
-    let forge_host = "github.com";
+    let forge_host =
+        crate::triage::storage_path::forge_host_from_endpoint(&config.tracker.endpoint);
     let owner = config.tracker.repo_owner.as_deref().unwrap_or("unknown");
     let repo = config.tracker.repo_name.as_deref().unwrap_or("unknown");
-    let storage_path =
-        crate::triage::storage_path::resolve_storage_path(&config.storage, forge_host, owner, repo);
+    let storage_path = crate::triage::storage_path::resolve_storage_path(
+        &config.storage,
+        &forge_host,
+        owner,
+        repo,
+    );
     let lock_path = crate::triage::storage_path::lock_path_for_storage(&storage_path);
 
     if let Some(parent) = storage_path.parent() {

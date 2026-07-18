@@ -3,6 +3,22 @@ use std::path::{Path, PathBuf};
 
 pub const DEFAULT_DB_FILE_NAME: &str = "triage.sqlite3";
 
+/// Derive the forge identity host used for storage namespaces and issue URLs.
+///
+/// The public GitHub API host (`api.github.com`) maps to the web forge host
+/// (`github.com`) so runtime storage, doctor checks, and prompt URLs agree.
+pub fn forge_host_from_endpoint(endpoint: &str) -> String {
+    let host = reqwest::Url::parse(endpoint.trim())
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| "github.com".to_string());
+    if host.eq_ignore_ascii_case("api.github.com") {
+        "github.com".to_string()
+    } else {
+        host
+    }
+}
+
 pub fn resolve_storage_path(
     config: &StorageConfig,
     forge_host: &str,
@@ -144,5 +160,23 @@ mod tests {
             lock_path_for_storage(Path::new("/tmp/state.db")),
             PathBuf::from("/tmp/state.db.lock")
         );
+    }
+
+    #[test]
+    fn forge_host_maps_public_api_to_web_host() {
+        assert_eq!(
+            forge_host_from_endpoint("https://api.github.com"),
+            "github.com"
+        );
+        assert_eq!(
+            forge_host_from_endpoint("https://api.github.com/"),
+            "github.com"
+        );
+        assert_eq!(
+            forge_host_from_endpoint("https://github.example.com/api/v3"),
+            "github.example.com"
+        );
+        assert_eq!(forge_host_from_endpoint(""), "github.com");
+        assert_eq!(forge_host_from_endpoint("not a url"), "github.com");
     }
 }

@@ -641,6 +641,9 @@ fn codex_failure_kind(err: &SymphonyError) -> TriageRunnerFailureKind {
 
 /// Start a triage Codex session: no helper env, no `SYMPHONY_ISSUE_*`
 /// injection, no dynamic tools, `SYMPHONY_STAGE_OUTPUT` set for the artifact.
+///
+/// Environment is cleared and rebuilt with an isolated `HOME` (same policy as
+/// the Pi path) so operator credentials such as `GH_TOKEN` are not inherited.
 async fn codex_session_start(
     config: &CodexConfig,
     issue: &Issue,
@@ -648,6 +651,7 @@ async fn codex_session_start(
 ) -> std::result::Result<crate::codex::app_server::SessionHandle, TriageRunnerOutcome> {
     let workspace_str = layout.workspace_path.to_string_lossy().to_string();
     let cmd_str = config.command.join(" ");
+    let env = build_isolated_env(&layout.home_dir, &layout.output_path, None);
 
     let mut command = Command::new("bash");
     command
@@ -655,8 +659,9 @@ async fn codex_session_start(
         .current_dir(&layout.workspace_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    command.env(OUTPUT_ENV, layout.output_path.to_string_lossy().to_string());
+        .stderr(Stdio::piped())
+        .env_clear()
+        .envs(env);
 
     let mut child = command.spawn().map_err(|err| {
         failure(

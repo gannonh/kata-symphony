@@ -55,6 +55,12 @@ query($projectId: ID!, $first: Int!, $after: String) {
           content {
             ... on Issue {
               number
+              repository {
+                name
+                owner {
+                  login
+                }
+              }
               blockedBy(first: 100) {
                 nodes {
                   ... on Issue {
@@ -120,6 +126,8 @@ pub struct StatusFieldInfo {
 pub struct ProjectItem {
     pub item_id: String,
     pub issue_number: u64,
+    /// `owner/repo` for the issue content when known.
+    pub repository: Option<String>,
     pub status: Option<String>,
     pub kata_id: Option<String>,
     pub blocked_by_issue_numbers: Vec<u64>,
@@ -241,6 +249,15 @@ impl ProjectsV2Client {
                 let Some(issue_number) = content.number else {
                     continue;
                 };
+                let repository = content.repository.and_then(|repo| {
+                    let owner = repo.owner?.login;
+                    let name = repo.name?;
+                    if owner.trim().is_empty() || name.trim().is_empty() {
+                        None
+                    } else {
+                        Some(format!("{owner}/{name}"))
+                    }
+                });
                 let blocked_by_issue_numbers = content
                     .blocked_by
                     .map(|connection| {
@@ -268,6 +285,7 @@ impl ProjectsV2Client {
                 items.push(ProjectItem {
                     item_id: node.id,
                     issue_number,
+                    repository,
                     status: node.status.and_then(|status| status.name),
                     kata_id: node.kata_id.and_then(|value| value.text),
                     blocked_by_issue_numbers,
@@ -462,8 +480,20 @@ struct ProjectItemNode {
 #[derive(Debug, Deserialize)]
 struct ProjectItemContent {
     number: Option<u64>,
+    repository: Option<ProjectItemRepository>,
     #[serde(rename = "blockedBy")]
     blocked_by: Option<ProjectIssueDependencyConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectItemRepository {
+    name: Option<String>,
+    owner: Option<ProjectItemRepositoryOwner>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectItemRepositoryOwner {
+    login: String,
 }
 
 #[derive(Debug, Deserialize)]
