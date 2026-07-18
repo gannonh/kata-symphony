@@ -268,6 +268,19 @@ fn finish_attempt(
         return Ok(failure(TriageRunnerFailureKind::Integrity, err.to_string()));
     }
 
+    // Drop copied provider credentials before retaining successful evidence.
+    // Fail closed: do not report success if the isolated home cannot be removed.
+    if let Err(err) = scrub_isolated_home(&layout.home_dir) {
+        let _ = fs::remove_dir_all(&layout.attempt_root);
+        return Ok(failure(
+            TriageRunnerFailureKind::Setup,
+            format!(
+                "failed to scrub isolated triage home {}: {err}",
+                layout.home_dir.display()
+            ),
+        ));
+    }
+
     Ok(TriageRunnerOutcome::Success(Box::new(
         TriageRunnerSuccess {
             artifact,
@@ -277,6 +290,14 @@ fn finish_attempt(
             baseline,
         },
     )))
+}
+
+/// Remove the isolated home (and any seeded credentials) after the child exits.
+fn scrub_isolated_home(home_dir: &Path) -> std::io::Result<()> {
+    if home_dir.exists() {
+        fs::remove_dir_all(home_dir)?;
+    }
+    Ok(())
 }
 
 // ── Pi one-shot print execution ─────────────────────────────────────────────
@@ -1193,19 +1214,13 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
         assert_eq!(success.artifact.route.as_str(), "implement");
         assert_eq!(success.usage.total_tokens, 0);
 
-        let env_check = fs::read_to_string(
-            success
-                .workspace_path
-                .parent()
-                .unwrap()
-                .join("home/env-check.txt"),
-        )
-        .unwrap();
-        assert!(env_check.contains("GH_TOKEN=\n"));
-        assert!(env_check.contains("GITHUB_TOKEN=\n"));
-        assert!(env_check.contains("SSH_AUTH_SOCK=\n"));
-        assert!(env_check.contains("SYMPHONY_BIN=\n"));
-        assert!(env_check.contains("MODEL=anthropic/claude-sonnet-4-6"));
+        // Isolated home (and any seeded credentials) must not be retained.
+        let home_dir = success.workspace_path.parent().unwrap().join("home");
+        assert!(
+            !home_dir.exists(),
+            "isolated home must be scrubbed after success"
+        );
+        assert!(success.output_path.is_file());
 
         let push = StdCommand::new("git")
             .args(["remote", "get-url", "--push", "origin"])
@@ -1213,6 +1228,58 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
             .output()
             .unwrap();
         assert_eq!(String::from_utf8_lossy(&push.stdout).trim(), "DISABLED");
+    }
+
+    #[tokio::test]
+    async fn successful_run_scrubs_seeded_pi_credentials() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+
+        let real_home = temp.path().join("real-home");
+        let agent_dir = real_home.join(".pi").join("agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+        fs::write(agent_dir.join("auth.json"), r#"{"token":"secret"}"#).unwrap();
+        fs::write(agent_dir.join("models.json"), r#"[]"#).unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", &real_home);
+
+        let script = temp.path().join("fake-runner.sh");
+        write_script(
+            &script,
+            &format!(
+                r#"#!/bin/sh
+set -eu
+test -f "$HOME/.pi/agent/auth.json"
+printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
+"#,
+                artifact = valid_artifact_json().replace('\'', "'\"'\"'")
+            ),
+        );
+
+        let request = pi_request(
+            &repo,
+            &temp.path().join("workspaces"),
+            vec![script.display().to_string()],
+        );
+        let outcome = TriageRunner::run(request).await.unwrap();
+        match previous_home {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+
+        let success = match outcome {
+            TriageRunnerOutcome::Success(success) => success,
+            TriageRunnerOutcome::Failure(failure) => {
+                panic!("expected success, got {:?}", failure);
+            }
+        };
+        let home_dir = success.workspace_path.parent().unwrap().join("home");
+        assert!(
+            !home_dir.exists(),
+            "seeded credentials home must be removed"
+        );
+        assert!(!home_dir.join(".pi/agent/auth.json").exists());
     }
 
     #[tokio::test]

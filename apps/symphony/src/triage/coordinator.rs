@@ -11,7 +11,7 @@ use crate::path_safety;
 use crate::repo_url::repo_is_remote;
 use crate::triage::domain::{
     FactoryError, FactoryEventRecord, FactoryRunStatus, PublicationMode, PublicationStatus,
-    TRIAGE_STAGE_NAME,
+    TRIAGE_LEASE_RENEW_INTERVAL_MS, TRIAGE_STAGE_NAME,
 };
 use crate::triage::fingerprint::{
     configuration_revision, issue_revision, route_mapping_hash, ConfigurationRevisionInput,
@@ -548,24 +548,26 @@ where
             total_tokens: 0,
         });
         let outcome = self
-            .executor
-            .execute(TriageRunnerRequest {
-                attempt_id: stage.stage_run_id.clone(),
-                workspace_root: workspace_root.to_path_buf(),
-                repo_path: repo_path.to_path_buf(),
-                command: command.to_vec(),
-                prompt: rendered_prompt,
-                turn_timeout_ms: service.triage.turn_timeout_ms,
-                model: model.map(str::to_string),
-                harness,
-                issue: TriageIssueIdentity {
-                    id: issue.issue_id.clone(),
-                    identifier: issue.identifier.clone(),
-                    title: issue.title.clone(),
+            .execute_with_lease_renewal(
+                &stage.stage_run_id,
+                TriageRunnerRequest {
+                    attempt_id: stage.stage_run_id.clone(),
+                    workspace_root: workspace_root.to_path_buf(),
+                    repo_path: repo_path.to_path_buf(),
+                    command: command.to_vec(),
+                    prompt: rendered_prompt,
+                    turn_timeout_ms: service.triage.turn_timeout_ms,
+                    model: model.map(str::to_string),
+                    harness,
+                    issue: TriageIssueIdentity {
+                        id: issue.issue_id.clone(),
+                        identifier: issue.identifier.clone(),
+                        title: issue.title.clone(),
+                    },
+                    codex: (harness == TriageHarness::Codex).then(|| service.codex.clone()),
+                    progress: self.progress_sink(&stage.stage_run_id),
                 },
-                codex: (harness == TriageHarness::Codex).then(|| service.codex.clone()),
-                progress: self.progress_sink(&stage.stage_run_id),
-            })
+            )
             .await;
         self.session_finish(&stage.stage_run_id);
         let outcome = outcome?;
@@ -611,6 +613,47 @@ where
                     }),
                 )?;
                 Ok(IssuePollOutcome::StartedFailed)
+            }
+        }
+    }
+
+    /// Run a triage turn while renewing the stage lease so concurrent polls do
+    /// not mark the attempt interrupted after `TRIAGE_LEASE_STALE_AFTER_MS`.
+    async fn execute_with_lease_renewal(
+        &mut self,
+        stage_run_id: &str,
+        request: TriageRunnerRequest,
+    ) -> Result<TriageRunnerOutcome> {
+        let owner_instance = self.config.owner_instance.clone();
+        let mut execute = std::pin::pin!(self.executor.execute(request));
+        let interval = std::time::Duration::from_millis(TRIAGE_LEASE_RENEW_INTERVAL_MS as u64);
+        // First tick is immediate; skip so we renew after a full interval.
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
+
+        loop {
+            tokio::select! {
+                biased;
+                outcome = &mut execute => return outcome,
+                _ = ticker.tick() => {
+                    match self.store.renew_lease(stage_run_id, &owner_instance) {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!(
+                                stage_run_id,
+                                "triage lease renew skipped (attempt not running or ownership lost)"
+                            );
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                stage_run_id,
+                                error = %err,
+                                "triage lease renew failed"
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -1166,10 +1209,15 @@ mod tests {
 
     struct FakeExecutor {
         outcome: Mutex<Option<TriageRunnerOutcome>>,
+        delay: std::time::Duration,
     }
 
     impl FakeExecutor {
         fn success(artifact: TriageArtifact) -> Self {
+            Self::success_after(artifact, std::time::Duration::ZERO)
+        }
+
+        fn success_after(artifact: TriageArtifact, delay: std::time::Duration) -> Self {
             Self {
                 outcome: Mutex::new(Some(TriageRunnerOutcome::Success(Box::new(
                     TriageRunnerSuccess {
@@ -1183,6 +1231,7 @@ mod tests {
                         },
                     },
                 )))),
+                delay,
             }
         }
     }
@@ -1190,6 +1239,9 @@ mod tests {
     #[async_trait]
     impl TriageExecutor for FakeExecutor {
         async fn execute(&self, _request: TriageRunnerRequest) -> Result<TriageRunnerOutcome> {
+            if !self.delay.is_zero() {
+                tokio::time::sleep(self.delay).await;
+            }
             Ok(self
                 .outcome
                 .lock()
@@ -1382,6 +1434,54 @@ mod tests {
             .unwrap();
         assert!(body.contains("Symphony triage preview"));
         assert!(body.contains(&intent.intent_id));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn long_running_attempt_renews_lease_before_stale_interrupt() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = prep_workflow(&temp);
+        let store = open_store(&temp);
+        let intake = Arc::new(FakeIntake::default());
+        intake.issues.lock().unwrap().push(sample_issue(true, 33));
+        let comments = FakeComments::new("symphony-bot");
+        // Longer than one renew interval so execute_with_lease_renewal must tick.
+        let delay = std::time::Duration::from_millis((TRIAGE_LEASE_RENEW_INTERVAL_MS as u64) + 50);
+        let mut coordinator = TriageCoordinator::with_executor(
+            store,
+            intake,
+            comments.clone(),
+            TriageCoordinatorConfig {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                owner_instance: "test-owner".to_string(),
+                workflow_dir: workflow_dir.clone(),
+                project_display_name: "Factory".to_string(),
+            },
+            FakeExecutor::success_after(sample_artifact(), delay),
+        );
+
+        let summary = coordinator
+            .poll_once(&service_config(true, &workflow_dir))
+            .await
+            .unwrap();
+
+        assert_eq!(summary.attempts_completed, 1);
+        assert_eq!(*comments.create_count.lock().unwrap(), 1);
+        let run = coordinator
+            .store_mut()
+            .get_run_by_issue("github.com", "owner/repo", "33")
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.status, FactoryRunStatus::Completed);
+        let stages = coordinator
+            .store_mut()
+            .list_stage_runs(&run.run_id)
+            .unwrap();
+        assert_eq!(stages.len(), 1);
+        assert_ne!(
+            stages[0].status,
+            crate::triage::domain::StageStatus::Interrupted
+        );
     }
 
     #[tokio::test]
