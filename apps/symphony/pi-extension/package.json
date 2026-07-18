@@ -1,11 +1,15 @@
 {
   "name": "@kata-sh/pi-symphony-extension",
-  "version": "0.1.2",
+  "version": "2.3.1",
   "description": "Pi extension for launching, attaching to, and monitoring Kata Symphony",
   "license": "MIT",
   "private": false,
   "type": "module",
-  "keywords": ["pi-package", "symphony", "kata"],
+  "keywords": [
+    "pi-package",
+    "symphony",
+    "kata"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/gannonh/kata.git",
@@ -15,7 +19,12 @@
     ".": "./src/index.ts",
     "./package.json": "./package.json"
   },
-  "files": ["src", "scripts", "README.md", "package.json"],
+  "files": [
+    "src",
+    "scripts",
+    "README.md",
+    "package.json"
+  ],
   "scripts": {
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
@@ -25,7 +34,9 @@
     "lint": "eslint src/ --max-warnings=0"
   },
   "pi": {
-    "extensions": ["./src/index.ts"]
+    "extensions": [
+      "./src/index.ts"
+    ]
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
