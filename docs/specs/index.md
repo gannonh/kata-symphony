@@ -6,6 +6,7 @@ Roadmap for planned and completed work. Historical Superpowers designs and plans
 
 * [Symphony Software Factory Platform PRD](symphony-software-factory-platform-prd.md) - product requirements and vertical-slice roadmap for the full software factory platform
 * [A1 GitHub Issue Triage](2026-07-16-a1-github-issue-triage-design.md) - Active design; **PR1 preview shipped** ([#587](https://github.com/gannonh/kata-symphony/pull/587)); next is PR2 automatic route publication, then PR3 recovery/agreement
+* [A2 Spec Stage](2026-07-18-a2-spec-stage-design.md) - Draft design; spec-routed issues → draft/review/revise pipeline → published versioned spec → label-driven approval → implementation-ready run
 * [Pi Symphony Extension Design](../superpowers/specs/2026-05-14-pi-symphony-extension-design.md) - Pi extension to init, launch, monitor, and steer Symphony
 * [Wave 4 Shared Context and Diagnostics Plan](../superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md) - dashboard parity for shared context + diagnostics
 
