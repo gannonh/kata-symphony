@@ -63,8 +63,7 @@ pub struct TriageRunnerRequest {
 }
 
 /// Callback receiving structured progress during a triage turn.
-pub type TriageProgressSink =
-    std::sync::Arc<dyn Fn(TriageProgress) + Send + Sync>;
+pub type TriageProgressSink = std::sync::Arc<dyn Fn(TriageProgress) + Send + Sync>;
 
 #[derive(Debug, Clone, Default)]
 pub struct TriageProgress {
@@ -131,9 +130,8 @@ pub struct TriageRunnerFailure {
 }
 
 #[derive(Debug, Clone)]
-#[allow(clippy::large_enum_variant)]
 pub enum TriageRunnerOutcome {
-    Success(TriageRunnerSuccess),
+    Success(Box<TriageRunnerSuccess>),
     Failure(TriageRunnerFailure),
 }
 
@@ -270,13 +268,15 @@ fn finish_attempt(
         return Ok(failure(TriageRunnerFailureKind::Integrity, err.to_string()));
     }
 
-    Ok(TriageRunnerOutcome::Success(TriageRunnerSuccess {
-        artifact,
-        usage,
-        workspace_path: layout.workspace_path.clone(),
-        output_path: layout.output_path.clone(),
-        baseline,
-    }))
+    Ok(TriageRunnerOutcome::Success(Box::new(
+        TriageRunnerSuccess {
+            artifact,
+            usage,
+            workspace_path: layout.workspace_path.clone(),
+            output_path: layout.output_path.clone(),
+            baseline,
+        },
+    )))
 }
 
 // ── Pi one-shot print execution ─────────────────────────────────────────────
@@ -293,7 +293,11 @@ async fn run_pi_turn(
         }
     }
 
-    let env = build_isolated_env(&layout.home_dir, &layout.output_path, request.model.as_deref());
+    let env = build_isolated_env(
+        &layout.home_dir,
+        &layout.output_path,
+        request.model.as_deref(),
+    );
     seed_pi_auth(&layout.home_dir);
     let program = command_args[0].clone();
 
@@ -438,9 +442,7 @@ fn parse_pi_json_event(line: &str) -> Option<TriageProgress> {
                 last_event: Some("tool_execution_start".to_string()),
                 message: Some(format!("running {tool}")),
                 current_tool_name: Some(tool.to_string()),
-                current_tool_args_preview: value
-                    .get("args")
-                    .map(|args| preview_json(args, 120)),
+                current_tool_args_preview: value.get("args").map(|args| preview_json(args, 120)),
                 ..Default::default()
             })
         }
@@ -615,10 +617,14 @@ fn codex_event_progress(event: &crate::domain::AgentEvent) -> Option<TriageProgr
             ..Default::default()
         }),
         AgentEvent::TurnCompleted {
-            total_tokens, message, ..
+            total_tokens,
+            message,
+            ..
         } => Some(TriageProgress {
             last_event: Some("turn_completed".to_string()),
-            message: message.clone().or_else(|| Some("turn completed".to_string())),
+            message: message
+                .clone()
+                .or_else(|| Some("turn completed".to_string())),
             total_tokens: Some(*total_tokens),
             ..Default::default()
         }),
@@ -650,10 +656,7 @@ async fn codex_session_start(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    command.env(
-        OUTPUT_ENV,
-        layout.output_path.to_string_lossy().to_string(),
-    );
+    command.env(OUTPUT_ENV, layout.output_path.to_string_lossy().to_string());
 
     let mut child = command.spawn().map_err(|err| {
         failure(
@@ -678,18 +681,17 @@ async fn codex_session_start(
     }
     let mut reader = BufReader::new(stdout);
 
-    let thread_id = match triage_codex_handshake(&mut stdin, &mut reader, config, &workspace_str)
-        .await
-    {
-        Ok(id) => id,
-        Err(err) => {
-            let _ = child.kill().await;
-            return Err(failure(
-                TriageRunnerFailureKind::Spawn,
-                format!("codex triage handshake failed: {err}"),
-            ));
-        }
-    };
+    let thread_id =
+        match triage_codex_handshake(&mut stdin, &mut reader, config, &workspace_str).await {
+            Ok(id) => id,
+            Err(err) => {
+                let _ = child.kill().await;
+                return Err(failure(
+                    TriageRunnerFailureKind::Spawn,
+                    format!("codex triage handshake failed: {err}"),
+                ));
+            }
+        };
 
     Ok(crate::codex::app_server::SessionHandle::new_for_triage(
         child,
@@ -750,9 +752,7 @@ async fn triage_codex_handshake(
         .and_then(|id| id.as_str())
         .map(str::to_string)
         .ok_or_else(|| {
-            SymphonyError::ResponseError(format!(
-                "invalid thread/start payload: {thread_result:?}"
-            ))
+            SymphonyError::ResponseError(format!("invalid thread/start payload: {thread_result:?}"))
         })
 }
 
@@ -799,7 +799,10 @@ async fn await_codex_response(
                 if let Some(error) = value.get("error") {
                     return Err(SymphonyError::ResponseError(error.to_string()));
                 }
-                return Ok(value.get("result").cloned().unwrap_or(serde_json::Value::Null));
+                return Ok(value
+                    .get("result")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null));
             }
         }
     }
@@ -1132,7 +1135,11 @@ mod tests {
 
     #[test]
     fn build_pi_command_dedupes_existing_print_flags() {
-        let command = vec!["pi".to_string(), "-p".to_string(), "--no-session".to_string()];
+        let command = vec![
+            "pi".to_string(),
+            "-p".to_string(),
+            "--no-session".to_string(),
+        ];
         let built = build_pi_command(&command, "p");
         assert_eq!(
             built,
@@ -1163,9 +1170,11 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
             ),
         );
 
-        let mut request = pi_request(&repo, &temp.path().join("workspaces"), vec![
-            script.display().to_string(),
-        ]);
+        let mut request = pi_request(
+            &repo,
+            &temp.path().join("workspaces"),
+            vec![script.display().to_string()],
+        );
         request.model = Some("anthropic/claude-sonnet-4-6".to_string());
 
         let outcome = TriageRunner::run(request).await.unwrap();
@@ -1209,9 +1218,11 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
         let script = temp.path().join("sleep.sh");
         write_script(&script, "#!/bin/sh\nsleep 30\n");
 
-        let mut request = pi_request(&repo, &temp.path().join("workspaces"), vec![
-            script.display().to_string(),
-        ]);
+        let mut request = pi_request(
+            &repo,
+            &temp.path().join("workspaces"),
+            vec![script.display().to_string()],
+        );
         request.turn_timeout_ms = 200;
 
         let outcome = TriageRunner::run(request).await.unwrap();
@@ -1232,9 +1243,11 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
         let script = temp.path().join("fail.sh");
         write_script(&script, "#!/bin/sh\necho 'something broke' >&2\nexit 3\n");
 
-        let request = pi_request(&repo, &temp.path().join("workspaces"), vec![
-            script.display().to_string(),
-        ]);
+        let request = pi_request(
+            &repo,
+            &temp.path().join("workspaces"),
+            vec![script.display().to_string()],
+        );
 
         let outcome = TriageRunner::run(request).await.unwrap();
 
@@ -1268,9 +1281,11 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
             ),
         );
 
-        let request = pi_request(&repo, &temp.path().join("workspaces"), vec![
-            script.display().to_string(),
-        ]);
+        let request = pi_request(
+            &repo,
+            &temp.path().join("workspaces"),
+            vec![script.display().to_string()],
+        );
 
         let outcome = TriageRunner::run(request).await.unwrap();
 
@@ -1301,9 +1316,11 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
             ),
         );
 
-        let request = pi_request(&repo, &temp.path().join("workspaces"), vec![
-            script.display().to_string(),
-        ]);
+        let request = pi_request(
+            &repo,
+            &temp.path().join("workspaces"),
+            vec![script.display().to_string()],
+        );
 
         let outcome = TriageRunner::run(request).await.unwrap();
 

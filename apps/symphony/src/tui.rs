@@ -958,10 +958,7 @@ fn triage_rows(snapshot: &OrchestratorSnapshot, now: DateTime<Utc>) -> Vec<Row<'
     }
 
     if rows.is_empty() {
-        rows.push(Row::new(vec![
-            Cell::from(""),
-            Cell::from("(none)"),
-        ]));
+        rows.push(Row::new(vec![Cell::from(""), Cell::from("(none)")]));
     }
 
     rows

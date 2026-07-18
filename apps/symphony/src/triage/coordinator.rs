@@ -22,9 +22,9 @@ use crate::triage::publisher::{
     IneligiblePublishRequest, PreviewPublishRequest, PreviewPublisher, TriageCommentPort,
 };
 use crate::triage::runner::{
-    effective_pi_model, TriageHarness, TriageIssueIdentity, TriageProgress,
-    TriageProgressSink, TriageRunner, TriageRunnerFailureKind, TriageRunnerOutcome,
-    TriageRunnerRequest, TriageRunnerSuccess,
+    effective_pi_model, TriageHarness, TriageIssueIdentity, TriageProgress, TriageProgressSink,
+    TriageRunner, TriageRunnerFailureKind, TriageRunnerOutcome, TriageRunnerRequest,
+    TriageRunnerSuccess,
 };
 use crate::triage::store::{
     ClaimAttemptRequest, CreatePublicationIntentRequest, FactoryRunStore, StoreArtifactRequest,
@@ -171,8 +171,7 @@ where
                         info.last_event_message = Some(message.clone());
                     }
                     info.current_tool_name = progress.current_tool_name.clone();
-                    info.current_tool_args_preview =
-                        progress.current_tool_args_preview.clone();
+                    info.current_tool_args_preview = progress.current_tool_args_preview.clone();
                     if let Some(session_id) = &progress.session_id {
                         info.session_id = Some(session_id.clone());
                     }
@@ -575,7 +574,7 @@ where
                     &issue_rev,
                     configuration_revision,
                     mapping_hash,
-                    success,
+                    *success,
                 )
                 .await?;
                 Ok(IssuePollOutcome::StartedCompleted)
@@ -1102,16 +1101,18 @@ mod tests {
     impl FakeExecutor {
         fn success(artifact: TriageArtifact) -> Self {
             Self {
-                outcome: Mutex::new(Some(TriageRunnerOutcome::Success(TriageRunnerSuccess {
-                    artifact,
-                    usage: StageUsage::default(),
-                    workspace_path: PathBuf::from("/tmp/ws"),
-                    output_path: PathBuf::from("/tmp/out.json"),
-                    baseline: RepoBaseline {
-                        head: "abc".to_string(),
-                        submodules: BTreeMap::new(),
+                outcome: Mutex::new(Some(TriageRunnerOutcome::Success(Box::new(
+                    TriageRunnerSuccess {
+                        artifact,
+                        usage: StageUsage::default(),
+                        workspace_path: PathBuf::from("/tmp/ws"),
+                        output_path: PathBuf::from("/tmp/out.json"),
+                        baseline: RepoBaseline {
+                            head: "abc".to_string(),
+                            submodules: BTreeMap::new(),
+                        },
                     },
-                }))),
+                )))),
             }
         }
     }
