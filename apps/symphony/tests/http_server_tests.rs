@@ -165,6 +165,7 @@ fn fixture_snapshot() -> OrchestratorSnapshot {
             last_poll_at: Some("2026-03-21T12:00:00Z".to_string()),
             poll_count: 42,
         },
+        triage_sessions: vec![],
     }
 }
 
@@ -1354,4 +1355,314 @@ async fn test_steer_endpoint_instruction_too_long() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let payload = body_json(response).await;
     assert_eq!(payload["error"]["code"], "instruction_too_long");
+}
+
+#[derive(Default)]
+struct FakeFactoryRunQuery {
+    by_id: BTreeMap<String, symphony::http_server::FactoryRunHttpResponse>,
+    by_issue: BTreeMap<String, symphony::http_server::FactoryRunHttpResponse>,
+    metrics: Option<symphony::http_server::FactoryRunMetricsHttpResponse>,
+}
+
+impl symphony::http_server::FactoryRunQuery for FakeFactoryRunQuery {
+    fn get_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<symphony::http_server::FactoryRunHttpResponse>, String> {
+        Ok(self.by_id.get(run_id).cloned())
+    }
+
+    fn get_run_by_issue(
+        &self,
+        issue_identifier: &str,
+    ) -> Result<Option<symphony::http_server::FactoryRunHttpResponse>, String> {
+        Ok(self.by_issue.get(issue_identifier).cloned())
+    }
+
+    fn triage_metrics(
+        &self,
+    ) -> Result<symphony::http_server::FactoryRunMetricsHttpResponse, String> {
+        self.metrics
+            .clone()
+            .ok_or_else(|| "metrics unavailable".to_string())
+    }
+}
+
+fn sample_factory_run() -> symphony::http_server::FactoryRunHttpResponse {
+    let started = Utc
+        .with_ymd_and_hms(2026, 7, 16, 17, 0, 1)
+        .single()
+        .expect("timestamp");
+    let completed = Utc
+        .with_ymd_and_hms(2026, 7, 16, 17, 0, 31)
+        .single()
+        .expect("timestamp");
+    symphony::http_server::FactoryRunHttpResponse {
+        run_id: "run-1".to_string(),
+        forge_host: "github.com".to_string(),
+        repository: "example/widgets".to_string(),
+        issue: symphony::http_server::FactoryRunIssueHttp {
+            id: "123".to_string(),
+            identifier: "#123".to_string(),
+            revision: Some("abc".to_string()),
+        },
+        status: "active".to_string(),
+        current_stage: Some("triage".to_string()),
+        created_at: started,
+        updated_at: completed,
+        attempts: vec![symphony::http_server::FactoryRunAttemptHttp {
+            stage_run_id: "stage-1".to_string(),
+            attempt: 1,
+            status: "completed".to_string(),
+            configuration_revision: "cfg".to_string(),
+            harness: "pi".to_string(),
+            model: Some("anthropic/claude-sonnet-4-6".to_string()),
+            started_at: Some(started),
+            completed_at: Some(completed),
+            duration_ms: Some(30_000),
+            usage: symphony::triage::domain::StageUsage {
+                input_tokens: 1000,
+                output_tokens: 250,
+                total_tokens: 1250,
+            },
+            error: None,
+        }],
+        artifact: Some(symphony::http_server::FactoryRunArtifactHttp {
+            artifact_id: "art-1".to_string(),
+            schema_version: 1,
+            route: "implement".to_string(),
+            risk_class: "low".to_string(),
+            rationale: "Bounded docs fix.".to_string(),
+            evidence: vec![symphony::triage::domain::TriageEvidence {
+                kind: symphony::triage::domain::EvidenceKind::Issue,
+                reference: "body".to_string(),
+                summary: "Names the file.".to_string(),
+            }],
+            next_action: "Apply the fix.".to_string(),
+            clarification_question: None,
+            reproduction: None,
+            received_at: completed,
+        }),
+        publication: Some(symphony::http_server::FactoryRunPublicationHttp {
+            intent_id: "intent-1".to_string(),
+            mode: "preview".to_string(),
+            status: "pending".to_string(),
+            completed_steps: vec!["comment_pending".to_string()],
+            route_label: "ready-for-agent".to_string(),
+            project_state: Some("Todo".to_string()),
+            retry_count: 0,
+            error: None,
+        }),
+    }
+}
+
+fn router_with_factory_query(query: FakeFactoryRunQuery) -> axum::Router {
+    let state = HttpServerState::new(
+        Arc::new(StaticSnapshotSource {
+            snapshot: fixture_snapshot(),
+        }),
+        Arc::new(FakeRefreshControl::default()),
+        symphony::orchestrator::EscalationRegistry::default(),
+    )
+    .with_factory_run_query(Arc::new(query));
+    build_router(state)
+}
+
+#[tokio::test]
+async fn test_factory_runs_unavailable_without_query_source() {
+    let app = build_router(HttpServerState::new(
+        Arc::new(StaticSnapshotSource {
+            snapshot: fixture_snapshot(),
+        }),
+        Arc::new(FakeRefreshControl::default()),
+        symphony::orchestrator::EscalationRegistry::default(),
+    ));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs/run-1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let payload = body_json(response).await;
+    assert_eq!(payload["error"]["code"], "factory_store_unavailable");
+}
+
+#[tokio::test]
+async fn test_factory_run_by_id_404_and_200() {
+    let run = sample_factory_run();
+    let mut by_id = BTreeMap::new();
+    by_id.insert(run.run_id.clone(), run.clone());
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        by_id,
+        ..Default::default()
+    });
+
+    let missing = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs/missing")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let missing_payload = body_json(missing).await;
+    assert_eq!(missing_payload["error"]["code"], "factory_run_not_found");
+
+    let found = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs/run-1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(found.status(), StatusCode::OK);
+    let payload = body_json(found).await;
+    assert_eq!(payload["run_id"], "run-1");
+    assert_eq!(payload["issue"]["identifier"], "#123");
+    assert_eq!(payload["attempts"][0]["duration_ms"], 30000);
+    assert_eq!(payload["artifact"]["route"], "implement");
+    assert_eq!(payload["publication"]["mode"], "preview");
+}
+
+#[tokio::test]
+async fn test_factory_runs_issue_query_validation_and_lookup() {
+    let run = sample_factory_run();
+    let mut by_issue = BTreeMap::new();
+    by_issue.insert("#123".to_string(), run);
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        by_issue,
+        ..Default::default()
+    });
+
+    let missing_param = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(missing_param.status(), StatusCode::BAD_REQUEST);
+
+    let invalid = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs?issue=")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    let not_found = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs?issue=%23456")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(not_found.status(), StatusCode::OK);
+    let empty_payload = body_json(not_found).await;
+    assert!(empty_payload.is_null());
+
+    let found = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs?issue=%23123")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(found.status(), StatusCode::OK);
+    let payload = body_json(found).await;
+    assert_eq!(payload["run_id"], "run-1");
+}
+
+#[tokio::test]
+async fn test_factory_run_metrics_stage_validation() {
+    let metrics = symphony::http_server::FactoryRunMetricsHttpResponse {
+        stage: "triage".to_string(),
+        total_attempts: 2,
+        completed_attempts: 1,
+        failed_attempts: 1,
+        ineligible_issues: 0,
+        route_counts: BTreeMap::from([("implement".to_string(), 1)]),
+        correction_count: 0,
+        correction_rate: 0.0,
+        duration: symphony::triage::domain::TriageMetricsDuration {
+            average_ms: Some(1000.0),
+            p50_ms: Some(1000.0),
+            p95_ms: Some(1000.0),
+        },
+        tokens_by_harness_model: BTreeMap::from([(
+            "pi/unknown".to_string(),
+            symphony::triage::domain::TriageMetricsTokenTotals {
+                input_tokens: 10,
+                output_tokens: 5,
+                total_tokens: 15,
+            },
+        )]),
+    };
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        metrics: Some(metrics),
+        ..Default::default()
+    });
+
+    let bad_stage = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs/metrics?stage=spec")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(bad_stage.status(), StatusCode::BAD_REQUEST);
+
+    let missing_stage = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs/metrics")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(missing_stage.status(), StatusCode::BAD_REQUEST);
+
+    let ok = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs/metrics?stage=triage")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(ok.status(), StatusCode::OK);
+    let payload = body_json(ok).await;
+    assert_eq!(payload["stage"], "triage");
+    assert_eq!(payload["total_attempts"], 2);
+    assert_eq!(payload["route_counts"]["implement"], 1);
 }

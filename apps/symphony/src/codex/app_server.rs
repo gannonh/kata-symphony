@@ -118,6 +118,43 @@ pub struct HelperEnv<'a> {
     pub symphony_workflow_path: Option<&'a str>,
 }
 
+impl SessionHandle {
+    /// Build a handle from parts already negotiated by the triage runner.
+    ///
+    /// Triage performs its own handshake (no dynamic tools, no helper env),
+    /// then hands the session over so `run_turn` / `stop_session` can be reused.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_for_triage(
+        child: tokio::process::Child,
+        stdin: tokio::process::ChildStdin,
+        stdout_reader: BufReader<tokio::process::ChildStdout>,
+        thread_id: String,
+        issue_id: String,
+        issue_identifier: String,
+        issue_title: String,
+        workspace_path: String,
+        config: &CodexConfig,
+    ) -> Self {
+        Self {
+            session_id: thread_id.clone(),
+            child,
+            stdin,
+            stdout_reader,
+            thread_id,
+            pid: None,
+            issue_id,
+            issue_identifier,
+            issue_title,
+            workspace_path,
+            approval_policy: config.approval_policy.clone(),
+            turn_sandbox_policy: config.turn_sandbox_policy.clone(),
+            turn_timeout_ms: config.turn_timeout_ms,
+            read_timeout_ms: config.read_timeout_ms,
+            auto_approve_requests: false,
+        }
+    }
+}
+
 // ── Public API ────────────────────────────────────────────────────────
 
 /// Launch a Codex app-server subprocess and perform the startup handshake.

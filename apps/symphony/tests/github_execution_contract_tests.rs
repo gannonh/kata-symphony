@@ -137,7 +137,13 @@ fn project_items_payload(status_name: &str, option_id: &str) -> serde_json::Valu
                     "nodes": [
                         {
                             "id": "item_7",
-                            "content": { "number": 7 },
+                            "content": {
+                                "number": 7,
+                                "repository": {
+                                    "name": "kata-mono",
+                                    "owner": { "login": "kata-sh" }
+                                }
+                            },
                             "status": {
                                 "name": status_name,
                                 "optionId": option_id

@@ -119,6 +119,10 @@ fn project_item_node_with_fields(
         "id": item_id,
         "content": {
             "number": issue_number,
+            "repository": {
+                "name": "kata-mono",
+                "owner": { "login": "kata-sh" }
+            },
             "blockedBy": { "nodes": blocked_by_nodes }
         },
         "status": {
@@ -160,7 +164,13 @@ fn project_item_node_without_dependency_fields(
 ) -> serde_json::Value {
     json!({
         "id": item_id,
-        "content": { "number": issue_number },
+        "content": {
+            "number": issue_number,
+            "repository": {
+                "name": "kata-mono",
+                "owner": { "login": "kata-sh" }
+            }
+        },
         "status": {
             "name": status_name,
             "optionId": option_id

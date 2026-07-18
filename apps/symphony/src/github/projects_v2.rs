@@ -55,6 +55,12 @@ query($projectId: ID!, $first: Int!, $after: String) {
           content {
             ... on Issue {
               number
+              repository {
+                name
+                owner {
+                  login
+                }
+              }
               blockedBy(first: 100) {
                 nodes {
                   ... on Issue {
@@ -120,6 +126,8 @@ pub struct StatusFieldInfo {
 pub struct ProjectItem {
     pub item_id: String,
     pub issue_number: u64,
+    /// `owner/repo` for the issue content when known.
+    pub repository: Option<String>,
     pub status: Option<String>,
     pub kata_id: Option<String>,
     pub blocked_by_issue_numbers: Vec<u64>,
@@ -184,6 +192,33 @@ impl ProjectsV2Client {
         project_id: &str,
         status_option_ids: &[String],
     ) -> Result<Vec<ProjectItem>> {
+        self.query_items_paginated(project_id, status_option_ids, MAX_PAGES as u32, false)
+            .await
+    }
+
+    /// List every project item across all statuses, failing if pagination is truncated.
+    pub async fn query_all_items(
+        &self,
+        project_id: &str,
+        max_pages: u32,
+    ) -> Result<Vec<ProjectItem>> {
+        self.query_items_paginated(project_id, &[], max_pages, true)
+            .await
+    }
+
+    async fn query_items_paginated(
+        &self,
+        project_id: &str,
+        status_option_ids: &[String],
+        max_pages: u32,
+        fail_on_truncate: bool,
+    ) -> Result<Vec<ProjectItem>> {
+        if max_pages == 0 {
+            return Err(SymphonyError::GithubProjectsV2Error(
+                "Projects v2 pagination max_pages must be greater than zero".to_string(),
+            ));
+        }
+
         let mut items = Vec::new();
         let mut after: Option<String> = None;
         let status_filter: Option<HashSet<&str>> = if status_option_ids.is_empty() {
@@ -192,7 +227,7 @@ impl ProjectsV2Client {
             Some(status_option_ids.iter().map(String::as_str).collect())
         };
 
-        for _ in 0..MAX_PAGES {
+        for page_index in 0..max_pages {
             let variables = json!({
                 "projectId": project_id,
                 "first": PAGE_SIZE,
@@ -214,6 +249,15 @@ impl ProjectsV2Client {
                 let Some(issue_number) = content.number else {
                     continue;
                 };
+                let repository = content.repository.and_then(|repo| {
+                    let owner = repo.owner?.login;
+                    let name = repo.name?;
+                    if owner.trim().is_empty() || name.trim().is_empty() {
+                        None
+                    } else {
+                        Some(format!("{owner}/{name}"))
+                    }
+                });
                 let blocked_by_issue_numbers = content
                     .blocked_by
                     .map(|connection| {
@@ -241,13 +285,18 @@ impl ProjectsV2Client {
                 items.push(ProjectItem {
                     item_id: node.id,
                     issue_number,
+                    repository,
                     status: node.status.and_then(|status| status.name),
                     kata_id: node.kata_id.and_then(|value| value.text),
                     blocked_by_issue_numbers,
                 });
             }
 
-            tracing::debug!(item_count = items.len(), "Projects v2 items queried");
+            tracing::debug!(
+                item_count = items.len(),
+                page_index,
+                "Projects v2 items queried"
+            );
 
             if node.items.page_info.has_next_page {
                 after = node.items.page_info.end_cursor;
@@ -263,10 +312,12 @@ impl ProjectsV2Client {
         }
 
         if after.is_some() {
-            tracing::warn!(
-                max_pages = MAX_PAGES,
-                "Projects v2 item query truncated at page cap"
-            );
+            if fail_on_truncate {
+                return Err(SymphonyError::GithubProjectsV2Error(format!(
+                    "Projects v2 item query truncated at max_pages={max_pages}; refusing partial results"
+                )));
+            }
+            tracing::warn!(max_pages, "Projects v2 item query truncated at page cap");
         }
 
         Ok(items)
@@ -429,8 +480,20 @@ struct ProjectItemNode {
 #[derive(Debug, Deserialize)]
 struct ProjectItemContent {
     number: Option<u64>,
+    repository: Option<ProjectItemRepository>,
     #[serde(rename = "blockedBy")]
     blocked_by: Option<ProjectIssueDependencyConnection>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectItemRepository {
+    name: Option<String>,
+    owner: Option<ProjectItemRepositoryOwner>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectItemRepositoryOwner {
+    login: String,
 }
 
 #[derive(Debug, Deserialize)]

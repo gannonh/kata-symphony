@@ -26,7 +26,8 @@ tracker:
 polling:
   interval_ms: 30000
 workspace:
-  # These relative paths assume you run Symphony from the repository root.
+  # Relative to process cwd (run Symphony from the repository root).
+  # Prompts/hooks are relative to this WORKFLOW.md directory instead.
   root: .symphony/workspaces
   repo: .
   git_strategy: worktree
@@ -62,6 +63,33 @@ supervisor:
 server:
   port: 8080
   host: 127.0.0.1
+# Durable factory-run storage (A1 triage). Disabled triage uses no SQLite lock.
+# storage:
+#   # Optional override. Default is a namespaced path under the platform data dir.
+#   # path: $SYMPHONY_STATE_PATH
+#   busy_timeout_ms: 5000
+# GitHub Issues triage (A1 preview). Keep disabled until doctor checks pass.
+# triage:
+#   enabled: false
+#   mode: preview # preview | automatic
+#   intake_label: needs-triage
+#   prompt: prompts/triage.md
+#   # model: provider/model-name  # Pi only; rejected for Codex
+#   turn_timeout_ms: 900000
+#   max_attempts: 3
+#   max_intake_pages: 100
+#   routes:
+#     implement:
+#       label: ready-for-agent
+#       state: Todo
+#     spec:
+#       label: ready-to-spec
+#     needs_information:
+#       label: needs-info
+#     park:
+#       label: wait-to-implement
+#     human_owned:
+#       label: ready-for-human
 # notifications:
 #   slack:
 #     webhook_url: $SLACK_WEBHOOK_URL

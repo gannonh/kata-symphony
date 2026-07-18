@@ -120,7 +120,13 @@ async fn test_query_items_by_status_returns_matching_items() {
                             "nodes": [
                                 {
                                     "id": "item_1",
-                                    "content": { "number": 101 },
+                                    "content": {
+                                        "number": 101,
+                                        "repository": {
+                                            "name": "kata-mono",
+                                            "owner": { "login": "kata-sh" }
+                                        }
+                                    },
                                     "status": {
                                         "name": "Todo",
                                         "optionId": "opt_todo"
@@ -128,7 +134,13 @@ async fn test_query_items_by_status_returns_matching_items() {
                                 },
                                 {
                                     "id": "item_2",
-                                    "content": { "number": 102 },
+                                    "content": {
+                                        "number": 102,
+                                        "repository": {
+                                            "name": "kata-mono",
+                                            "owner": { "login": "kata-sh" }
+                                        }
+                                    },
                                     "status": {
                                         "name": "Done",
                                         "optionId": "opt_done"
@@ -136,7 +148,13 @@ async fn test_query_items_by_status_returns_matching_items() {
                                 },
                                 {
                                     "id": "item_3",
-                                    "content": { "number": 103 },
+                                    "content": {
+                                        "number": 103,
+                                        "repository": {
+                                            "name": "kata-mono",
+                                            "owner": { "login": "kata-sh" }
+                                        }
+                                    },
                                     "status": null
                                 }
                             ],
@@ -162,6 +180,7 @@ async fn test_query_items_by_status_returns_matching_items() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].item_id, "item_1");
     assert_eq!(items[0].issue_number, 101);
+    assert_eq!(items[0].repository.as_deref(), Some("kata-sh/kata-mono"));
     assert_eq!(items[0].status.as_deref(), Some("Todo"));
 }
 
@@ -189,6 +208,10 @@ async fn test_query_items_decodes_native_issue_dependencies() {
                                     "id": "item_1",
                                     "content": {
                                         "number": 201,
+                                        "repository": {
+                                            "name": "kata-mono",
+                                            "owner": { "login": "kata-sh" }
+                                        },
                                         "blockedBy": {
                                             "nodes": [
                                                 { "number": 199 },
@@ -204,7 +227,14 @@ async fn test_query_items_decodes_native_issue_dependencies() {
                                 },
                                 {
                                     "id": "item_2",
-                                    "content": { "number": 202, "blockedBy": { "nodes": [] } },
+                                    "content": {
+                                        "number": 202,
+                                        "repository": {
+                                            "name": "other",
+                                            "owner": { "login": "acme" }
+                                        },
+                                        "blockedBy": { "nodes": [] }
+                                    },
                                     "status": null,
                                     "kataId": null
                                 }
@@ -231,11 +261,13 @@ async fn test_query_items_decodes_native_issue_dependencies() {
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].item_id, "item_1");
     assert_eq!(items[0].issue_number, 201);
+    assert_eq!(items[0].repository.as_deref(), Some("kata-sh/kata-mono"));
     assert_eq!(items[0].status.as_deref(), Some("Todo"));
     assert_eq!(items[0].kata_id.as_deref(), Some("T201"));
     assert_eq!(items[0].blocked_by_issue_numbers, vec![199, 200]);
     assert_eq!(items[1].item_id, "item_2");
     assert_eq!(items[1].issue_number, 202);
+    assert_eq!(items[1].repository.as_deref(), Some("acme/other"));
     assert_eq!(items[1].status, None);
     assert_eq!(items[1].kata_id, None);
     assert!(items[1].blocked_by_issue_numbers.is_empty());

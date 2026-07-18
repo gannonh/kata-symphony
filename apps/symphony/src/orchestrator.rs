@@ -29,6 +29,7 @@ use crate::session_summary::{compact_session_id, normalize_whitespace, truncate_
 use crate::shared_context::SharedContextStore;
 use crate::ssh::{self, WorkerHostSelection};
 use crate::supervisor::{SupervisorAgent, SupervisorDependencies};
+use crate::triage::runtime::TriageRuntime;
 use crate::workflow_store::WorkflowStore;
 use crate::{docker, path_safety, prompt_builder, workspace};
 
@@ -1480,6 +1481,13 @@ impl SnapshotHandle {
     fn publish(&self, snapshot: OrchestratorSnapshot) {
         *self.inner.write().expect("snapshot rwlock poisoned") = snapshot;
     }
+
+    /// Patch only `triage_sessions` so live triage progress can refresh the
+    /// TUI/API without rebuilding the full orchestrator snapshot.
+    pub fn update_triage_sessions(&self, sessions: Vec<crate::domain::TriageSessionInfo>) {
+        let mut guard = self.inner.write().expect("snapshot rwlock poisoned");
+        guard.triage_sessions = sessions;
+    }
 }
 
 // ── Refresh Control Channel (S07 control seam) ──────────────────────────
@@ -2061,6 +2069,8 @@ pub struct Orchestrator {
     shared_context_store: SharedContextStore,
     /// Optional supervisor lifecycle controller.
     supervisor_agent: Option<SupervisorAgent>,
+    /// Optional A1 triage runtime (preview/automatic factory stage).
+    triage_runtime: Option<TriageRuntime>,
     /// The prompt template from the WORKFLOW.md body, used to render per-issue prompts.
     prompt_template: String,
     /// Resolved workflow path used by worker helpers and workflow-relative paths.
@@ -2154,6 +2164,7 @@ impl Orchestrator {
                 shared_context_max_entries,
             ),
             supervisor_agent: None,
+            triage_runtime: None,
             prompt_template,
             workflow_path,
         }
@@ -2268,6 +2279,37 @@ impl Orchestrator {
                     backend_stall_timeout_ms(&self.config, self.config.agent_backend);
 
                 self.detect_stalled_workers(now_ms, stall_timeout_ms);
+
+                if let Some(runtime) = self.triage_runtime.as_mut() {
+                    match runtime.poll(&self.config).await {
+                        Ok(summary) => {
+                            if summary.triage_enabled
+                                || summary.reconciled_intents > 0
+                                || summary.issues_seen > 0
+                            {
+                                tracing::info!(
+                                    event = "triage_poll_completed",
+                                    enabled = summary.triage_enabled,
+                                    issues_seen = summary.issues_seen,
+                                    attempts_started = summary.attempts_started,
+                                    attempts_completed = summary.attempts_completed,
+                                    attempts_failed = summary.attempts_failed,
+                                    ineligible = summary.ineligible,
+                                    skipped = summary.skipped,
+                                    reconciled_intents = summary.reconciled_intents,
+                                    "triage poll completed"
+                                );
+                            }
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                event = "triage_poll_failed",
+                                error = %err,
+                                "triage poll failed; continuing orchestrator loop"
+                            );
+                        }
+                    }
+                }
 
                 match self.tick_with_refresh(port, false) {
                     Ok(tick_result) => {
@@ -4504,6 +4546,29 @@ impl Orchestrator {
         self.event_hub = Some(hub);
     }
 
+    pub fn attach_triage_runtime(&mut self, runtime: TriageRuntime) {
+        if let Some(handle) = self.snapshot_handle.clone() {
+            if let Ok(mut registry) = runtime.sessions().lock() {
+                registry.set_on_change(std::sync::Arc::new(move |sessions| {
+                    handle.update_triage_sessions(sessions);
+                }));
+            }
+        }
+        self.triage_runtime = Some(runtime);
+    }
+
+    pub fn triage_runtime_mut(&mut self) -> Option<&mut TriageRuntime> {
+        self.triage_runtime.as_mut()
+    }
+
+    pub fn take_triage_factory_query(
+        &self,
+    ) -> Option<std::sync::Arc<dyn crate::http_server::FactoryRunQuery>> {
+        self.triage_runtime
+            .as_ref()
+            .map(|runtime| std::sync::Arc::new(runtime.store()) as _)
+    }
+
     /// Create a refresh control channel.
     ///
     /// Returns the sender half (clone-cheap, for HTTP handlers). The
@@ -4656,6 +4721,17 @@ impl Orchestrator {
                 last_poll_at: self.last_poll_at.map(|t| t.to_rfc3339()),
                 poll_count: self.poll_count,
             },
+            triage_sessions: self
+                .triage_runtime
+                .as_ref()
+                .map(|runtime| {
+                    runtime
+                        .sessions()
+                        .lock()
+                        .map(|registry| registry.list())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default(),
         }
     }
 

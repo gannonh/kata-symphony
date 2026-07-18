@@ -18,6 +18,7 @@ pub mod workspace;
 pub mod shared_context;
 pub mod starter_assets;
 pub mod supervisor;
+pub mod triage;
 
 pub mod codex;
 pub mod doctor;

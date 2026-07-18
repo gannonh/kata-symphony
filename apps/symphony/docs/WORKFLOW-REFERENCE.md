@@ -38,6 +38,9 @@
 #   - Workspace: root path writable/creatable, repo reference sanity, git strategy compatibility,
 #                Docker daemon availability when isolation=docker
 #   - Orphans: on-disk workspace directories that do not map to active tracker issues
+#   - Triage (when triage.enabled): storage path writability + exclusive lock probe,
+#     triage prompt file, intake/route labels, GitHub label presence, Projects v2
+#     route states, and a deferred harness-auth isolation warning
 #
 # Notes:
 #   - Exit code is 0 when no 🚨 errors are found, otherwise 1.
@@ -472,6 +475,65 @@ server:
 #     # Empty list means no notifications are sent.
 #     events:
 #       - all
+
+# ─── Storage (factory-run durability) ─────────────────────────────────────────
+# Optional SQLite path for durable factory runs (A1 triage and later stages).
+# When `storage.path` is omitted, Symphony uses a namespaced path under the
+# platform data directory:
+#   <data>/symphony/triage/<forge>/<owner>/<repo>/triage.sqlite3
+#
+# `busy_timeout_ms` controls SQLite busy waiting (default 5000). An adjacent
+# `.lock` file provides exclusive ownership for the running Symphony process.
+#
+# storage:
+#   path: $SYMPHONY_STATE_PATH
+#   busy_timeout_ms: 5000
+
+# ─── Triage (A1 GitHub issue triage) ──────────────────────────────────────────
+# GitHub Projects v2 only. When `enabled: false` (default), Symphony skips triage
+# intake and leaves implementation polling unchanged.
+#
+# Modes:
+#   preview   — durable artifact + diagnostic comment; no route label/state mutation
+#   automatic — publishes the chosen route (label, optional project state, intake removal)
+#
+# Preview is the safe rollout path: collect metrics and review artifacts, then
+# promote to automatic after doctor checks and sample agreement look healthy.
+#
+# `prompt` is resolved relative to this WORKFLOW.md directory (same anchor as
+# `prompts.*` and hooks). `workspace.root` / local `workspace.repo` stay
+# relative to the process cwd (typically the repository root), and are
+# canonicalized before triage clones so values like `repo: .` stay stable.
+# Route labels must
+# be distinct and must not equal `intake_label`. Optional `state` values must exist
+# on the Projects v2 Status field.
+#
+# HTTP (when the observability server is enabled):
+#   GET /api/v1/factory-runs/{run_id}
+#   GET /api/v1/factory-runs?issue={issue_identifier}
+#   GET /api/v1/factory-runs/metrics?stage=triage
+#
+# triage:
+#   enabled: false
+#   mode: preview
+#   intake_label: needs-triage
+#   prompt: prompts/triage.md
+#   # model: provider/model-name  # Pi only
+#   turn_timeout_ms: 900000
+#   max_attempts: 3
+#   max_intake_pages: 100
+#   routes:
+#     implement:
+#       label: ready-for-agent
+#       state: Todo
+#     spec:
+#       label: ready-to-spec
+#     needs_information:
+#       label: needs-info
+#     park:
+#       label: wait-to-implement
+#     human_owned:
+#       label: ready-for-human
 
 # ─── Prompts (per-state prompt injection) ─────────────────────────────────────
 # Optional. When configured, the orchestrator selects a prompt template based on

@@ -467,8 +467,34 @@ impl BootstrapDeps for RuntimeBootstrapDeps {
         let refresh_sender = orchestrator.create_refresh_channel();
         let event_hub = orchestrator.create_event_hub();
         let tui_event_hub = event_hub.clone();
+        let triage_event_hub = event_hub.clone();
         let steer_sender = orchestrator.create_steer_sender();
-        let http_state = HttpServerState::with_event_stream(
+
+        match symphony::triage::runtime::TriageRuntime::try_start(
+            &context.effective_config,
+            workflow_path,
+            Some(triage_event_hub),
+        ) {
+            Ok(Some(runtime)) => {
+                tracing::info!(
+                    event = "triage_runtime_started",
+                    mode = %context.effective_config.triage.mode,
+                    "A1 triage runtime attached"
+                );
+                orchestrator.attach_triage_runtime(runtime);
+            }
+            Ok(None) => {
+                tracing::info!(
+                    event = "triage_runtime_disabled",
+                    "triage.enabled is false; triage runtime not started"
+                );
+            }
+            Err(err) => {
+                return Err(format!("failed to start triage runtime: {err}"));
+            }
+        }
+
+        let mut http_state = HttpServerState::with_event_stream(
             Arc::new(snapshot_handle),
             Arc::new(refresh_sender),
             orchestrator.escalation_registry(),
@@ -477,6 +503,9 @@ impl BootstrapDeps for RuntimeBootstrapDeps {
         )
         .with_shared_context_store(orchestrator.shared_context_store())
         .with_steer_sender(steer_sender);
+        if let Some(query) = orchestrator.take_triage_factory_query() {
+            http_state = http_state.with_factory_run_query(query);
+        }
 
         let mut tui_shutdown = None;
         let mut tui_exit = None;
@@ -705,8 +734,14 @@ pub(crate) fn build_startup_banner(
         .as_deref()
         .unwrap_or("unknown_project_slug");
 
+    let triage = if config.triage.enabled {
+        format!("enabled ({})", config.triage.mode)
+    } else {
+        "disabled".to_string()
+    };
+
     format!(
-        "Symphony v{version}\nDashboard: {dashboard}\nLogs: {logs}\nProject: {project_slug}\nWorkers: {workers} max concurrent\nPolling: {polling}\n\nPress Ctrl+C to stop.\n",
+        "Symphony v{version}\nDashboard: {dashboard}\nLogs: {logs}\nProject: {project_slug}\nTriage: {triage}\nWorkers: {workers} max concurrent\nPolling: {polling}\n\nPress Ctrl+C to stop.\n",
         version = env!("CARGO_PKG_VERSION"),
         workers = config.agent.max_concurrent_agents,
         polling = format_polling_interval(config.polling.interval_ms),
@@ -773,6 +808,11 @@ fn run_doctor(workflow_path: &Path) -> Result<i32, String> {
 
                     results.extend(doctor::check_backend(&service_config));
                     results.extend(doctor::check_workspace(&service_config.workspace));
+                    results.extend(doctor::check_triage(&service_config, workflow_path));
+                    let triage_github = tokio::task::block_in_place(|| {
+                        runtime.block_on(doctor::check_triage_github(&service_config))
+                    });
+                    results.extend(triage_github);
 
                     match symphony::helper::github_adapter_inputs(&service_config.tracker) {
                         Ok(inputs) => {
@@ -809,6 +849,7 @@ fn run_doctor(workflow_path: &Path) -> Result<i32, String> {
 
                     results.extend(doctor::check_backend(&service_config));
                     results.extend(doctor::check_workspace(&service_config.workspace));
+                    results.extend(doctor::check_triage(&service_config, workflow_path));
 
                     let adapter =
                         LinearAdapter::new(LinearClient::new(service_config.tracker.clone()));

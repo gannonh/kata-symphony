@@ -6,6 +6,7 @@ import type {
   RunAttemptResponse,
   SymphonyEventEnvelope,
   SymphonyStateResponse,
+  TriageSessionResponse,
 } from "./http-client.ts";
 
 export interface WorkerRow {
@@ -23,7 +24,7 @@ export interface WorkerRow {
   errorPreview: string;
 }
 
-export type IssueRowKind = "running" | "retry" | "blocked" | "completed";
+export type IssueRowKind = "running" | "triage" | "retry" | "blocked" | "completed";
 
 export interface IssueRow {
   kind: IssueRowKind;
@@ -41,6 +42,19 @@ export interface IssueRow {
   errorPreview: string;
   blockers: string;
   completedAt: string;
+}
+
+export interface TriageRow {
+  issueIdentifier: string;
+  stageRunId: string;
+  attempt: string;
+  harness: string;
+  model: string;
+  status: string;
+  lastEvent: string;
+  message: string;
+  lastActivity: string;
+  tokens: string;
 }
 
 export interface EscalationRow {
@@ -66,10 +80,29 @@ export function buildIssueRows(state: SymphonyStateResponse | undefined): IssueR
     ...Object.entries(state.running ?? {})
       .map(([issueId, attempt]) => workerToIssueRow(issueId, attempt, state))
       .sort(compareIssueRows),
+    ...(state.triage_sessions ?? []).map(triageToIssueRow).sort(compareIssueRows),
     ...(state.retry_queue ?? []).map(retryToIssueRow).sort(compareIssueRows),
     ...(state.blocked ?? []).map(blockedToIssueRow).sort(compareIssueRows),
     ...(state.completed ?? []).map(completedToIssueRow).sort(compareIssueRows),
   ];
+}
+
+export function buildTriageRows(state: SymphonyStateResponse | undefined): TriageRow[] {
+  return (state?.triage_sessions ?? [])
+    .slice()
+    .sort((left, right) => left.issue_identifier.localeCompare(right.issue_identifier))
+    .map((session) => ({
+      issueIdentifier: session.issue_identifier,
+      stageRunId: session.stage_run_id,
+      attempt: String(session.attempt),
+      harness: session.harness,
+      model: session.model?.trim() || "-",
+      status: `triage#${session.attempt}`,
+      lastEvent: session.last_event?.trim() || "-",
+      message: triageMessage(session),
+      lastActivity: session.last_activity_at ?? session.started_at,
+      tokens: session.total_tokens === undefined ? "-" : String(session.total_tokens),
+    }));
 }
 
 export function buildEscalationRows(state: SymphonyStateResponse | undefined): EscalationRow[] {
@@ -89,10 +122,45 @@ export function buildEscalationRows(state: SymphonyStateResponse | undefined): E
 
 export function formatEventRows(events: SymphonyEventEnvelope[], limit = 8): string[] {
   return events
-    .filter((event) => event.kind === "worker" || event.kind === "runtime" || event.kind.startsWith("escalation_"))
+    .filter(
+      (event) =>
+        event.kind === "worker" ||
+        event.kind === "runtime" ||
+        event.kind === "triage" ||
+        event.kind.startsWith("escalation_") ||
+        event.event.startsWith("triage_"),
+    )
     .slice(-limit)
     .reverse()
     .map((event) => [event.timestamp, event.severity, event.kind, event.issue ?? "-", event.event, eventSummary(event)].filter(Boolean).join(" "));
+}
+
+function triageToIssueRow(session: TriageSessionResponse): IssueRow {
+  return {
+    kind: "triage",
+    issueId: session.stage_run_id,
+    issueIdentifier: session.issue_identifier,
+    title: triageMessage(session),
+    status: `triage#${session.attempt}`,
+    trackerState: "triage",
+    attempt: String(session.attempt),
+    turnCount: "1",
+    maxTurns: "1",
+    lastActivity: session.last_activity_at ?? session.started_at,
+    workerHost: session.harness,
+    workspacePath: session.session_id ?? "-",
+    errorPreview: "-",
+    blockers: "-",
+    completedAt: "-",
+  };
+}
+
+function triageMessage(session: TriageSessionResponse): string {
+  if (session.current_tool_name) {
+    const args = session.current_tool_args_preview?.trim();
+    return args ? `${session.current_tool_name}: ${truncateText(args, 80)}` : session.current_tool_name;
+  }
+  return session.last_event_message?.trim() || session.last_event?.trim() || "running";
 }
 
 function workerToIssueRow(issueId: string, attempt: RunAttemptResponse, state: SymphonyStateResponse | undefined): IssueRow {

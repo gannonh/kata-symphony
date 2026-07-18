@@ -46,6 +46,12 @@ pub struct GithubLabel {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct GithubMilestone {
+    pub number: u64,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct GithubSubIssuesSummary {
     #[serde(default)]
     pub total: u32,
@@ -71,6 +77,8 @@ pub struct GithubIssue {
     #[serde(default)]
     pub labels: Vec<GithubLabel>,
     #[serde(default)]
+    pub milestone: Option<GithubMilestone>,
+    #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
@@ -87,6 +95,8 @@ pub struct GithubIssue {
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct GithubIssueComment {
     pub id: u64,
+    #[serde(default)]
+    pub user: Option<GithubUser>,
     #[serde(default)]
     pub body: Option<String>,
     #[serde(default)]
@@ -232,9 +242,50 @@ impl GithubClient {
         self.paginated_get(url.as_ref()).await
     }
 
+    /// Paginate issues to exhaustion under `max_pages`.
+    ///
+    /// Unlike [`list_issues`], this fails visibly when pagination is truncated
+    /// at the page cap so triage never acts on a partial intake set.
+    pub async fn list_issues_paginated(
+        &self,
+        state_filter: &str,
+        labels: &[String],
+        max_pages: u32,
+    ) -> Result<Vec<GithubIssue>> {
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/repos/{}/{}/issues",
+            self.base_url, self.repo_owner, self.repo_name
+        ))
+        .map_err(|err| SymphonyError::GithubApiRequest(format!("invalid issues URL: {err}")))?;
+
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("state", state_filter);
+            query.append_pair("per_page", "100");
+            if !labels.is_empty() {
+                query.append_pair("labels", &labels.join(","));
+            }
+        }
+
+        self.paginated_get_capped(url.as_ref(), max_pages, "issues")
+            .await
+    }
+
     pub async fn get_issue(&self, number: u64) -> Result<GithubIssue> {
         let path = format!(
             "/repos/{}/{}/issues/{number}",
+            self.repo_owner, self.repo_name
+        );
+        self.request_json(Method::GET, &path, None).await
+    }
+
+    pub async fn get_authenticated_user(&self) -> Result<GithubUser> {
+        self.request_json(Method::GET, "/user", None).await
+    }
+
+    pub async fn get_comment(&self, comment_id: u64) -> Result<GithubIssueComment> {
+        let path = format!(
+            "/repos/{}/{}/issues/comments/{comment_id}",
             self.repo_owner, self.repo_name
         );
         self.request_json(Method::GET, &path, None).await
@@ -286,6 +337,30 @@ impl GithubClient {
         }
 
         self.paginated_get(url.as_ref()).await
+    }
+
+    /// Paginate issue comments to exhaustion under `max_pages`.
+    ///
+    /// Fails when truncated so fingerprinting and comment recovery never
+    /// treat a partial comment list as complete.
+    pub async fn list_comments_paginated(
+        &self,
+        number: u64,
+        max_pages: u32,
+    ) -> Result<Vec<GithubIssueComment>> {
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/repos/{}/{}/issues/{number}/comments",
+            self.base_url, self.repo_owner, self.repo_name
+        ))
+        .map_err(|err| SymphonyError::GithubApiRequest(format!("invalid comments URL: {err}")))?;
+
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("per_page", "100");
+        }
+
+        self.paginated_get_capped(url.as_ref(), max_pages, "comments")
+            .await
     }
 
     pub async fn create_issue(&self, title: &str, body: &str) -> Result<GithubIssue> {
@@ -392,6 +467,44 @@ impl GithubClient {
                 max_pages = MAX_PAGES,
                 "GitHub paginated response truncated at page cap; results may be incomplete"
             );
+        }
+
+        Ok(results)
+    }
+
+    async fn paginated_get_capped<T: DeserializeOwned>(
+        &self,
+        initial_url: &str,
+        max_pages: u32,
+        resource: &str,
+    ) -> Result<Vec<T>> {
+        if max_pages == 0 {
+            return Err(SymphonyError::GithubApiRequest(format!(
+                "GitHub {resource} pagination max_pages must be greater than zero"
+            )));
+        }
+
+        let mut results = Vec::new();
+        let mut next_url = Some(initial_url.to_string());
+        let mut pages_fetched = 0u32;
+
+        while let Some(current_url) = next_url.take() {
+            if pages_fetched >= max_pages {
+                return Err(SymphonyError::GithubApiRequest(format!(
+                    "GitHub {resource} pagination truncated at max_pages={max_pages}; refusing partial results"
+                )));
+            }
+
+            let response = self.request(Method::GET, &current_url, None).await?;
+            let extracted_next = extract_next_link(response.headers());
+            let page: Vec<T> = response.json().await.map_err(|err| {
+                SymphonyError::GithubApiRequest(format!(
+                    "failed to decode paginated GitHub response JSON: {err}"
+                ))
+            })?;
+            results.extend(page);
+            pages_fetched += 1;
+            next_url = extracted_next;
         }
 
         Ok(results)

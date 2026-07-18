@@ -145,6 +145,23 @@ export interface CodexTotalsResponse {
   seconds_running: number;
 }
 
+export interface TriageSessionResponse {
+  issue_identifier: string;
+  run_id: string;
+  stage_run_id: string;
+  attempt: number;
+  harness: string;
+  model?: string | null;
+  started_at: string;
+  last_activity_at?: string | null;
+  last_event?: string | null;
+  last_event_message?: string | null;
+  session_id?: string | null;
+  current_tool_name?: string | null;
+  current_tool_args_preview?: string | null;
+  total_tokens?: number;
+}
+
 export interface SymphonyStateResponse {
   tracker_project_url?: string | null;
   running?: Record<string, RunAttemptResponse>;
@@ -154,6 +171,8 @@ export interface SymphonyStateResponse {
   blocked: BlockedIssueResponse[];
   pending_escalations?: PendingEscalationResponse[];
   completed: CompletedIssueResponse[];
+  /** In-flight A1 triage attempts (optional for older Symphony builds). */
+  triage_sessions?: TriageSessionResponse[];
   polling?: {
     checking?: boolean;
     next_poll_in_ms?: number;
@@ -406,6 +425,7 @@ function validateSymphonyStateResponse(value: unknown, details: Record<string, u
   validateOptionalRecord(value, "running_sessions", details);
   validateOptionalRecord(value, "running_session_info", details);
   validateOptionalArray(value, "claimed", details);
+  validateOptionalTriageSessions(value, details);
   validatePendingEscalations(value, "pending_escalations", details);
   validateSharedContextSummary(value.shared_context, details, "shared_context", throwNonSymphonyState);
   validateSupervisorSnapshot(value.supervisor, details, "supervisor", throwNonSymphonyState);
@@ -746,6 +766,31 @@ function validateOptionalArray(value: Record<string, unknown>, field: string, de
   if (!Array.isArray(fieldValue)) {
     throwNonSymphonyState(details, "state response field had an invalid shape", { field: detailField, expected: "array" });
   }
+}
+
+function validateOptionalTriageSessions(value: Record<string, unknown>, details: Record<string, unknown>): void {
+  const fieldValue = value.triage_sessions;
+  if (fieldValue === undefined) return;
+  if (!Array.isArray(fieldValue)) {
+    throwNonSymphonyState(details, "state response field had an invalid shape", {
+      field: "triage_sessions",
+      expected: "array",
+    });
+  }
+  fieldValue.forEach((entry, index) => {
+    if (!isRecord(entry)) {
+      throwNonSymphonyState(details, "state response field had an invalid shape", {
+        field: `triage_sessions.${index}`,
+        expected: "object",
+      });
+    }
+    validateRequiredString(entry, "issue_identifier", details, `triage_sessions.${index}.issue_identifier`);
+    validateRequiredString(entry, "run_id", details, `triage_sessions.${index}.run_id`);
+    validateRequiredString(entry, "stage_run_id", details, `triage_sessions.${index}.stage_run_id`);
+    validateRequiredNumber(entry, "attempt", details, `triage_sessions.${index}.attempt`);
+    validateRequiredString(entry, "harness", details, `triage_sessions.${index}.harness`);
+    validateRequiredString(entry, "started_at", details, `triage_sessions.${index}.started_at`);
+  });
 }
 
 function validateOptionalRecord(value: Record<string, unknown>, field: string, details: Record<string, unknown>, detailField = field): void {

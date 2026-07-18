@@ -1,6 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
-import { buildEscalationRows, buildIssueRows, buildWorkerRows, formatEventRows, type EscalationRow, type IssueRow, type WorkerRow } from "./console-model.ts";
+import { buildEscalationRows, buildIssueRows, buildTriageRows, buildWorkerRows, formatEventRows, type EscalationRow, type IssueRow, type TriageRow, type WorkerRow } from "./console-model.ts";
 import { startSymphonyEventStream, type EventStreamHandle } from "./event-stream.ts";
 import type { SymphonyEventEnvelope, SymphonyStateResponse } from "./http-client.ts";
 import type { SymphonyRuntime } from "./runtime.ts";
@@ -124,6 +124,8 @@ export class SymphonyConsoleComponent {
     const escalationRows: EscalationRow[] = buildEscalationRows(symphonyState);
     this.clampSelection(issueRows.length + escalationRows.length);
     const runningRows = issueRows.filter((row) => row.kind === "running");
+    const triageRows = issueRows.filter((row) => row.kind === "triage");
+    const triageDetailRows: TriageRow[] = buildTriageRows(symphonyState);
     const retryRows = issueRows.filter((row) => row.kind === "retry");
     const blockedRows = issueRows.filter((row) => row.kind === "blocked");
     const completedRows = issueRows.filter((row) => row.kind === "completed");
@@ -132,6 +134,10 @@ export class SymphonyConsoleComponent {
     const connection = state.attachedBaseUrl ? color(theme, "success", "attached") : color(theme, "error", "detached");
     const polling = health?.pollingChecking ? color(theme, "warning", "checking") : color(theme, "success", "idle");
     const consoleWidth = Math.max(44, width);
+    const triageOffset = runningRows.length;
+    const retryOffset = triageOffset + triageRows.length;
+    const blockedOffset = retryOffset + retryRows.length;
+    const completedOffset = blockedOffset + blockedRows.length;
     const lines = [
       color(theme, "accent", bold(theme, "Symphony Console")),
       "",
@@ -145,13 +151,14 @@ export class SymphonyConsoleComponent {
       ], consoleWidth, theme),
       "",
       ...boxLines("Worker Summary", [
-        `workers: ${color(theme, "success", `running: ${health?.runningCount ?? workers.length}`)} | ${color(theme, "warning", `retry: ${health?.retryCount ?? retryRows.length}`)} | ${color(theme, "error", `blocked: ${health?.blockedCount ?? blockedRows.length}`)} | ${color(theme, "accent", `completed: ${health?.completedCount ?? completedRows.length}`)}`,
+        `workers: ${color(theme, "success", `running: ${health?.runningCount ?? workers.length}`)} | ${color(theme, "accent", `triage: ${triageRows.length}`)} | ${color(theme, "warning", `retry: ${health?.retryCount ?? retryRows.length}`)} | ${color(theme, "error", `blocked: ${health?.blockedCount ?? blockedRows.length}`)} | ${color(theme, "accent", `completed: ${health?.completedCount ?? completedRows.length}`)}`,
       ], consoleWidth, theme),
       "",
       ...boxLines("Running Workers", renderIssueTable(runningRows, this.selectedIndex, 0, theme), consoleWidth, theme),
-      ...boxLines("Retry Queue", renderIssueTable(retryRows, this.selectedIndex, runningRows.length, theme), consoleWidth, theme),
-      ...boxLines("Blocked Issues", renderIssueTable(blockedRows, this.selectedIndex, runningRows.length + retryRows.length, theme), consoleWidth, theme),
-      ...boxLines("Completed Issues", renderIssueTable(completedRows, this.selectedIndex, runningRows.length + retryRows.length + blockedRows.length, theme), consoleWidth, theme),
+      ...boxLines("Triage", renderTriageTable(triageDetailRows, this.selectedIndex, triageOffset, theme), consoleWidth, theme),
+      ...boxLines("Retry Queue", renderIssueTable(retryRows, this.selectedIndex, retryOffset, theme), consoleWidth, theme),
+      ...boxLines("Blocked Issues", renderIssueTable(blockedRows, this.selectedIndex, blockedOffset, theme), consoleWidth, theme),
+      ...boxLines("Completed Issues", renderIssueTable(completedRows, this.selectedIndex, completedOffset, theme), consoleWidth, theme),
       ...boxLines("Selected Issue", renderSelectedIssueDetails(selectedIssue, state.console.showDetails, theme), consoleWidth, theme),
       ...boxLines("Pending Escalations", renderEscalationTable(escalationRows, this.selectedIndex - issueRows.length, theme), consoleWidth, theme),
       ...boxLines("Selected Escalation", renderSelectedEscalationDetails(escalationRows[this.selectedIndex - issueRows.length], state.console.showDetails, theme), consoleWidth, theme),
@@ -295,6 +302,27 @@ function renderIssueTable(rows: IssueRow[], selectedIndex: number, selectedOffse
   return lines;
 }
 
+function renderTriageTable(rows: TriageRow[], selectedIndex: number, selectedOffset: number, theme?: ConsoleTheme): string[] {
+  const lines = [color(theme, "dim", "sel issue    attempt harness  model                 event            message")];
+  if (rows.length === 0) return [...lines, color(theme, "dim", "-   none")];
+
+  for (const [index, row] of rows.entries()) {
+    const rowIndex = selectedOffset + index;
+    const selected = rowIndex === selectedIndex ? ">" : " ";
+    const line = [
+      selected,
+      pad(row.issueIdentifier, 8),
+      pad(row.attempt, 7),
+      pad(row.harness, 8),
+      pad(row.model, 21),
+      pad(row.lastEvent, 16),
+      row.message,
+    ].join(" ");
+    lines.push(rowIndex === selectedIndex ? selectedLine(theme, line) : line);
+  }
+  return lines;
+}
+
 function renderSelectedIssueDetails(issue: IssueRow | undefined, showDetails: boolean, theme?: ConsoleTheme): string[] {
   if (!showDetails) return [];
   if (!issue) return [color(theme, "dim", "none")];
@@ -314,6 +342,15 @@ function renderSelectedIssueDetails(issue: IssueRow | undefined, showDetails: bo
       `worker host: ${issue.workerHost}`,
       `workspace: ${color(theme, "dim", issue.workspacePath)}`,
       `error: ${issue.errorPreview === "-" ? color(theme, "dim", issue.errorPreview) : color(theme, "error", issue.errorPreview)}`,
+    );
+  } else if (issue.kind === "triage") {
+    lines.push(
+      `stage: triage`,
+      `attempt: ${issue.attempt}`,
+      `harness: ${issue.workerHost}`,
+      `last activity: ${color(theme, "dim", issue.lastActivity)}`,
+      `session: ${color(theme, "dim", issue.workspacePath)}`,
+      `detail: ${issue.title}`,
     );
   } else if (issue.kind === "retry") {
     lines.push(

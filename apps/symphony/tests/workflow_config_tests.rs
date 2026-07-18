@@ -294,6 +294,223 @@ fn test_config_defaults() {
     assert_eq!(config.pi_agent.stall_timeout_ms, 300_000);
     assert_eq!(config.server.public_url, None);
     assert!(config.notifications.is_none());
+    assert!(!config.triage.enabled);
+    assert_eq!(
+        config.triage.mode,
+        symphony::triage::domain::TriageMode::Preview
+    );
+    assert_eq!(config.triage.intake_label, "needs-triage");
+    assert_eq!(config.triage.prompt, "prompts/triage.md");
+    assert_eq!(config.triage.turn_timeout_ms, 900_000);
+    assert_eq!(config.triage.max_attempts, 3);
+    assert_eq!(config.triage.max_intake_pages, 100);
+    assert_eq!(config.triage.routes.implement.label, "ready-for-agent");
+    assert_eq!(
+        config.triage.routes.implement.state.as_deref(),
+        Some("Todo")
+    );
+    assert_eq!(config.storage.path, None);
+    assert_eq!(config.storage.busy_timeout_ms, 5_000);
+}
+
+#[test]
+fn test_triage_preview_mode_parses_with_routes() {
+    let yaml_str = r#"
+tracker:
+  kind: github
+  api_key: github-test-token
+  repo_owner: kata-sh
+  repo_name: kata-mono
+  github_project_owner_type: org
+  github_project_number: 42
+agent:
+  name: pi
+storage:
+  path: ~/symphony-state.sqlite3
+  busy_timeout_ms: 2500
+triage:
+  enabled: true
+  mode: preview
+  intake_label: needs-triage
+  prompt: prompts/custom-triage.md
+  model: anthropic/claude-sonnet-4-6
+  turn_timeout_ms: 600000
+  max_attempts: 2
+  max_intake_pages: 50
+  routes:
+    implement:
+      label: ready-for-agent
+      state: Todo
+    spec:
+      label: ready-to-spec
+    needs_information:
+      label: needs-info
+    park:
+      label: wait-to-implement
+    human_owned:
+      label: ready-for-human
+"#;
+
+    let raw: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
+    let config = from_workflow(&raw).expect("triage preview config should parse");
+
+    assert!(config.triage.enabled);
+    assert_eq!(
+        config.triage.mode,
+        symphony::triage::domain::TriageMode::Preview
+    );
+    assert_eq!(config.triage.intake_label, "needs-triage");
+    assert_eq!(config.triage.prompt, "prompts/custom-triage.md");
+    assert_eq!(
+        config.triage.model.as_deref(),
+        Some("anthropic/claude-sonnet-4-6")
+    );
+    assert_eq!(config.triage.turn_timeout_ms, 600_000);
+    assert_eq!(config.triage.max_attempts, 2);
+    assert_eq!(config.triage.max_intake_pages, 50);
+    assert_eq!(config.triage.routes.implement.label, "ready-for-agent");
+    assert_eq!(
+        config.triage.routes.implement.state.as_deref(),
+        Some("Todo")
+    );
+    assert_eq!(config.triage.routes.spec.label, "ready-to-spec");
+    assert_eq!(config.triage.routes.needs_information.label, "needs-info");
+    assert_eq!(config.triage.routes.park.label, "wait-to-implement");
+    assert_eq!(config.triage.routes.human_owned.label, "ready-for-human");
+    assert_eq!(config.storage.busy_timeout_ms, 2_500);
+    assert!(
+        config
+            .storage
+            .path
+            .as_deref()
+            .is_some_and(|path| path.ends_with("/symphony-state.sqlite3")
+                && !path.starts_with('~')),
+        "storage.path should expand tilde, got: {:?}",
+        config.storage.path
+    );
+
+    validate(&config).expect("valid triage preview config should pass validation");
+}
+
+#[test]
+fn test_triage_rejects_duplicate_route_labels() {
+    let yaml_str = r#"
+tracker:
+  kind: github
+  api_key: github-test-token
+  repo_owner: kata-sh
+  repo_name: kata-mono
+  github_project_owner_type: org
+  github_project_number: 42
+triage:
+  enabled: true
+  routes:
+    implement:
+      label: ready-for-agent
+    spec:
+      label: ready-for-agent
+"#;
+
+    let raw: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
+    let config = from_workflow(&raw).expect("duplicate labels should parse");
+    let err = validate(&config).expect_err("duplicate route labels must fail validation");
+    assert!(
+        matches!(
+            err,
+            SymphonyError::InvalidWorkflowConfig(ref msg)
+                if msg.contains("triage route labels must be distinct")
+                    && msg.contains("ready-for-agent")
+        ),
+        "expected duplicate route label validation failure, got: {err}"
+    );
+}
+
+#[test]
+fn test_triage_rejects_model_when_agent_is_codex() {
+    let yaml_str = r#"
+tracker:
+  kind: github
+  api_key: github-test-token
+  repo_owner: kata-sh
+  repo_name: kata-mono
+  github_project_owner_type: org
+  github_project_number: 42
+agent:
+  name: codex
+triage:
+  enabled: true
+  model: anthropic/claude-sonnet-4-6
+"#;
+
+    let raw: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
+    let config = from_workflow(&raw).expect("codex triage model config should parse");
+    let err = validate(&config).expect_err("triage.model with codex must fail validation");
+    assert!(
+        matches!(
+            err,
+            SymphonyError::InvalidWorkflowConfig(ref msg)
+                if msg.contains("triage.model is not supported when agent.name is 'codex'")
+        ),
+        "expected codex triage.model rejection, got: {err}"
+    );
+}
+
+#[test]
+fn test_triage_rejects_route_label_equal_to_intake_label() {
+    let yaml_str = r#"
+tracker:
+  kind: github
+  api_key: github-test-token
+  repo_owner: kata-sh
+  repo_name: kata-mono
+  github_project_owner_type: org
+  github_project_number: 42
+triage:
+  enabled: true
+  intake_label: needs-triage
+  routes:
+    park:
+      label: needs-triage
+"#;
+
+    let raw: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
+    let config = from_workflow(&raw).expect("intake-equal route label should parse");
+    let err = validate(&config).expect_err("route label equal to intake must fail validation");
+    assert!(
+        matches!(
+            err,
+            SymphonyError::InvalidWorkflowConfig(ref msg)
+                if msg.contains("must not equal triage.intake_label")
+                    && msg.contains("park")
+        ),
+        "expected intake-equal route label rejection, got: {err}"
+    );
+}
+
+#[test]
+fn test_storage_busy_timeout_ms_zero_fails_validation() {
+    let yaml_str = r#"
+tracker:
+  kind: linear
+  api_key: test-key
+  project_slug: test-project
+storage:
+  busy_timeout_ms: 0
+"#;
+
+    let raw: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
+    let config = from_workflow(&raw).expect("busy_timeout_ms=0 should parse");
+    assert_eq!(config.storage.busy_timeout_ms, 0);
+
+    let err = validate(&config).expect_err("busy_timeout_ms=0 must fail validation");
+    assert!(
+        matches!(
+            err,
+            SymphonyError::InvalidWorkflowConfig(ref msg)
+                if msg.contains("storage.busy_timeout_ms must be greater than 0")
+        ),
+        "expected busy_timeout_ms validation failure, got: {err}"
+    );
 }
 
 #[test]
