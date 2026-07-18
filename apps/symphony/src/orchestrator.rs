@@ -1481,6 +1481,13 @@ impl SnapshotHandle {
     fn publish(&self, snapshot: OrchestratorSnapshot) {
         *self.inner.write().expect("snapshot rwlock poisoned") = snapshot;
     }
+
+    /// Patch only `triage_sessions` so live triage progress can refresh the
+    /// TUI/API without rebuilding the full orchestrator snapshot.
+    pub fn update_triage_sessions(&self, sessions: Vec<crate::domain::TriageSessionInfo>) {
+        let mut guard = self.inner.write().expect("snapshot rwlock poisoned");
+        guard.triage_sessions = sessions;
+    }
 }
 
 // ── Refresh Control Channel (S07 control seam) ──────────────────────────
@@ -4540,6 +4547,13 @@ impl Orchestrator {
     }
 
     pub fn attach_triage_runtime(&mut self, runtime: TriageRuntime) {
+        if let Some(handle) = self.snapshot_handle.clone() {
+            if let Ok(mut registry) = runtime.sessions().lock() {
+                registry.set_on_change(std::sync::Arc::new(move |sessions| {
+                    handle.update_triage_sessions(sessions);
+                }));
+            }
+        }
         self.triage_runtime = Some(runtime);
     }
 
@@ -4707,6 +4721,17 @@ impl Orchestrator {
                 last_poll_at: self.last_poll_at.map(|t| t.to_rfc3339()),
                 poll_count: self.poll_count,
             },
+            triage_sessions: self
+                .triage_runtime
+                .as_ref()
+                .map(|runtime| {
+                    runtime
+                        .sessions()
+                        .lock()
+                        .map(|registry| registry.list())
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default(),
         }
     }
 

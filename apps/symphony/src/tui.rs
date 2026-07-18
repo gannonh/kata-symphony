@@ -581,9 +581,15 @@ fn draw_dashboard(
     let summary_height = summary_lines_data.len() as u16;
     let has_blocked = !snapshot.blocked.is_empty();
     let has_pinned_errors = activity_log.has_errors();
+    let has_triage = !snapshot.triage_sessions.is_empty();
     let blocked_height = if has_blocked {
         // borders (2) + header (1) + data rows
         (snapshot.blocked.len() as u16 + 3).min(8)
+    } else {
+        0
+    };
+    let triage_height = if has_triage {
+        (snapshot.triage_sessions.len() as u16 + 4).min(9)
     } else {
         0
     };
@@ -593,6 +599,7 @@ fn draw_dashboard(
         .constraints([
             Constraint::Length(summary_height),
             Constraint::Length(RUNNING_SESSIONS_HEIGHT),
+            Constraint::Length(triage_height),
             Constraint::Length(blocked_height),
             Constraint::Length(7),
             Constraint::Length(5),
@@ -645,6 +652,49 @@ fn draw_dashboard(
     );
     frame.render_widget(running_table, sections[1]);
 
+    // Triage attempts (between Running and Blocked)
+    if has_triage {
+        let triage_table = Table::new(
+            triage_rows(snapshot, now),
+            [
+                Constraint::Length(2),
+                Constraint::Length(10),
+                Constraint::Length(12),
+                Constraint::Length(14),
+                Constraint::Length(8),
+                Constraint::Length(LAST_EVENT_COLUMN_WIDTH),
+                Constraint::Min(16),
+                Constraint::Length(14),
+                Constraint::Length(12),
+                Constraint::Min(20),
+                Constraint::Length(10),
+            ],
+        )
+        .header(
+            Row::new(vec![
+                Cell::from(""),
+                Cell::from("ID"),
+                Cell::from("Session"),
+                Cell::from("State"),
+                Cell::from("Turn"),
+                Cell::from("Last Event"),
+                Cell::from("Message"),
+                Cell::from("Last Activity"),
+                Cell::from("Tokens"),
+                Cell::from("Model"),
+                Cell::from("Harness"),
+            ])
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .block(
+            Block::default()
+                .title("Triage")
+                .title_style(Style::default().fg(Color::Cyan))
+                .borders(Borders::ALL),
+        );
+        frame.render_widget(triage_table, sections[2]);
+    }
+
     // Blocked section (between Running and Retry)
     if has_blocked {
         let blocked_header = Row::new(vec![
@@ -683,7 +733,7 @@ fn draw_dashboard(
                 .title_style(Style::default().fg(Color::Yellow))
                 .borders(Borders::ALL),
         );
-        frame.render_widget(blocked_table, sections[2]);
+        frame.render_widget(blocked_table, sections[3]);
     }
 
     let retry_header = Row::new(vec![
@@ -707,29 +757,29 @@ fn draw_dashboard(
     )
     .header(retry_header)
     .block(Block::default().title("Retry Queue").borders(Borders::ALL));
-    frame.render_widget(retry_table, sections[3]);
+    frame.render_widget(retry_table, sections[4]);
 
     let completed_items = completed_items(snapshot);
     let completed_list =
         List::new(completed_items).block(Block::default().title("Completed").borders(Borders::ALL));
-    frame.render_widget(completed_list, sections[4]);
+    frame.render_widget(completed_list, sections[5]);
 
     if has_pinned_errors {
-        let pinned_error_items = pinned_error_items(activity_log, now, sections[5].height);
+        let pinned_error_items = pinned_error_items(activity_log, now, sections[6].height);
         let pinned_error_list = List::new(pinned_error_items).block(
             Block::default()
                 .title("Pinned Errors")
                 .title_style(Style::default().fg(Color::Red))
                 .borders(Borders::ALL),
         );
-        frame.render_widget(pinned_error_list, sections[5]);
+        frame.render_widget(pinned_error_list, sections[6]);
     }
 
-    let activity_items = activity_items(activity_log, now, sections[6].height);
+    let activity_items = activity_items(activity_log, now, sections[7].height);
     let activity_title = format!("Activity Log (last {})", activity_log.len());
     let activity_list = List::new(activity_items)
         .block(Block::default().title(activity_title).borders(Borders::ALL));
-    frame.render_widget(activity_list, sections[6]);
+    frame.render_widget(activity_list, sections[7]);
 
     let polling_last = snapshot
         .polling
@@ -747,7 +797,7 @@ fn draw_dashboard(
     let rate_summary = rate_summary(snapshot, now);
     let footer = Paragraph::new(vec![Line::from(polling_line), Line::from(rate_summary)])
         .wrap(Wrap { trim: true });
-    frame.render_widget(footer, sections[7]);
+    frame.render_widget(footer, sections[8]);
 }
 
 fn running_rows(snapshot: &OrchestratorSnapshot, now: DateTime<Utc>) -> Vec<Row<'static>> {
@@ -864,6 +914,53 @@ fn running_rows(snapshot: &OrchestratorSnapshot, now: DateTime<Utc>) -> Vec<Row<
             Cell::from(""),
             Cell::from(""),
             Cell::from(""),
+        ]));
+    }
+
+    rows
+}
+
+fn triage_rows(snapshot: &OrchestratorSnapshot, now: DateTime<Utc>) -> Vec<Row<'static>> {
+    let mut rows = Vec::new();
+
+    for session in &snapshot.triage_sessions {
+        let last_activity = session.last_activity_at.or(Some(session.started_at));
+        let last_activity_text = format_age(last_activity, now);
+        let state = format!("triage#{}", session.attempt);
+        let activity_message = format_activity_message(
+            session.current_tool_name.as_deref(),
+            session.current_tool_args_preview.as_deref(),
+            session.last_event_message.as_deref(),
+        );
+        let activity_text = truncate_for_display(&activity_message, MESSAGE_COLUMN_TRUNCATE_WIDTH);
+
+        rows.push(Row::new(vec![
+            Cell::from(status_dot(
+                session.last_event.as_deref(),
+                last_activity,
+                now,
+                false,
+            )),
+            Cell::from(session.issue_identifier.clone()),
+            Cell::from(compact_session_id(session.session_id.as_deref())),
+            Cell::from(state),
+            Cell::from("1"),
+            Cell::from(truncate_for_display(
+                session.last_event.as_deref().unwrap_or("-"),
+                LAST_EVENT_COLUMN_WIDTH as usize,
+            )),
+            Cell::from(activity_text),
+            Cell::from(last_activity_text),
+            Cell::from(format_tokens(session.total_tokens)),
+            Cell::from(session.model.clone().unwrap_or_else(|| "-".to_string())),
+            Cell::from(session.harness.clone()),
+        ]));
+    }
+
+    if rows.is_empty() {
+        rows.push(Row::new(vec![
+            Cell::from(""),
+            Cell::from("(none)"),
         ]));
     }
 
@@ -1301,6 +1398,7 @@ mod tests {
                 last_poll_at: None,
                 poll_count: 0,
             },
+            triage_sessions: Vec::new(),
         }
     }
 

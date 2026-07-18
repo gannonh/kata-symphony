@@ -165,6 +165,7 @@ fn fixture_snapshot() -> OrchestratorSnapshot {
             last_poll_at: Some("2026-03-21T12:00:00Z".to_string()),
             poll_count: 42,
         },
+        triage_sessions: vec![],
     }
 }
 

@@ -122,6 +122,7 @@ fn fixture_snapshot() -> OrchestratorSnapshot {
             last_poll_at: Some(Utc::now().to_rfc3339()),
             poll_count: 1,
         },
+        triage_sessions: vec![],
     }
 }
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildEscalationRows, buildIssueRows, buildWorkerRows, formatEventRows } from "./console-model.ts";
+import { buildEscalationRows, buildIssueRows, buildTriageRows, buildWorkerRows, formatEventRows } from "./console-model.ts";
 import type { SymphonyEventEnvelope, SymphonyStateResponse } from "./http-client.ts";
 
 function stateFixture(): SymphonyStateResponse {
@@ -124,6 +124,50 @@ describe("console model", () => {
       status: "completed",
       completedAt: "2026-05-14T13:00:00Z",
     });
+  });
+
+  it("includes triage sessions between running and retry rows", () => {
+    const state = stateFixture();
+    state.triage_sessions = [
+      {
+        issue_identifier: "#1",
+        run_id: "run-1",
+        stage_run_id: "stage-1",
+        attempt: 2,
+        harness: "pi",
+        model: "openai-codex/gpt-5.6-luna",
+        started_at: "2026-05-14T12:00:00Z",
+        last_activity_at: "2026-05-14T12:00:05Z",
+        last_event: "tool_execution_start",
+        last_event_message: "running read",
+        current_tool_name: "read",
+        current_tool_args_preview: "README.md",
+        total_tokens: 12,
+      },
+    ];
+
+    const issueRows = buildIssueRows(state);
+    const triageRows = buildTriageRows(state);
+
+    expect(issueRows.map((row) => `${row.kind}:${row.issueIdentifier}`)).toEqual([
+      "running:SIM-123",
+      "running:SIM-777",
+      "triage:#1",
+    ]);
+    expect(triageRows).toEqual([
+      {
+        issueIdentifier: "#1",
+        stageRunId: "stage-1",
+        attempt: "2",
+        harness: "pi",
+        model: "openai-codex/gpt-5.6-luna",
+        status: "triage#2",
+        lastEvent: "tool_execution_start",
+        message: "read: README.md",
+        lastActivity: "2026-05-14T12:00:05Z",
+        tokens: "12",
+      },
+    ]);
   });
 
   it("rounds retry wait times up to the next second", () => {

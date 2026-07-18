@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use uuid::Uuid;
 
-use crate::domain::{AgentBackend, Issue, ServiceConfig};
+use crate::domain::{AgentBackend, Issue, ServiceConfig, TriageSessionInfo, TriageSessionRegistry};
 use crate::error::{Result, SymphonyError};
 use crate::path_safety;
 use crate::repo_url::repo_is_remote;
@@ -22,8 +22,9 @@ use crate::triage::publisher::{
     IneligiblePublishRequest, PreviewPublishRequest, PreviewPublisher, TriageCommentPort,
 };
 use crate::triage::runner::{
-    effective_pi_model, TriageHarness, TriageIssueIdentity, TriageRunner,
-    TriageRunnerFailureKind, TriageRunnerOutcome, TriageRunnerRequest, TriageRunnerSuccess,
+    effective_pi_model, TriageHarness, TriageIssueIdentity, TriageProgress,
+    TriageProgressSink, TriageRunner, TriageRunnerFailureKind, TriageRunnerOutcome,
+    TriageRunnerRequest, TriageRunnerSuccess,
 };
 use crate::triage::store::{
     ClaimAttemptRequest, CreatePublicationIntentRequest, FactoryRunStore, StoreArtifactRequest,
@@ -85,6 +86,7 @@ pub struct TriageCoordinator<S, I, C, X = DefaultTriageExecutor> {
     executor: X,
     config: TriageCoordinatorConfig,
     events: Option<Arc<dyn EventEmitter>>,
+    sessions: Option<Arc<std::sync::Mutex<TriageSessionRegistry>>>,
     max_pages: u32,
 }
 
@@ -120,6 +122,7 @@ where
             executor,
             config,
             events: None,
+            sessions: None,
             max_pages: 100,
         }
     }
@@ -127,6 +130,58 @@ where
     pub fn with_events(mut self, events: Arc<dyn EventEmitter>) -> Self {
         self.events = Some(events);
         self
+    }
+
+    /// Attach the shared triage session registry used by the orchestrator
+    /// snapshot so running attempts are visible to TUI/API consumers.
+    pub fn with_session_registry(
+        mut self,
+        registry: Arc<std::sync::Mutex<TriageSessionRegistry>>,
+    ) -> Self {
+        self.sessions = Some(registry);
+        self
+    }
+
+    fn session_begin(&self, info: TriageSessionInfo) {
+        if let Some(registry) = &self.sessions {
+            if let Ok(mut guard) = registry.lock() {
+                guard.begin(info);
+            }
+        }
+    }
+
+    fn session_finish(&self, stage_run_id: &str) {
+        if let Some(registry) = &self.sessions {
+            if let Ok(mut guard) = registry.lock() {
+                guard.finish(stage_run_id);
+            }
+        }
+    }
+
+    fn progress_sink(&self, stage_run_id: &str) -> Option<TriageProgressSink> {
+        let registry = self.sessions.clone()?;
+        let stage_run_id = stage_run_id.to_string();
+        Some(Arc::new(move |progress: TriageProgress| {
+            if let Ok(mut guard) = registry.lock() {
+                guard.update(&stage_run_id, |info| {
+                    if let Some(event) = &progress.last_event {
+                        info.last_event = Some(event.clone());
+                    }
+                    if let Some(message) = &progress.message {
+                        info.last_event_message = Some(message.clone());
+                    }
+                    info.current_tool_name = progress.current_tool_name.clone();
+                    info.current_tool_args_preview =
+                        progress.current_tool_args_preview.clone();
+                    if let Some(session_id) = &progress.session_id {
+                        info.session_id = Some(session_id.clone());
+                    }
+                    if let Some(tokens) = progress.total_tokens {
+                        info.total_tokens = tokens;
+                    }
+                });
+            }
+        }))
     }
 
     pub fn store_mut(&mut self) -> &mut S {
@@ -472,6 +527,22 @@ where
         )?;
 
         let rendered_prompt = render_triage_prompt(prompt_template, issue, service)?;
+        self.session_begin(TriageSessionInfo {
+            issue_identifier: issue.identifier.clone(),
+            run_id: stage.run_id.clone(),
+            stage_run_id: stage.stage_run_id.clone(),
+            attempt: stage.attempt,
+            harness: triage_harness_name(harness).to_string(),
+            model: model.map(str::to_string),
+            started_at: Utc::now(),
+            last_activity_at: None,
+            last_event: Some("triage_started".to_string()),
+            last_event_message: Some("preparing workspace".to_string()),
+            session_id: None,
+            current_tool_name: None,
+            current_tool_args_preview: None,
+            total_tokens: 0,
+        });
         let outcome = self
             .executor
             .execute(TriageRunnerRequest {
@@ -489,8 +560,11 @@ where
                     title: issue.title.clone(),
                 },
                 codex: (harness == TriageHarness::Codex).then(|| service.codex.clone()),
+                progress: self.progress_sink(&stage.stage_run_id),
             })
-            .await?;
+            .await;
+        self.session_finish(&stage.stage_run_id);
+        let outcome = outcome?;
 
         match outcome {
             TriageRunnerOutcome::Success(success) => {

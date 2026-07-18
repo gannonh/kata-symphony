@@ -1321,6 +1321,87 @@ pub struct SharedContextSummary {
     pub newest_entry_at: Option<DateTime<Utc>>,
 }
 
+/// Live view of one running triage attempt, surfaced to TUI/API consumers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TriageSessionInfo {
+    pub issue_identifier: String,
+    pub run_id: String,
+    pub stage_run_id: String,
+    pub attempt: u32,
+    pub harness: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub started_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_activity_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_event: Option<String>,
+    #[serde(default)]
+    pub last_event_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tool_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_tool_args_preview: Option<String>,
+    #[serde(default)]
+    pub total_tokens: u64,
+}
+
+/// Shared registry of in-flight triage attempts (orchestrator ↔ coordinator).
+#[derive(Default)]
+pub struct TriageSessionRegistry {
+    sessions: std::collections::BTreeMap<String, TriageSessionInfo>,
+    /// Called after begin/update/finish so snapshot consumers see live state.
+    on_change: Option<std::sync::Arc<dyn Fn(Vec<TriageSessionInfo>) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for TriageSessionRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TriageSessionRegistry")
+            .field("sessions", &self.sessions)
+            .field("on_change", &self.on_change.as_ref().map(|_| "set"))
+            .finish()
+    }
+}
+
+impl TriageSessionRegistry {
+    pub fn set_on_change(
+        &mut self,
+        callback: std::sync::Arc<dyn Fn(Vec<TriageSessionInfo>) + Send + Sync>,
+    ) {
+        self.on_change = Some(callback);
+    }
+
+    pub fn begin(&mut self, info: TriageSessionInfo) {
+        self.sessions.insert(info.stage_run_id.clone(), info);
+        self.notify();
+    }
+
+    pub fn update(&mut self, stage_run_id: &str, update: impl FnOnce(&mut TriageSessionInfo)) {
+        if let Some(info) = self.sessions.get_mut(stage_run_id) {
+            update(info);
+            info.last_activity_at = Some(Utc::now());
+            self.notify();
+        }
+    }
+
+    pub fn finish(&mut self, stage_run_id: &str) {
+        self.sessions.remove(stage_run_id);
+        self.notify();
+    }
+
+    pub fn list(&self) -> Vec<TriageSessionInfo> {
+        self.sessions.values().cloned().collect()
+    }
+
+    fn notify(&self) {
+        if let Some(callback) = &self.on_change {
+            callback(self.list());
+        }
+    }
+}
+
 /// Read-only serializable view of orchestrator state for the HTTP API.
 /// Uses `BTreeMap` for deterministic JSON key ordering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1348,6 +1429,8 @@ pub struct OrchestratorSnapshot {
     pub codex_totals: CodexTotals,
     pub codex_rate_limits: Option<RateLimitInfo>,
     pub polling: PollingSnapshot,
+    #[serde(default)]
+    pub triage_sessions: Vec<TriageSessionInfo>,
 }
 
 // ── RefreshRequestOutcome (S07 HTTP control seam) ─────────────────────

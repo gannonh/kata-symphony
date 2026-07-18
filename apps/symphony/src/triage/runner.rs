@@ -42,7 +42,7 @@ pub fn effective_pi_model(triage_model: Option<&str>, agent_model: Option<&str>)
         })
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TriageRunnerRequest {
     pub attempt_id: String,
     pub workspace_root: PathBuf,
@@ -58,6 +58,43 @@ pub struct TriageRunnerRequest {
     pub issue: TriageIssueIdentity,
     /// Codex policy settings, when `harness == Codex`.
     pub codex: Option<CodexConfig>,
+    /// Live progress sink; events arrive as the turn executes.
+    pub progress: Option<TriageProgressSink>,
+}
+
+/// Callback receiving structured progress during a triage turn.
+pub type TriageProgressSink =
+    std::sync::Arc<dyn Fn(TriageProgress) + Send + Sync>;
+
+#[derive(Debug, Clone, Default)]
+pub struct TriageProgress {
+    /// Last notable event name (e.g. `tool_execution_start`, `turn_end`).
+    pub last_event: Option<String>,
+    /// Human-readable summary of the last event.
+    pub message: Option<String>,
+    /// Tool currently executing (cleared on tool end).
+    pub current_tool_name: Option<String>,
+    /// Short preview of the current tool's arguments.
+    pub current_tool_args_preview: Option<String>,
+    /// Session identifier when known (pi session id or codex thread-turn).
+    pub session_id: Option<String>,
+    /// Total tokens when the harness reports them.
+    pub total_tokens: Option<u64>,
+}
+
+impl std::fmt::Debug for TriageRunnerRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TriageRunnerRequest")
+            .field("attempt_id", &self.attempt_id)
+            .field("workspace_root", &self.workspace_root)
+            .field("repo_path", &self.repo_path)
+            .field("command", &self.command)
+            .field("turn_timeout_ms", &self.turn_timeout_ms)
+            .field("model", &self.model)
+            .field("harness", &self.harness)
+            .field("issue", &self.issue)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -275,7 +312,7 @@ async fn run_pi_turn(
         child_cmd.process_group(0);
     }
 
-    let child = match child_cmd.spawn() {
+    let mut child = match child_cmd.spawn() {
         Ok(child) => child,
         Err(err) => {
             return Err(failure(
@@ -286,14 +323,58 @@ async fn run_pi_turn(
     };
 
     let child_id = child.id();
+    let stdout = child.stdout.take().expect("stdout piped");
+    let stderr = child.stderr.take().expect("stderr piped");
     let turn_timeout = Duration::from_millis(request.turn_timeout_ms);
 
-    // wait_with_output drains stdout/stderr to completion (no pipe deadlock).
-    let wait_result = timeout(turn_timeout, child.wait_with_output()).await;
+    // Stream pi --mode json events for live progress while retaining the raw
+    // stream (bounded) for diagnostics.
+    let progress = request.progress.clone();
+    let mut stdout_reader = BufReader::new(stdout);
+    let stdout_pump = tokio::spawn(async move {
+        let mut raw: Vec<u8> = Vec::new();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match stdout_reader.read_line(&mut line).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    if raw.len() < CHILD_OUTPUT_TAIL * 4 {
+                        raw.extend_from_slice(line.as_bytes());
+                    }
+                    if let Some(sink) = &progress {
+                        if let Some(event) = parse_pi_json_event(line.trim()) {
+                            sink(event);
+                        }
+                    }
+                }
+            }
+        }
+        raw
+    });
+    let stderr_pump = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut raw: Vec<u8> = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            match tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if raw.len() < CHILD_OUTPUT_TAIL * 4 {
+                        raw.extend_from_slice(&buf[..n]);
+                    }
+                }
+            }
+        }
+        raw
+    });
 
-    let output = match wait_result {
-        Ok(Ok(output)) => output,
+    let wait_result = timeout(turn_timeout, child.wait()).await;
+    let status = match wait_result {
+        Ok(Ok(status)) => status,
         Ok(Err(err)) => {
+            stdout_pump.abort();
+            stderr_pump.abort();
             return Err(failure(
                 TriageRunnerFailureKind::Spawn,
                 format!("failed waiting for triage command: {err}"),
@@ -301,6 +382,8 @@ async fn run_pi_turn(
         }
         Err(_elapsed) => {
             terminate_process_group(child_id).await;
+            stdout_pump.abort();
+            stderr_pump.abort();
             return Err(failure(
                 TriageRunnerFailureKind::Timeout,
                 format!(
@@ -311,10 +394,13 @@ async fn run_pi_turn(
         }
     };
 
-    if !output.status.success() {
-        let code = output.status.code().unwrap_or(-1);
-        let stderr_tail = tail(&output.stderr, CHILD_OUTPUT_TAIL);
-        let stdout_tail = tail(&output.stdout, CHILD_OUTPUT_TAIL);
+    let stdout_raw = stdout_pump.await.unwrap_or_default();
+    let stderr_raw = stderr_pump.await.unwrap_or_default();
+
+    if !status.success() {
+        let code = status.code().unwrap_or(-1);
+        let stderr_tail = tail(&stderr_raw, CHILD_OUTPUT_TAIL);
+        let stdout_tail = tail(&stdout_raw, CHILD_OUTPUT_TAIL);
         return Err(failure(
             TriageRunnerFailureKind::NonZeroExit,
             format!(
@@ -326,8 +412,76 @@ async fn run_pi_turn(
     Ok(StageUsage::default())
 }
 
+/// Map one `pi --mode json` line to a progress event.
+fn parse_pi_json_event(line: &str) -> Option<TriageProgress> {
+    if line.is_empty() {
+        return None;
+    }
+    let value: serde_json::Value = serde_json::from_str(line).ok()?;
+    let event_type = value.get("type")?.as_str()?;
+    match event_type {
+        "session" => Some(TriageProgress {
+            last_event: Some("session".to_string()),
+            message: Some("pi session started".to_string()),
+            session_id: value
+                .get("id")
+                .and_then(|id| id.as_str())
+                .map(str::to_string),
+            ..Default::default()
+        }),
+        "tool_execution_start" => {
+            let tool = value
+                .get("toolName")
+                .and_then(|name| name.as_str())
+                .unwrap_or("tool");
+            Some(TriageProgress {
+                last_event: Some("tool_execution_start".to_string()),
+                message: Some(format!("running {tool}")),
+                current_tool_name: Some(tool.to_string()),
+                current_tool_args_preview: value
+                    .get("args")
+                    .map(|args| preview_json(args, 120)),
+                ..Default::default()
+            })
+        }
+        "tool_execution_end" => Some(TriageProgress {
+            last_event: Some("tool_execution_end".to_string()),
+            message: value
+                .get("toolName")
+                .and_then(|name| name.as_str())
+                .map(|name| format!("finished {name}")),
+            ..Default::default()
+        }),
+        "turn_end" => Some(TriageProgress {
+            last_event: Some("turn_end".to_string()),
+            message: Some("turn completed".to_string()),
+            ..Default::default()
+        }),
+        "agent_end" => Some(TriageProgress {
+            last_event: Some("agent_end".to_string()),
+            message: Some("agent finished".to_string()),
+            ..Default::default()
+        }),
+        _ => None,
+    }
+}
+
+fn preview_json(value: &serde_json::Value, max: usize) -> String {
+    let rendered = match value {
+        serde_json::Value::String(text) => text.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    };
+    let compact = rendered.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.len() <= max {
+        compact
+    } else {
+        format!("{}…", &compact[..max])
+    }
+}
+
 /// Build the pi one-shot invocation: strip `--mode <m>`, force `-p --no-session`,
-/// append the rendered prompt as the final positional argument.
+/// use `--mode json` for a structured event stream, and append the rendered
+/// prompt as the final positional argument.
 fn build_pi_command(command: &[String], prompt: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut iter = command.iter().peekable();
@@ -346,6 +500,8 @@ fn build_pi_command(command: &[String], prompt: &str) -> Vec<String> {
     }
     out.push("-p".to_string());
     out.push("--no-session".to_string());
+    out.push("--mode".to_string());
+    out.push("json".to_string());
     out.push(prompt.to_string());
     out
 }
@@ -400,6 +556,7 @@ async fn run_codex_turn(
         Err(outcome) => return Err(outcome),
     };
 
+    let progress = request.progress.clone();
     let turn_result = crate::codex::app_server::run_turn(
         &mut handle,
         &request.prompt,
@@ -408,7 +565,13 @@ async fn run_codex_turn(
                 "dynamic tools are disabled for triage".to_string(),
             ))
         },
-        |_event| {},
+        move |event| {
+            if let Some(sink) = &progress {
+                if let Some(update) = codex_event_progress(&event) {
+                    sink(update);
+                }
+            }
+        },
     )
     .await;
     let _ = crate::codex::app_server::stop_session(handle).await;
@@ -420,11 +583,47 @@ async fn run_codex_turn(
         }
     };
 
+    if let Some(sink) = &request.progress {
+        sink(TriageProgress {
+            last_event: Some("turn_completed".to_string()),
+            message: Some("codex turn completed".to_string()),
+            total_tokens: Some(result.total_tokens),
+            ..Default::default()
+        });
+    }
+
     Ok(StageUsage {
         input_tokens: result.input_tokens,
         output_tokens: result.output_tokens,
         total_tokens: result.total_tokens,
     })
+}
+
+fn codex_event_progress(event: &crate::domain::AgentEvent) -> Option<TriageProgress> {
+    use crate::domain::AgentEvent;
+    match event {
+        AgentEvent::SessionStarted { session_id, .. } => Some(TriageProgress {
+            last_event: Some("session_started".to_string()),
+            message: Some("codex session started".to_string()),
+            session_id: Some(session_id.clone()),
+            ..Default::default()
+        }),
+        AgentEvent::ApprovalAutoApproved { tool_call, .. } => Some(TriageProgress {
+            last_event: Some("tool_call".to_string()),
+            message: Some(format!("approved {tool_call}")),
+            current_tool_name: Some(tool_call.clone()),
+            ..Default::default()
+        }),
+        AgentEvent::TurnCompleted {
+            total_tokens, message, ..
+        } => Some(TriageProgress {
+            last_event: Some("turn_completed".to_string()),
+            message: message.clone().or_else(|| Some("turn completed".to_string())),
+            total_tokens: Some(*total_tokens),
+            ..Default::default()
+        }),
+        _ => None,
+    }
 }
 
 fn codex_failure_kind(err: &SymphonyError) -> TriageRunnerFailureKind {
@@ -885,6 +1084,7 @@ mod tests {
                 title: "Fix docs".to_string(),
             },
             codex: None,
+            progress: None,
         }
     }
 
@@ -923,6 +1123,8 @@ mod tests {
                 "low",
                 "-p",
                 "--no-session",
+                "--mode",
+                "json",
                 "prompt text"
             ]
         );
@@ -932,7 +1134,10 @@ mod tests {
     fn build_pi_command_dedupes_existing_print_flags() {
         let command = vec!["pi".to_string(), "-p".to_string(), "--no-session".to_string()];
         let built = build_pi_command(&command, "p");
-        assert_eq!(built, vec!["pi", "-p", "--no-session", "p"]);
+        assert_eq!(
+            built,
+            vec!["pi", "-p", "--no-session", "--mode", "json", "p"]
+        );
     }
 
     #[tokio::test]

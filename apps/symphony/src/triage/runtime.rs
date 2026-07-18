@@ -277,6 +277,7 @@ impl EventEmitter for EventHubEmitter {
 pub struct TriageRuntime {
     coordinator: TriageCoordinator<SharedFactoryStore, GithubTriageIntake, GithubClient>,
     store: SharedFactoryStore,
+    sessions: Arc<Mutex<crate::domain::TriageSessionRegistry>>,
 }
 
 impl TriageRuntime {
@@ -383,15 +384,25 @@ impl TriageRuntime {
                 project_display_name,
             },
         );
+        let sessions = Arc::new(Mutex::new(crate::domain::TriageSessionRegistry::default()));
+        coordinator = coordinator.with_session_registry(sessions.clone());
         if let Some(hub) = event_hub {
             coordinator = coordinator.with_events(Arc::new(EventHubEmitter::new(hub)));
         }
 
-        Ok(Some(Self { coordinator, store }))
+        Ok(Some(Self {
+            coordinator,
+            store,
+            sessions,
+        }))
     }
 
     pub fn store(&self) -> SharedFactoryStore {
         self.store.clone()
+    }
+
+    pub fn sessions(&self) -> Arc<Mutex<crate::domain::TriageSessionRegistry>> {
+        self.sessions.clone()
     }
 
     pub async fn poll(&mut self, config: &ServiceConfig) -> Result<TriagePollSummary> {

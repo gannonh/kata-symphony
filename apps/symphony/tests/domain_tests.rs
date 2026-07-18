@@ -449,6 +449,7 @@ fn test_orchestrator_snapshot_serializes() {
             last_poll_at: None,
             poll_count: 0,
         },
+        triage_sessions: vec![],
     };
     let json = serde_json::to_string(&snap).unwrap();
     // Valid JSON

@@ -67,6 +67,7 @@ fn empty_snapshot() -> OrchestratorSnapshot {
             last_poll_at: None,
             poll_count: 0,
         },
+        triage_sessions: vec![],
     }
 }
 
