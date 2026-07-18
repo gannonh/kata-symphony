@@ -1,18 +1,18 @@
 ---
 type: PRD
 title: Symphony Software Factory Platform
-status: Proposed
+status: Active
 description: Product requirements and vertical-slice roadmap for evolving Symphony into a full software factory platform.
 tags: [symphony, software-factory, roadmap, orchestration]
-timestamp: 2026-07-16T15:44:55Z
+timestamp: 2026-07-18T17:00:00Z
 ---
 
 # Symphony Software Factory Platform PRD
 
-Status: Proposed
-Date: 2026-07-16
+Status: Active
+Date: 2026-07-16 (updated 2026-07-18)
 
-Related: [Pi Symphony Extension Design](/superpowers/specs/2026-05-14-pi-symphony-extension-design.md), [Wave 4 Shared Context and Diagnostics Plan](/superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md), [Specs roadmap](/specs/index.md)
+Related: [A1 GitHub Issue Triage](/specs/2026-07-16-a1-github-issue-triage-design.md), [ADR-0001 A1 triage durability and isolation](/adrs/0001-a1-triage-durability-and-isolation.md), [Pi Symphony Extension Design](/superpowers/specs/2026-05-14-pi-symphony-extension-design.md), [Wave 4 Shared Context and Diagnostics Plan](/superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md), [Specs roadmap](/specs/index.md)
 
 ## Executive summary
 
@@ -110,11 +110,12 @@ Symphony will orchestrate model providers and agent harnesses. Model hosting and
 - HTTP, Ratatui, and Pi operator surfaces.
 - Versioned event envelopes, snapshots, structured logs, token accounting, and rate-limit data.
 - Live steering, human escalation, Slack notifications, shared context, and supervisor rules.
+- **GitHub A1 triage preview:** intake-label polling, SQLite factory/stage/artifact/publication durability, local isolated triage runner, marked preview comments, factory-run HTTP read APIs, doctor and starter workflow assets ([#587](https://github.com/gannonh/kata-symphony/pull/587)).
 
 ### Platform gaps
 
-- Tracker state represents the workflow, while factory runs, stage attempts, artifacts, approvals, and history lack a durable domain record.
-- Triage, specifications, reviews, verification, shipping, and monitoring are primarily prompt conventions rather than typed stage outcomes.
+- Factory-run durability exists for **GitHub A1 triage preview** (SQLite runs, stage attempts, artifacts, publication intents, events, and minimal HTTP read APIs). Approvals, multi-stage history, Linear parity, and automatic route publication remain open.
+- Specifications, reviews, verification, shipping, and monitoring are still primarily prompt conventions rather than typed stage outcomes. Triage is the first typed stage (preview mode only).
 - Shared context and escalations are process-local.
 - Remote HTTP operation lacks a complete authentication, authorization, and audit model.
 - Runtime selection is service-wide and compute capacity is manually configured.
@@ -124,7 +125,7 @@ Symphony will orchestrate model providers and agent harnesses. Model hosting and
 
 ## Product model
 
-The roadmap uses this vocabulary. Exact storage and API contracts require follow-up design and ADRs.
+The roadmap uses this vocabulary. Storage and API contracts for A1 triage preview are recorded in [A1](/specs/2026-07-16-a1-github-issue-triage-design.md) and [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md); later stages still need follow-up design and ADRs.
 
 ### Work item
 
@@ -209,7 +210,16 @@ The roadmap horizons describe outcome clusters. They are not release trains or p
 
 A new GitHub or Linear issue triggers a triage stage. Symphony creates the minimum durable factory run, triage stage run, and triage artifact for that issue. The issue receives one route: implement, spec, needs information, park, or human-owned. The tracker shows the rationale, evidence, risk class, and next action.
 
-**Demo:** Create one clear issue and one ambiguous issue. Symphony records both triage runs, routes the first, and asks a concrete question on the second.
+**Progress (2026-07-18):** GitHub **preview** shipped in [#587](https://github.com/gannonh/kata-symphony/pull/587). Design: [A1 GitHub Issue Triage](/specs/2026-07-16-a1-github-issue-triage-design.md). Decisions: [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md).
+
+| Slice | Status | Notes |
+| --- | --- | --- |
+| PR1 preview | **Shipped** | Intake label + Projects v2 membership, local Pi/Codex triage, immutable artifact, durable preview comment, factory-run HTTP read API, doctor/starter assets |
+| PR2 automatic route publication | Planned | Apply route labels/states, remove intake label, implement handoff |
+| PR3 recovery and agreement | Planned | Interrupted-process recovery, correction events, agreement metrics |
+| Linear triage | Deferred | Separate vertical slice after GitHub path is complete |
+
+**Demo (PR1):** Label a project-member issue `needs-triage`. Symphony records a factory run, posts a marked preview comment with route/rationale/evidence, and exposes the run over `GET /api/v1/factory-runs`. Off-project intake gets a diagnostic comment without an agent attempt.
 
 **Measure:** routing agreement with human review, triage latency, clarification rate, and cost per decision.
 

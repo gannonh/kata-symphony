@@ -1,7 +1,7 @@
 # Docs Update Log
 
 ## 2026-07-18
-* **A1 PR1 shipped**: Updated [A1 design](/specs/2026-07-16-a1-github-issue-triage-design.md) and [specs roadmap](/specs/index.md) after [#587](https://github.com/gannonh/kata-symphony/pull/587); added [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md) for triage durability and isolation decisions.
+* **A1 PR1 shipped**: Updated [A1 design](/specs/2026-07-16-a1-github-issue-triage-design.md), [factory PRD](/specs/symphony-software-factory-platform-prd.md), and [specs roadmap](/specs/index.md) after [#587](https://github.com/gannonh/kata-symphony/pull/587); added [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md) for triage durability and isolation decisions.
 
 ## 2026-07-17
 * **A1 Preview**: Marked A1 triage preview implementation as active on the [specs roadmap](/specs/index.md); Symphony starter workflow reference documents storage/triage fields.
