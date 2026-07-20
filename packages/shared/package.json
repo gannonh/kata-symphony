@@ -59,12 +59,12 @@
   "dependencies": {
     "@kata/core": "workspace:*",
     "@kata/mermaid": "workspace:*",
-    "@isaacs/ttlcache": "^2.1.4",
+    "@isaacs/ttlcache": "^2.1.5",
     "bash-parser": "^0.5.0",
     "filtrex": "^3.1.0",
     "glob": "^13.0.6",
     "incr-regex-package": "^1.0.4",
-    "shell-quote": "^1.8.3",
+    "shell-quote": "^1.10.0",
     "simple-git": "^3.30.0"
   },
   "peerDependencies": {

@@ -25,7 +25,7 @@
     "@kata/core": "workspace:*",
     "@kata/mermaid": "workspace:*",
     "@types/mdast": "^4.0.0",
-    "@uiw/react-json-view": "^2.0.0-alpha.42",
+    "@uiw/react-json-view": "^2.0.0-alpha.43",
     "unified": "^11.0.0",
     "unist-util-visit": "^5.0.0"
   },
