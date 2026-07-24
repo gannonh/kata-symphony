@@ -20,10 +20,12 @@ use crate::triage::domain::{
     PublicationIntentRecord, PublicationStatus, StageRunRecord,
 };
 use crate::triage::intake::GithubTriageIntake;
+use crate::triage::routing::GithubTriageRouting;
 use crate::triage::storage_path::{resolve_storage_path, storage_path_for_log};
 use crate::triage::store::{
-    ClaimAttemptRequest, CreatePublicationIntentRequest, FactoryRunStore, SqliteFactoryStore,
-    StoreArtifactRequest, StoredCommentIdentity, UpsertFactoryRunRequest,
+    ClaimAttemptRequest, CreatePublicationIntentRequest, FactoryRunStore,
+    PendingAutomaticDispatchGuard, SqliteFactoryStore, StoreArtifactRequest, StoredCommentIdentity,
+    UpsertFactoryRunRequest,
 };
 
 /// Shared SQLite factory store for coordinator + HTTP reads.
@@ -165,6 +167,12 @@ impl FactoryRunStore for SharedFactoryStore {
         self.with_store(|store| store.list_pending_intents(limit))
     }
 
+    fn list_pending_automatic_dispatch_guards(
+        &self,
+    ) -> Result<Vec<PendingAutomaticDispatchGuard>> {
+        self.with_store(|store| store.list_pending_automatic_dispatch_guards())
+    }
+
     fn list_intents_for_run(&self, run_id: &str) -> Result<Vec<PublicationIntentRecord>> {
         self.with_store(|store| store.list_intents_for_run(run_id))
     }
@@ -193,6 +201,29 @@ impl FactoryRunStore for SharedFactoryStore {
     ) -> Result<()> {
         self.with_store_mut(|store| {
             store.update_publication_step(intent_id, completed_step, status, error)
+        })
+    }
+
+    fn record_publication_step(
+        &mut self,
+        intent_id: &str,
+        completed_step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.record_publication_step(intent_id, completed_step, status, expected_projection)
+        })
+    }
+
+    fn set_publication_baseline(
+        &mut self,
+        intent_id: &str,
+        observed_baseline: &serde_json::Value,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.set_publication_baseline(intent_id, observed_baseline, expected_projection)
         })
     }
 
@@ -358,12 +389,19 @@ impl TriageRuntime {
         let managed_labels = config.triage.routes.managed_labels();
         let intake = GithubTriageIntake::new(
             client.clone(),
-            projects,
+            projects.clone(),
             owner,
             repo,
             project_number,
             forge_host.clone(),
             managed_labels,
+        );
+        let routing = GithubTriageRouting::new(
+            client.clone(),
+            projects,
+            owner,
+            project_number,
+            config.triage.max_intake_pages,
         );
 
         let workflow_dir = workflow_path
@@ -384,7 +422,8 @@ impl TriageRuntime {
                 workflow_dir,
                 project_display_name,
             },
-        );
+        )
+        .with_routing(routing);
         let sessions = Arc::new(Mutex::new(crate::domain::TriageSessionRegistry::default()));
         coordinator = coordinator.with_session_registry(sessions.clone());
         if let Some(hub) = event_hub {
@@ -404,6 +443,14 @@ impl TriageRuntime {
 
     pub fn sessions(&self) -> Arc<Mutex<crate::domain::TriageSessionRegistry>> {
         self.sessions.clone()
+    }
+
+    /// Issue IDs / intake labels that must not enter implementation dispatch
+    /// while automatic publication is still pending.
+    pub fn pending_automatic_dispatch_guards(
+        &self,
+    ) -> Result<Vec<PendingAutomaticDispatchGuard>> {
+        self.store.list_pending_automatic_dispatch_guards()
     }
 
     pub async fn poll(&mut self, config: &ServiceConfig) -> Result<TriagePollSummary> {

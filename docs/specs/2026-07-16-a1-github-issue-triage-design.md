@@ -11,7 +11,7 @@ timestamp: 2026-07-18T16:45:00Z
 
 ## Status
 
-Active — **PR1 (triage preview) shipped** in [#587](https://github.com/gannonh/kata-symphony/pull/587) (`80b3c215`). PR2 (automatic route publication) and PR3 (recovery and agreement measurement) remain open.
+Active — **PR1 (triage preview) shipped** in [#587](https://github.com/gannonh/kata-symphony/pull/587) (`80b3c215`). **PR2 (automatic route publication) implemented pending Verify** ([build report](/specs/2026-07-24-a1-pr2-build-report.md)). PR3 (recovery and agreement measurement) remains open.
 
 Related decisions: [ADR-0001 A1 triage durability and isolation](/adrs/0001-a1-triage-durability-and-isolation.md).
 

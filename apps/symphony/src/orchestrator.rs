@@ -2868,6 +2868,7 @@ impl Orchestrator {
         tracing::info!(phase = "dispatch", "starting orchestrator tick phase");
 
         let candidates = port.fetch_candidate_issues()?;
+        let candidates = self.filter_pending_automatic_publication(candidates);
         let sorted_candidates = self.sort_issues_for_dispatch(candidates);
         let candidate_ids: std::collections::HashSet<String> =
             sorted_candidates.iter().map(|i| i.id.clone()).collect();
@@ -4909,6 +4910,10 @@ impl Orchestrator {
             return false;
         }
 
+        if self.issue_blocked_by_pending_automatic_publication(issue) {
+            return false;
+        }
+
         // NOTE: blocker checks are done at the dispatch loop level via
         // is_blocked_by_dependency() which needs access to all candidates.
 
@@ -5053,6 +5058,62 @@ impl Orchestrator {
             .map(|l| l.trim().to_ascii_lowercase())
             .filter(|l| !l.is_empty())
             .any(|l| excluded.contains(l.as_str()))
+    }
+
+    /// Drop candidates that still have a nonterminal automatic triage publication.
+    ///
+    /// Uses durable store state so the guard remains effective even if triage is
+    /// disabled or its intake label is reloaded mid-publication.
+    fn filter_pending_automatic_publication(&self, candidates: Vec<Issue>) -> Vec<Issue> {
+        let Some(runtime) = self.triage_runtime.as_ref() else {
+            return candidates;
+        };
+        let guards = match runtime.pending_automatic_dispatch_guards() {
+            Ok(guards) => guards,
+            Err(err) => {
+                tracing::warn!(
+                    event = "triage_dispatch_guard_read_failed",
+                    error = %err,
+                    "failed to read pending automatic publication guards; failing closed"
+                );
+                return Vec::new();
+            }
+        };
+        if guards.is_empty() {
+            return candidates;
+        }
+        candidates
+            .into_iter()
+            .filter(|issue| !Self::issue_matches_automatic_dispatch_guard(issue, &guards))
+            .collect()
+    }
+
+    fn issue_blocked_by_pending_automatic_publication(&self, issue: &Issue) -> bool {
+        let Some(runtime) = self.triage_runtime.as_ref() else {
+            return false;
+        };
+        match runtime.pending_automatic_dispatch_guards() {
+            Ok(guards) => Self::issue_matches_automatic_dispatch_guard(issue, &guards),
+            Err(err) => {
+                tracing::warn!(
+                    event = "triage_dispatch_guard_read_failed",
+                    issue_id = %issue.id,
+                    error = %err,
+                    "failed to read pending automatic publication guards; blocking dispatch"
+                );
+                true
+            }
+        }
+    }
+
+    fn issue_matches_automatic_dispatch_guard(
+        issue: &Issue,
+        guards: &[crate::triage::store::PendingAutomaticDispatchGuard],
+    ) -> bool {
+        // Reject the durable issue ID for every nonterminal automatic intent.
+        // Guards also carry the recorded intake label so handoff stays tied to
+        // the publication intent rather than live triage config.
+        guards.iter().any(|guard| guard.issue_id == issue.id)
     }
 
     /// Returns `true` if the issue has at least one non-terminal blocker,
