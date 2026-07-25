@@ -18,6 +18,7 @@ use crate::triage::fingerprint::{
     IssueCommentFingerprint, IssueMilestoneFingerprint, IssueRevisionInput, VerifiedTriageComment,
 };
 use crate::triage::intake::{TriageIntakeIssue, TriageIntakePort};
+use crate::triage::process_identity;
 use crate::triage::publisher::{
     AutomaticPublishRequest, AutomaticPublisher, IneligiblePublishRequest, PreviewPublishRequest,
     PreviewPublisher, TriageCommentPort, TriageRoutingPort,
@@ -79,6 +80,7 @@ pub struct TriagePollSummary {
     pub ineligible: u32,
     pub skipped: u32,
     pub reconciled_intents: u32,
+    pub recovered_attempts: u32,
 }
 
 pub struct TriageCoordinator<S, I, C, X = DefaultTriageExecutor> {
@@ -220,6 +222,7 @@ where
         };
 
         self.store.interrupt_stale_attempts()?;
+        summary.recovered_attempts = self.recover_interrupted_attempts().await?;
         summary.reconciled_intents = self
             .reconcile_pending_intents(service, self.max_pages)
             .await?;
@@ -293,6 +296,66 @@ where
         }
 
         Ok(summary)
+    }
+
+    /// Reclaim attempts a previous process abandoned.
+    ///
+    /// An interrupted attempt may still own a live child and a disposable
+    /// workspace. The child is signalled only when every recorded identity
+    /// field still matches the live process, so a reused PID is never killed;
+    /// the attempt directory is then removed so the retry starts clean. The
+    /// attempt itself stays interrupted and counts against `max_attempts`.
+    async fn recover_interrupted_attempts(&mut self) -> Result<u32> {
+        let attempts = self.store.list_recoverable_attempts()?;
+        let mut recovered = 0;
+
+        for attempt in attempts {
+            if let Some(identity) = attempt.identity.as_ref() {
+                if process_identity::is_signalable(identity) {
+                    tracing::info!(
+                        stage_run_id = attempt.stage_run_id,
+                        process_group_id = identity.process_group_id,
+                        "terminating orphaned triage process group"
+                    );
+                    process_identity::terminate_process_group(identity.process_group_id).await;
+                } else {
+                    tracing::debug!(
+                        stage_run_id = attempt.stage_run_id,
+                        pid = identity.pid,
+                        "skipping signal; recorded triage process identity no longer matches"
+                    );
+                }
+            }
+
+            if let Some(workspace) = attempt.workspace_path.as_deref() {
+                match process_identity::attempt_root_for_cleanup(Path::new(workspace)) {
+                    Some(root) => {
+                        if let Err(err) = std::fs::remove_dir_all(&root) {
+                            if err.kind() != std::io::ErrorKind::NotFound {
+                                // Report rather than swallow: a workspace we
+                                // cannot reclaim is operator-visible disk leak.
+                                tracing::warn!(
+                                    stage_run_id = attempt.stage_run_id,
+                                    path = %root.display(),
+                                    error = %err,
+                                    "failed to remove interrupted triage attempt directory"
+                                );
+                            }
+                        }
+                    }
+                    None => tracing::warn!(
+                        stage_run_id = attempt.stage_run_id,
+                        path = workspace,
+                        "recorded triage workspace is not an attempt directory; not removing"
+                    ),
+                }
+            }
+
+            self.store.clear_attempt_process(&attempt.stage_run_id)?;
+            recovered += 1;
+        }
+
+        Ok(recovered)
     }
 
     async fn reconcile_pending_intents(
@@ -1904,6 +1967,113 @@ mod tests {
             stages[0].status,
             crate::triage::domain::StageStatus::Interrupted
         );
+    }
+
+    /// After a crash the previous process's triage child can still be running
+    /// against a workspace this process is about to reclaim. A poll must kill
+    /// the recorded process group and delete the attempt directory, so the
+    /// retry starts from a clean workspace instead of racing a live agent.
+    #[tokio::test]
+    async fn recovery_terminates_orphaned_child_and_removes_attempt_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = prep_workflow(&temp);
+        let mut store = open_store(&temp);
+
+        // Stand in for the orphaned triage child left behind by a prior process.
+        let mut orphan = tokio::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let identity = crate::triage::process_identity::capture(orphan.id().expect("orphan pid"));
+
+        let attempt_root = temp.path().join("workspaces").join("triage-stale-attempt");
+        let workspace_path = attempt_root.join("workspace");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        std::fs::write(workspace_path.join("README.md"), "clone\n").unwrap();
+
+        let stage = store
+            .claim_attempt(ClaimAttemptRequest {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                issue_id: "77".to_string(),
+                issue_identifier: "#77".to_string(),
+                issue_revision: "rev".to_string(),
+                configuration_revision: "config".to_string(),
+                owner_instance: "prior-owner".to_string(),
+                harness: "pi".to_string(),
+                model: None,
+                workspace_path: None,
+                output_path: None,
+                pid: None,
+                process_group_id: None,
+                process_start_token: None,
+                executable_identity: None,
+            })
+            .unwrap();
+        store
+            .record_attempt_process(RecordAttemptProcessRequest {
+                stage_run_id: stage.stage_run_id.clone(),
+                owner_instance: "prior-owner".to_string(),
+                identity,
+                workspace_path: Some(workspace_path.display().to_string()),
+                output_path: Some(
+                    attempt_root
+                        .join("stage-output")
+                        .join("result.json")
+                        .display()
+                        .to_string(),
+                ),
+            })
+            .unwrap();
+        store
+            .interrupt_attempt(&stage.stage_run_id, "prior-owner")
+            .unwrap();
+
+        let mut coordinator = TriageCoordinator::with_executor(
+            store,
+            Arc::new(FakeIntake::default()),
+            FakeComments::new("symphony-bot"),
+            TriageCoordinatorConfig {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                owner_instance: "new-owner".to_string(),
+                workflow_dir: workflow_dir.clone(),
+                project_display_name: "Factory".to_string(),
+            },
+            FakeExecutor::success(sample_artifact()),
+        );
+
+        coordinator
+            .poll_once(&service_config(true, &workflow_dir))
+            .await
+            .unwrap();
+
+        let status = tokio::time::timeout(std::time::Duration::from_secs(10), orphan.wait())
+            .await
+            .expect("orphaned child must be terminated by recovery");
+        assert!(status.is_ok());
+        assert!(
+            !attempt_root.exists(),
+            "attempt directory must be reclaimed before retry"
+        );
+
+        // Cleared so a later poll does not try to reclaim the same attempt.
+        let stage = coordinator
+            .store_mut()
+            .get_stage_run(&stage.stage_run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stage.status,
+            crate::triage::domain::StageStatus::Interrupted,
+            "recovery must not resurrect the attempt"
+        );
+        assert!(coordinator
+            .store_mut()
+            .list_recoverable_attempts()
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

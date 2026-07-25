@@ -217,9 +217,11 @@ fn validate_request(request: &TriageRunnerRequest) -> std::result::Result<(), St
 fn prepare_attempt(
     request: &TriageRunnerRequest,
 ) -> std::result::Result<AttemptLayout, TriageRunnerOutcome> {
-    let attempt_root = request
-        .workspace_root
-        .join(format!("triage-{}", request.attempt_id));
+    let attempt_root = request.workspace_root.join(format!(
+        "{}{}",
+        process_identity::ATTEMPT_DIR_PREFIX,
+        request.attempt_id
+    ));
     let layout = AttemptLayout {
         workspace_path: attempt_root.join("workspace"),
         output_path: attempt_root.join("stage-output").join("result.json"),

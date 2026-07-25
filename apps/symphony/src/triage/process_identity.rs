@@ -7,7 +7,7 @@
 //! the child was running. Signalling only happens when every recorded field
 //! still matches the live process.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Identity of a spawned triage child, captured immediately after spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,22 +122,51 @@ fn ps_field(pid: i64, format: &str) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
-/// Remove an abandoned attempt's disposable directories before it is retried.
+/// Directory name prefix the runner gives every attempt's disposable root.
+pub const ATTEMPT_DIR_PREFIX: &str = "triage-";
+
+/// The attempt root holding a recorded workspace, or `None` when the recorded
+/// path is not one the triage runner created.
 ///
-/// Errors are returned rather than swallowed so recovery can report a workspace
-/// it failed to reclaim instead of silently leaking it.
-pub fn remove_attempt_paths(paths: &[&Path]) -> std::io::Result<()> {
-    for path in paths {
-        if !path.exists() {
-            continue;
+/// Cleanup deletes recursively, so it only ever accepts a directory named
+/// `triage-<attempt id>`. A stale, hand-edited, or corrupted `workspace_path`
+/// therefore cannot make recovery delete a real repository or the workspace
+/// root itself.
+pub fn attempt_root_for_cleanup(workspace_path: &Path) -> Option<PathBuf> {
+    let root = workspace_path.parent()?;
+    let name = root.file_name()?.to_str()?;
+    name.starts_with(ATTEMPT_DIR_PREFIX)
+        .then(|| root.to_path_buf())
+}
+
+/// Send a bounded termination to `process_group_id`: `SIGTERM`, then `SIGKILL`
+/// if the group is still alive after [`FORCE_KILL_WAIT`].
+pub async fn terminate_process_group(process_group_id: i64) {
+    let group = match i32::try_from(process_group_id) {
+        Ok(group) if group > 0 => group,
+        _ => return,
+    };
+
+    // SAFETY: kill against a negative pid signals the process group; the call
+    // has no memory effects and a failure only means the group is already gone.
+    unsafe { kill(-group, SIGTERM) };
+
+    let deadline = std::time::Instant::now() + FORCE_KILL_WAIT;
+    while std::time::Instant::now() < deadline {
+        if unsafe { kill(-group, 0) } != 0 {
+            return;
         }
-        if path.is_dir() {
-            std::fs::remove_dir_all(path)?;
-        } else {
-            std::fs::remove_file(path)?;
-        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    Ok(())
+    unsafe { kill(-group, SIGKILL) };
+}
+
+const SIGTERM: i32 = 15;
+const SIGKILL: i32 = 9;
+const FORCE_KILL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+unsafe extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
 }
 
 #[cfg(test)]
@@ -199,6 +228,51 @@ mod tests {
             !is_signalable(&identity),
             "must never signal our own process group"
         );
+    }
+
+    /// Cleanup removes directories recursively, so it must only ever accept a
+    /// root the triage runner created. Anything else could be a real repository
+    /// or the shared workspace root.
+    #[test]
+    fn cleanup_root_accepts_only_runner_created_attempt_dirs() {
+        assert_eq!(
+            attempt_root_for_cleanup(Path::new("/srv/workspaces/triage-abc123/workspace")),
+            Some(PathBuf::from("/srv/workspaces/triage-abc123"))
+        );
+        assert_eq!(
+            attempt_root_for_cleanup(Path::new("/home/dev/my-project/workspace")),
+            None,
+            "a path outside a triage attempt dir must never be deleted"
+        );
+        assert_eq!(
+            attempt_root_for_cleanup(Path::new("/srv/workspaces")),
+            None,
+            "the workspace root itself must never be deleted"
+        );
+    }
+
+    /// An orphaned triage child must actually die, otherwise a restart leaves
+    /// an agent running against a workspace it is about to delete.
+    #[tokio::test]
+    async fn terminates_a_live_process_group() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id().expect("child pid") as i64;
+        let identity = capture(pid as u32);
+        assert!(
+            is_signalable(&identity),
+            "a foreign group leader must be signalable"
+        );
+
+        terminate_process_group(identity.process_group_id).await;
+
+        let status = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
+            .await
+            .expect("child must exit after termination");
+        assert!(status.is_ok());
     }
 
     /// An attempt recorded without a usable identity must never be signalled.
