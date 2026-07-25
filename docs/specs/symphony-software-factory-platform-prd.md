@@ -4,7 +4,7 @@ title: Symphony Software Factory Platform
 status: Active
 description: Product requirements and vertical-slice roadmap for evolving Symphony into a full software factory platform.
 tags: [symphony, software-factory, roadmap, orchestration]
-timestamp: 2026-07-18T17:00:00Z
+timestamp: 2026-07-25T22:35:00Z
 ---
 
 # Symphony Software Factory Platform PRD
@@ -216,7 +216,7 @@ A new GitHub or Linear issue triggers a triage stage. Symphony creates the minim
 | --- | --- | --- |
 | PR1 preview | **Shipped** | Intake label + Projects v2 membership, local Pi/Codex triage, immutable artifact, durable preview comment, factory-run HTTP read API, doctor/starter assets |
 | PR2 automatic route publication | **Verify accepted** (merge pending) | Apply route labels/states, remove intake label, implement handoff ([build](/specs/2026-07-24-a1-pr2-build-report.md), [verify](/specs/2026-07-24-a1-pr2-verify-report.md)) |
-| PR3 recovery and agreement | Planned | Interrupted-process recovery, correction events, agreement metrics |
+| PR3 recovery and agreement | **PR #599 threads resolved/CI passed; live re-verify blocked** | Post-`exec` recovery, process-group isolation, retained unresolved recovery state, cleanup authorization, correction candidate fixes, and evidence cleanup pass automated gates; credential rotation, UAT cleanup PR #18, and clean live UAT remain ([build](/specs/2026-07-25-a1-pr3-build-report.md), [rejected verify](/specs/2026-07-25-a1-pr3-verify-report.md), [incomplete re-verify](/specs/2026-07-25-a1-pr3-reverify-report.md)) |
 | Linear triage | Deferred | Separate vertical slice after GitHub path is complete |
 
 **Demo (PR1):** Label a project-member issue `needs-triage`. Symphony records a factory run, posts a marked preview comment with route/rationale/evidence, and exposes the run over `GET /api/v1/factory-runs`. Off-project intake gets a diagnostic comment without an agent attempt.

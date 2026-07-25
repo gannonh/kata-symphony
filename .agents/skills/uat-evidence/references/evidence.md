@@ -11,6 +11,7 @@ Evidence should include:
 
 - runtime identity
 - backend identity
+- sanitized effective backend configuration (coordinates and token environment-variable name, never a token value)
 - workspace
 - runtime root or binary path
 - git commit
@@ -22,6 +23,13 @@ Evidence should include:
 - provider read-back results
 - retry, warning, and skip records
 - cleanup status
+
+For Symphony GitHub evidence, cleanup resolves the repository from explicit
+cleanup overrides, then stored evidence configuration, then a unanimous
+repository parsed from legacy created-issue URLs. Every created issue URL is
+validated against that repository before the first provider read or mutation.
+Ambiguous or conflicting evidence fails closed instead of inheriting the
+current workspace's `WORKFLOW.md`.
 
 ## Kata CLI Pass Criteria
 

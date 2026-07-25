@@ -8,6 +8,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  resolveGithubCleanupConfig,
+  sanitizeRuntimeConfig,
+  validateGithubCleanupTargets,
+} from "./symphony-runtime-config.mjs";
 
 const SKILL_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PROMPT_FILES = [
@@ -111,6 +116,7 @@ async function testBackend(args) {
     runtime: "symphony-runtime",
     backend,
     mode: args.dry_run ? "dry-run" : "real",
+    config: sanitizeRuntimeConfig(backend, config),
     stamp,
     workspace,
     symphonyRoot,
@@ -574,9 +580,26 @@ async function cleanupRun(args) {
   }
 
   if (evidence.backend === "github") {
-    const config = githubConfig(args, workspace, env, evidence);
-    for (const issue of createdIssues) {
-      const number = issue.number ?? issue.id;
+    // Resolve and validate the complete target set before the first provider
+    // read or mutation. Cleanup must never inherit an ambient workflow repo.
+    const config = resolveGithubCleanupConfig({ args, evidence });
+    const targets = validateGithubCleanupTargets({ evidence, config });
+    cleanup.config = sanitizeRuntimeConfig("github", config);
+    if (args.dry_run) {
+      cleanup.actions = targets.map(({ number }) => ({
+        provider: "github",
+        issue: number,
+        action: "would-close",
+      }));
+      cleanup.completed = true;
+      evidence.cleanup = cleanup;
+      writeFileSync(evidencePath, `${JSON.stringify(evidence, null, 2)}\n`, "utf8");
+      const reportPath = path.join(path.dirname(evidencePath), "evidence.md");
+      writeFileSync(reportPath, evidenceMarkdown(evidence, evidencePath), "utf8");
+      console.log(JSON.stringify({ ok: true, dryRun: true, evidence: evidencePath, cleanup }, null, 2));
+      return;
+    }
+    for (const { issue, number } of targets) {
       const verified = verifyGithubCleanupIssue({ env, config, evidence, issue });
       if (!verified.ok) {
         cleanup.skipped.push({ provider: "github", issue: number, reason: verified.reason });
@@ -815,14 +838,14 @@ polling:
 `, "utf8");
 }
 
-function githubConfig(args, workspace, env, evidence = {}) {
+function githubConfig(args, workspace, env) {
   const workflow = readWorkflowConfig(path.join(workspace, ".symphony", "WORKFLOW.md"));
   return {
-    repoOwner: String(args.github_owner ?? evidence.config?.repoOwner ?? workflow.repo_owner ?? "gannonh"),
-    repoName: String(args.github_repo ?? evidence.config?.repoName ?? workflow.repo_name ?? "kata"),
-    projectOwner: String(args.github_project_owner ?? evidence.config?.projectOwner ?? workflow.github_project_owner ?? workflow.repo_owner ?? "gannonh"),
-    projectOwnerType: String(args.github_project_owner_type ?? evidence.config?.projectOwnerType ?? workflow.github_project_owner_type ?? "user"),
-    projectNumber: Number(args.github_project_number ?? evidence.config?.projectNumber ?? workflow.github_project_number ?? 17),
+    repoOwner: String(args.github_owner ?? workflow.repo_owner ?? "gannonh"),
+    repoName: String(args.github_repo ?? workflow.repo_name ?? "kata"),
+    projectOwner: String(args.github_project_owner ?? workflow.github_project_owner ?? workflow.repo_owner ?? "gannonh"),
+    projectOwnerType: String(args.github_project_owner_type ?? workflow.github_project_owner_type ?? "user"),
+    projectNumber: Number(args.github_project_number ?? workflow.github_project_number ?? 17),
     tokenEnv: env.GH_TOKEN ? "GH_TOKEN" : env.GITHUB_TOKEN ? "GITHUB_TOKEN" : null,
   };
 }

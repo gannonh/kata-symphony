@@ -39,4 +39,9 @@ run_segment \
   --test github_adapter_tests \
   --test github_execution_contract_tests
 
+run_segment \
+  "Symphony UAT evidence cleanup contracts (node test)" \
+  node --test \
+  .agents/skills/uat-evidence/scripts/symphony-runtime-config.test.mjs
+
 echo "GitHub backend validation lane completed successfully."

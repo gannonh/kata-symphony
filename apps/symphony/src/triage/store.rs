@@ -6,6 +6,7 @@ use crate::triage::domain::{
     FACTORY_ERROR_STRING_MAX_BYTES, FACTORY_EVENT_PAYLOAD_MAX_BYTES, TRIAGE_LEASE_STALE_AFTER_MS,
     TRIAGE_STAGE_NAME,
 };
+use crate::triage::process_identity::ProcessIdentity;
 use crate::triage::storage_path::lock_path_for_storage;
 use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
@@ -15,7 +16,11 @@ use std::path::Path;
 use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
-const INIT_SQL: &str = include_str!("migrations/001_init.sql");
+/// Embedded migrations, applied in order while the exclusive store lock is held.
+const MIGRATIONS: [&str; 2] = [
+    include_str!("migrations/001_init.sql"),
+    include_str!("migrations/002_route_observations.sql"),
+];
 
 #[derive(Debug, Clone)]
 pub struct ClaimAttemptRequest {
@@ -77,6 +82,63 @@ pub struct StoredCommentIdentity {
     pub comment_id: String,
     pub intent_id: String,
     pub publisher_login: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordAttemptProcessRequest {
+    pub stage_run_id: String,
+    pub owner_instance: String,
+    pub identity: ProcessIdentity,
+    pub workspace_path: Option<String>,
+    pub output_path: Option<String>,
+}
+
+/// An interrupted attempt whose child process and disposable directories may
+/// still be around after a crash or restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverableAttempt {
+    pub stage_run_id: String,
+    pub run_id: String,
+    pub owner_instance: Option<String>,
+    /// Present only when every OS identity field was recorded.
+    pub identity: Option<ProcessIdentity>,
+    pub workspace_path: Option<String>,
+    pub output_path: Option<String>,
+}
+
+/// A published route whose issue can be re-read to measure human agreement.
+///
+/// Carries the route mapping recorded at publication time so a later config
+/// reload cannot reinterpret this observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorrectionCandidate {
+    pub run_id: String,
+    pub stage_run_id: Option<String>,
+    pub artifact_id: String,
+    pub intent_id: String,
+    /// Durable forge issue id, used to re-read the issue independently of the
+    /// intake and implementation-candidate queries.
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub intake_label: String,
+    pub published_route: String,
+    pub desired_effects: serde_json::Value,
+}
+
+/// Kind of post-publication observation recorded against an artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RouteObservationKind {
+    Corrected,
+    Inconsistent,
+}
+
+impl RouteObservationKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Corrected => "corrected",
+            Self::Inconsistent => "inconsistent",
+        }
+    }
 }
 
 /// Durable guard used by the implementation scheduler while automatic
@@ -165,6 +227,32 @@ pub trait FactoryRunStore {
     fn record_event(&mut self, event: FactoryEventRecord) -> Result<()>;
     fn renew_lease(&mut self, stage_run_id: &str, owner_instance: &str) -> Result<bool>;
     fn interrupt_stale_attempts(&mut self) -> Result<u64>;
+    /// Mark one running attempt interrupted. Used by restart recovery once the
+    /// prior owner's lease is stale; returns `false` when the attempt is already
+    /// terminal or owned by someone else.
+    fn interrupt_attempt(&mut self, stage_run_id: &str, owner_instance: &str) -> Result<bool>;
+    /// Record the spawned child's OS identity and disposable paths so a later
+    /// process can decide whether the recorded process group is still this
+    /// attempt, and which directories to reclaim.
+    fn record_attempt_process(&mut self, request: RecordAttemptProcessRequest) -> Result<()>;
+    /// Attempts a restart must clean up: interrupted, and still holding
+    /// disposable paths or a recorded process group.
+    fn list_recoverable_attempts(&self) -> Result<Vec<RecoverableAttempt>>;
+    /// Clear the recorded process and paths once recovery has reclaimed them,
+    /// so the same attempt is not swept twice.
+    fn clear_attempt_process(&mut self, stage_run_id: &str) -> Result<()>;
+    /// Applied automatic publications whose issues can be re-read to measure
+    /// whether a human later changed the route.
+    fn list_correction_candidates(&self, limit: usize) -> Result<Vec<CorrectionCandidate>>;
+    /// Record one post-publication observation. Returns `false` when this
+    /// artifact already recorded the same observation, which keeps the
+    /// reconciler idempotent across polls.
+    fn record_route_observation(
+        &mut self,
+        artifact_id: &str,
+        kind: RouteObservationKind,
+        value: &str,
+    ) -> Result<bool>;
     fn triage_metrics(&self) -> Result<TriageMetricsAggregate>;
 }
 
@@ -199,7 +287,9 @@ impl SqliteFactoryStore {
         let conn = Connection::open(path).map_err(storage_error)?;
         conn.busy_timeout(StdDuration::from_millis(busy_timeout_ms))
             .map_err(storage_error)?;
-        conn.execute_batch(INIT_SQL).map_err(storage_error)?;
+        for migration in MIGRATIONS {
+            conn.execute_batch(migration).map_err(storage_error)?;
+        }
 
         Ok(Self {
             conn,
@@ -348,6 +438,16 @@ impl FactoryRunStore for SqliteFactoryStore {
         let now_s = ts(now);
         let tx = self.conn.transaction().map_err(storage_error)?;
         let stage = select_stage_run(&tx, &request.stage_run_id)?;
+        // Only a still-running attempt may complete. A restart that interrupted
+        // this attempt has already released it for retry, so accepting late
+        // output here would silently turn an abandoned attempt into a success.
+        if stage.status != StageStatus::Running {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is {} and cannot accept triage output",
+                request.stage_run_id,
+                stage.status.as_str()
+            )));
+        }
         let artifact_id = new_id();
         let artifact_json = serde_json::to_string(&request.artifact).map_err(storage_error)?;
 
@@ -979,6 +1079,190 @@ impl FactoryRunStore for SqliteFactoryStore {
         Ok(changed == 1)
     }
 
+    fn interrupt_attempt(&mut self, stage_run_id: &str, owner_instance: &str) -> Result<bool> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE stage_runs
+                 SET status = ?1, completed_at = ?2, updated_at = ?2
+                 WHERE stage_run_id = ?3 AND owner_instance = ?4 AND status = ?5",
+                params![
+                    StageStatus::Interrupted.as_str(),
+                    now_s,
+                    stage_run_id,
+                    owner_instance,
+                    StageStatus::Running.as_str(),
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    fn record_attempt_process(&mut self, request: RecordAttemptProcessRequest) -> Result<()> {
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "UPDATE stage_runs
+                 SET pid = ?1, process_group_id = ?2, process_start_token = ?3,
+                     executable_identity = ?4, workspace_path = ?5, output_path = ?6,
+                     updated_at = ?7
+                 WHERE stage_run_id = ?8 AND owner_instance = ?9 AND status = ?10",
+                params![
+                    request.identity.pid,
+                    request.identity.process_group_id,
+                    request.identity.start_token,
+                    request.identity.executable,
+                    request.workspace_path,
+                    request.output_path,
+                    now_s,
+                    request.stage_run_id,
+                    request.owner_instance,
+                    StageStatus::Running.as_str(),
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    fn list_recoverable_attempts(&self) -> Result<Vec<RecoverableAttempt>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT stage_run_id, run_id, owner_instance, pid, process_group_id,
+                        process_start_token, executable_identity, workspace_path, output_path
+                 FROM stage_runs
+                 WHERE stage = ?1 AND status = ?2
+                   AND (pid IS NOT NULL OR workspace_path IS NOT NULL OR output_path IS NOT NULL)
+                 ORDER BY updated_at",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(
+                params![TRIAGE_STAGE_NAME, StageStatus::Interrupted.as_str()],
+                |row| {
+                    let pid: Option<i64> = row.get(3)?;
+                    let process_group_id: Option<i64> = row.get(4)?;
+                    let start_token: Option<String> = row.get(5)?;
+                    let executable: Option<String> = row.get(6)?;
+                    // Only a fully recorded identity can authorize signalling.
+                    let identity = match (pid, process_group_id) {
+                        (Some(pid), Some(process_group_id)) => Some(ProcessIdentity {
+                            pid,
+                            process_group_id,
+                            start_token,
+                            executable,
+                        }),
+                        _ => None,
+                    };
+                    Ok(RecoverableAttempt {
+                        stage_run_id: row.get(0)?,
+                        run_id: row.get(1)?,
+                        owner_instance: row.get(2)?,
+                        identity,
+                        workspace_path: row.get(7)?,
+                        output_path: row.get(8)?,
+                    })
+                },
+            )
+            .map_err(storage_error)?;
+        let mut attempts = Vec::new();
+        for row in rows {
+            attempts.push(row.map_err(storage_error)?);
+        }
+        Ok(attempts)
+    }
+
+    fn clear_attempt_process(&mut self, stage_run_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE stage_runs
+                 SET pid = NULL, process_group_id = NULL, process_start_token = NULL,
+                     executable_identity = NULL, workspace_path = NULL, output_path = NULL,
+                     updated_at = ?1
+                 WHERE stage_run_id = ?2",
+                params![ts(Self::now()), stage_run_id],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    fn list_correction_candidates(&self, limit: usize) -> Result<Vec<CorrectionCandidate>> {
+        // Only the latest applied automatic publication per run is measurable:
+        // a later triage attempt resets the decision under observation. RANDOM
+        // ordering rotates the bounded batch so older runs are not starved when
+        // more than `limit` candidates exist.
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT i.run_id, a.stage_run_id, i.artifact_id, i.intent_id, r.issue_id,
+                        r.issue_identifier, i.intake_label, a.route, i.desired_effects_json
+                 FROM publication_intents i
+                 JOIN triage_artifacts a ON a.artifact_id = i.artifact_id
+                 JOIN factory_runs r ON r.run_id = i.run_id
+                 WHERE i.mode = ?1 AND i.status = ?2
+                   AND NOT EXISTS (
+                     SELECT 1 FROM publication_intents newer
+                     WHERE newer.run_id = i.run_id
+                       AND newer.mode = i.mode
+                       AND newer.status = i.status
+                       AND (
+                         newer.updated_at > i.updated_at
+                         OR (newer.updated_at = i.updated_at AND newer.intent_id > i.intent_id)
+                       )
+                   )
+                 ORDER BY RANDOM()
+                 LIMIT ?3",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    PublicationMode::Automatic.as_str(),
+                    PublicationStatus::Applied.as_str(),
+                    limit as i64,
+                ],
+                |row| {
+                    let desired: String = row.get(8)?;
+                    Ok(CorrectionCandidate {
+                        run_id: row.get(0)?,
+                        stage_run_id: row.get(1)?,
+                        artifact_id: row.get(2)?,
+                        intent_id: row.get(3)?,
+                        issue_id: row.get(4)?,
+                        issue_identifier: row.get(5)?,
+                        intake_label: row.get(6)?,
+                        published_route: row.get(7)?,
+                        desired_effects: serde_json::from_str(&desired)
+                            .unwrap_or(serde_json::Value::Null),
+                    })
+                },
+            )
+            .map_err(storage_error)?;
+        let mut candidates = Vec::new();
+        for row in rows {
+            candidates.push(row.map_err(storage_error)?);
+        }
+        Ok(candidates)
+    }
+
+    fn record_route_observation(
+        &mut self,
+        artifact_id: &str,
+        kind: RouteObservationKind,
+        value: &str,
+    ) -> Result<bool> {
+        let inserted = self
+            .conn
+            .execute(
+                "INSERT OR IGNORE INTO route_observations (artifact_id, kind, value, observed_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![artifact_id, kind.as_str(), value, ts(Self::now())],
+            )
+            .map_err(storage_error)?;
+        Ok(inserted == 1)
+    }
+
     fn interrupt_stale_attempts(&mut self) -> Result<u64> {
         let stale_before = ts(Self::now() - Duration::milliseconds(TRIAGE_LEASE_STALE_AFTER_MS));
         let changed = self
@@ -1533,6 +1817,269 @@ mod tests {
                 usage: StageUsage::default(),
             })
             .is_err());
+    }
+
+    /// Late output from an attempt a restart already gave up on must not be able
+    /// to resurrect it as a success; the interrupted attempt has to stay
+    /// terminal so retry accounting and `max_attempts` keep meaning something.
+    #[test]
+    fn interrupted_attempt_cannot_be_completed_by_late_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let attempt = store
+            .claim_attempt(claim_request("issue-rev", "config-rev"))
+            .unwrap();
+        store
+            .interrupt_attempt(&attempt.stage_run_id, "owner-1")
+            .unwrap();
+
+        let late = store.store_artifact(StoreArtifactRequest {
+            stage_run_id: attempt.stage_run_id.clone(),
+            issue_revision: "issue-rev".to_string(),
+            configuration_revision: "config-rev".to_string(),
+            route_mapping_hash: "routes".to_string(),
+            artifact: artifact(TriageRoute::Implement),
+            bytes_len: 200,
+            usage: StageUsage::default(),
+        });
+
+        assert!(late.is_err(), "interrupted attempt must reject late output");
+        let stage = store.get_stage_run(&attempt.stage_run_id).unwrap().unwrap();
+        assert_eq!(stage.status, StageStatus::Interrupted);
+        assert!(store.get_latest_artifact(&stage.run_id).unwrap().is_none());
+    }
+
+    /// Recovery can only reclaim what the running attempt recorded, so the
+    /// child's identity and disposable paths must survive into the interrupted
+    /// record; a claim that never recorded a process must not be swept.
+    #[test]
+    fn interrupted_attempt_exposes_recorded_process_for_recovery() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let attempt = store
+            .claim_attempt(ClaimAttemptRequest {
+                workspace_path: None,
+                output_path: None,
+                pid: None,
+                process_group_id: None,
+                process_start_token: None,
+                executable_identity: None,
+                ..claim_request("issue-rev", "config-rev")
+            })
+            .unwrap();
+
+        assert!(
+            store.list_recoverable_attempts().unwrap().is_empty(),
+            "a running attempt is not recoverable work"
+        );
+
+        store
+            .record_attempt_process(RecordAttemptProcessRequest {
+                stage_run_id: attempt.stage_run_id.clone(),
+                owner_instance: "owner-1".to_string(),
+                identity: ProcessIdentity {
+                    pid: 4321,
+                    process_group_id: 4321,
+                    start_token: Some("99887766".to_string()),
+                    executable: Some("/usr/bin/pi".to_string()),
+                },
+                workspace_path: Some("/tmp/attempt/workspace".to_string()),
+                output_path: Some("/tmp/attempt/stage-output/result.json".to_string()),
+            })
+            .unwrap();
+        store
+            .interrupt_attempt(&attempt.stage_run_id, "owner-1")
+            .unwrap();
+
+        let recoverable = store.list_recoverable_attempts().unwrap();
+        assert_eq!(recoverable.len(), 1);
+        let identity = recoverable[0].identity.as_ref().expect("identity recorded");
+        assert_eq!(identity.pid, 4321);
+        assert_eq!(identity.process_group_id, 4321);
+        assert_eq!(identity.start_token.as_deref(), Some("99887766"));
+        assert_eq!(identity.executable.as_deref(), Some("/usr/bin/pi"));
+        assert_eq!(
+            recoverable[0].workspace_path.as_deref(),
+            Some("/tmp/attempt/workspace")
+        );
+
+        store.clear_attempt_process(&attempt.stage_run_id).unwrap();
+        assert!(
+            store.list_recoverable_attempts().unwrap().is_empty(),
+            "a reclaimed attempt must not be swept again"
+        );
+    }
+
+    /// Correction measurement re-reads published issues from durable records,
+    /// so only applied automatic publications are candidates, and each artifact
+    /// records a given observation once.
+    #[test]
+    fn lists_applied_automatic_publications_as_correction_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let attempt = store
+            .claim_attempt(claim_request("issue-rev", "config-rev"))
+            .unwrap();
+        let artifact = store
+            .store_artifact(StoreArtifactRequest {
+                stage_run_id: attempt.stage_run_id,
+                issue_revision: "issue-rev".to_string(),
+                configuration_revision: "config-rev".to_string(),
+                route_mapping_hash: "routes".to_string(),
+                artifact: artifact(TriageRoute::Implement),
+                bytes_len: 200,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+        let intent = store
+            .create_publication_intent(CreatePublicationIntentRequest {
+                run_id: artifact.run_id.clone(),
+                artifact_id: Some(artifact.artifact_id.clone()),
+                mode: PublicationMode::Automatic,
+                intake_label: "needs-triage".to_string(),
+                route_label: "ready-for-agent".to_string(),
+                project_state: Some("Todo".to_string()),
+                route_mapping_hash: "routes".to_string(),
+                desired_effects: serde_json::json!({"kind": "automatic_route"}),
+                observed_baseline: serde_json::json!({}),
+                expected_projection: serde_json::json!({}),
+            })
+            .unwrap();
+
+        assert!(
+            store.list_correction_candidates(10).unwrap().is_empty(),
+            "a pending publication is not yet a measurable decision"
+        );
+
+        store
+            .update_publication_step(
+                &intent.intent_id,
+                "comment_applied",
+                PublicationStatus::Applied,
+                None,
+            )
+            .unwrap();
+
+        let candidates = store.list_correction_candidates(10).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].published_route, "implement");
+        assert_eq!(candidates[0].issue_identifier, "#123");
+        assert_eq!(candidates[0].intake_label, "needs-triage");
+
+        assert!(store
+            .record_route_observation(
+                &artifact.artifact_id,
+                RouteObservationKind::Corrected,
+                "spec"
+            )
+            .unwrap());
+        assert!(
+            !store
+                .record_route_observation(
+                    &artifact.artifact_id,
+                    RouteObservationKind::Corrected,
+                    "spec"
+                )
+                .unwrap(),
+            "the same correction must only ever be recorded once"
+        );
+    }
+
+    /// A later triage attempt on the same run supersedes the earlier publication
+    /// for correction measurement; comparing against both would count a legitimate
+    /// new route as a correction to the old artifact.
+    #[test]
+    fn correction_candidates_use_latest_applied_publication_per_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+
+        let first_attempt = store
+            .claim_attempt(claim_request("issue-rev-1", "config-rev"))
+            .unwrap();
+        let first_artifact = store
+            .store_artifact(StoreArtifactRequest {
+                stage_run_id: first_attempt.stage_run_id,
+                issue_revision: "issue-rev-1".to_string(),
+                configuration_revision: "config-rev".to_string(),
+                route_mapping_hash: "routes".to_string(),
+                artifact: artifact(TriageRoute::Implement),
+                bytes_len: 200,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+        let first_intent = store
+            .create_publication_intent(CreatePublicationIntentRequest {
+                run_id: first_artifact.run_id.clone(),
+                artifact_id: Some(first_artifact.artifact_id.clone()),
+                mode: PublicationMode::Automatic,
+                intake_label: "needs-triage".to_string(),
+                route_label: "ready-for-agent".to_string(),
+                project_state: Some("Todo".to_string()),
+                route_mapping_hash: "routes".to_string(),
+                desired_effects: serde_json::json!({"kind": "automatic_route"}),
+                observed_baseline: serde_json::json!({}),
+                expected_projection: serde_json::json!({}),
+            })
+            .unwrap();
+        store
+            .update_publication_step(
+                &first_intent.intent_id,
+                "comment_applied",
+                PublicationStatus::Applied,
+                None,
+            )
+            .unwrap();
+
+        let second_attempt = store
+            .claim_attempt(claim_request("issue-rev-2", "config-rev"))
+            .unwrap();
+        let second_artifact = store
+            .store_artifact(StoreArtifactRequest {
+                stage_run_id: second_attempt.stage_run_id,
+                issue_revision: "issue-rev-2".to_string(),
+                configuration_revision: "config-rev".to_string(),
+                route_mapping_hash: "routes".to_string(),
+                artifact: artifact(TriageRoute::Spec),
+                bytes_len: 200,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+        assert_eq!(
+            second_artifact.run_id, first_artifact.run_id,
+            "both attempts belong to the same factory run"
+        );
+        let second_intent = store
+            .create_publication_intent(CreatePublicationIntentRequest {
+                run_id: second_artifact.run_id.clone(),
+                artifact_id: Some(second_artifact.artifact_id.clone()),
+                mode: PublicationMode::Automatic,
+                intake_label: "needs-triage".to_string(),
+                route_label: "ready-to-spec".to_string(),
+                project_state: Some("Todo".to_string()),
+                route_mapping_hash: "routes".to_string(),
+                desired_effects: serde_json::json!({"kind": "automatic_route"}),
+                observed_baseline: serde_json::json!({}),
+                expected_projection: serde_json::json!({}),
+            })
+            .unwrap();
+        store
+            .update_publication_step(
+                &second_intent.intent_id,
+                "comment_applied",
+                PublicationStatus::Applied,
+                None,
+            )
+            .unwrap();
+
+        let candidates = store.list_correction_candidates(10).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].artifact_id, second_artifact.artifact_id);
+        assert_eq!(candidates[0].published_route, "spec");
+        assert_eq!(candidates[0].intent_id, second_intent.intent_id);
     }
 
     #[test]
