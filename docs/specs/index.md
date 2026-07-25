@@ -5,7 +5,7 @@ Roadmap for planned and completed work. Historical Superpowers designs and plans
 # Active
 
 * [Symphony Software Factory Platform PRD](symphony-software-factory-platform-prd.md) - product requirements and vertical-slice roadmap for the full software factory platform
-* [A1 GitHub Issue Triage](2026-07-16-a1-github-issue-triage-design.md) - Active design; **PR1 shipped**; **PR2 Verify accepted** (merge pending) ([build](2026-07-24-a1-pr2-build-report.md), [verify](2026-07-24-a1-pr2-verify-report.md)); **PR3 Verify rejected** on orphan termination ([build](2026-07-25-a1-pr3-build-report.md), [verify](2026-07-25-a1-pr3-verify-report.md))
+* [A1 GitHub Issue Triage](2026-07-16-a1-github-issue-triage-design.md) - Active design; **PR1 shipped**; **PR2 Verify accepted** (merge pending) ([build](2026-07-24-a1-pr2-build-report.md), [verify](2026-07-24-a1-pr2-verify-report.md)); **PR3 remediation passes automated gates, live re-verify blocked on credential rotation** ([build](2026-07-25-a1-pr3-build-report.md), [rejected verify](2026-07-25-a1-pr3-verify-report.md), [incomplete re-verify](2026-07-25-a1-pr3-reverify-report.md))
 * [A2 Spec Stage](2026-07-18-a2-spec-stage-design.md) - Draft design; spec-routed issues → draft/review/revise pipeline → published versioned spec → label-driven approval → implementation-ready run
 * [Pi Symphony Extension Design](../superpowers/specs/2026-05-14-pi-symphony-extension-design.md) - Pi extension to init, launch, monitor, and steer Symphony
 * [Wave 4 Shared Context and Diagnostics Plan](../superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md) - dashboard parity for shared context + diagnostics
@@ -16,7 +16,7 @@ _None recorded._
 
 # Blocked
 
-* A1 PR3 recovery and agreement measurement — live correction/metrics checks pass, but restart recovery leaves a post-`exec` orphan alive; fix executable-identity handling and rerun restart Verify ([report](2026-07-25-a1-pr3-verify-report.md))
+* A1 PR3 recovery and agreement measurement — post-`exec` recovery and evidence cleanup remediation pass automated gates; revoke committed UAT credentials, merge repository cleanup, then rerun live restart/evidence Verify ([rejected report](2026-07-25-a1-pr3-verify-report.md), [incomplete re-verify](2026-07-25-a1-pr3-reverify-report.md))
 
 # Completed (recent)
 

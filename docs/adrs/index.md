@@ -7,6 +7,7 @@ When `/domain-modeling` or architecture work records a decision, place it under 
 # Accepted
 
 * [ADR-0001 A1 triage durability and isolation](0001-a1-triage-durability-and-isolation.md) - SQLite factory runs, forge-host identity, Projects v2 membership keys, local runner isolation, lease renewal, preview intents
+* [ADR-0002 Triage process recovery identity](0002-triage-process-recovery-identity.md) - PID, process group, and OS start token authorize recovery; executable identity is diagnostic
 
 # Proposed
 

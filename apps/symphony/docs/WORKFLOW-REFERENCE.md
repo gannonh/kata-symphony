@@ -510,9 +510,10 @@ server:
 #
 # Restart recovery: each poll interrupts attempts whose lease went stale, then
 # reclaims them. A recorded triage child is terminated only when its pid,
-# process group, OS start token and executable all still match, so a reused PID
-# is never signalled; otherwise Symphony skips the signal. The attempt's
-# disposable directory is removed before retry, and the attempt stays
+# process group, and OS start token still match, so a reused PID is never
+# signalled. The recorded executable is diagnostic because a launcher may
+# legitimately replace itself through `exec`; otherwise Symphony skips the
+# signal. The attempt's disposable directory is removed before retry, and the attempt stays
 # interrupted so it still counts against `max_attempts`. Late output from an
 # interrupted attempt is rejected rather than recorded as success.
 #

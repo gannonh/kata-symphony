@@ -115,3 +115,17 @@ The sandbox had no Rust toolchain despite the repo's environment notes; stable R
 ## Build handoff to Verify
 
 Verify should cover the restart, retry, correction, and agreement portions of criteria 4 and 14–18, with live GitHub evidence on `gannonh/uat-symphony`.
+
+## 2026-07-25 remediation addendum
+
+The initial Verify run found that executable equality rejected a legitimate
+launcher-to-worker `exec` transition and made the recovery test flaky. Commit
+`66f3da1` now authorizes signaling with PID, process group, and OS start token,
+retains executable identity as diagnostics, rechecks identity before signaling,
+and verifies that no running group member remains. A deterministic FIFO-backed
+launcher regression covers the exact failure shape.
+
+Commit `424bd4b` makes Symphony UAT evidence self-contained and validates every
+GitHub cleanup target before provider work. The automated remediation gates pass;
+live re-verification remains gated on credential containment as recorded in the
+[re-verify report](2026-07-25-a1-pr3-reverify-report.md).
