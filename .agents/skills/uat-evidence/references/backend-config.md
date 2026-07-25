@@ -104,6 +104,11 @@ node <skill-directory>/scripts/uat-evidence.mjs test --runtime symphony-runtime 
   --github-project-number 17
 ```
 
+Symphony evidence stores these effective coordinates in sanitized form. Later
+cleanup normally needs only `--evidence`; explicit repository overrides are
+required only for ambiguous legacy evidence and must agree with every created
+issue URL.
+
 ### Linear
 
 The runner needs:
