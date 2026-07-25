@@ -229,7 +229,7 @@ where
         };
 
         self.store.interrupt_stale_attempts()?;
-        summary.recovered_attempts = self.recover_interrupted_attempts().await?;
+        summary.recovered_attempts = self.recover_interrupted_attempts(service).await?;
         summary.reconciled_intents = self
             .reconcile_pending_intents(service, self.max_pages)
             .await?;
@@ -314,15 +314,29 @@ where
     /// workspace. The child is signalled only when its PID, group, and OS start
     /// token still match, so a reused PID is never killed. Its executable may
     /// change legitimately through `exec` and is logged as diagnostic drift.
-    /// The attempt directory is then removed so the retry starts clean. The
-    /// attempt itself stays interrupted and counts against `max_attempts`.
-    async fn recover_interrupted_attempts(&mut self) -> Result<u32> {
+    /// Workspace cleanup and clearing the durable process record happen only
+    /// after the orphan is confirmed gone (terminated or no longer present),
+    /// so a still-live child keeps its identity for a later poll. The attempt
+    /// itself stays interrupted and counts against `max_attempts`.
+    async fn recover_interrupted_attempts(&mut self, service: &ServiceConfig) -> Result<u32> {
         let attempts = self.store.list_recoverable_attempts()?;
+        let workspace_root = match resolve_workspace_path(&service.workspace.root, "workspace.root")
+        {
+            Ok(root) => root,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "skipping interrupted-attempt recovery; workspace.root is not usable"
+                );
+                return Ok(0);
+            }
+        };
         let mut recovered = 0;
 
         for attempt in attempts {
+            let mut reclaim = true;
             if let Some(identity) = attempt.identity.as_ref() {
-                match process_identity::assess_signalability(identity) {
+                reclaim = match process_identity::assess_signalability(identity) {
                     process_identity::Signalability::Authorized { executable } => {
                         if let process_identity::ExecutableComparison::Changed { recorded, live } =
                             &executable
@@ -348,8 +362,13 @@ where
                                     process_group_id = identity.process_group_id,
                                     "orphaned triage process group terminated"
                                 );
+                                true
                             }
                             process_identity::TerminationOutcome::NoLongerSignalable(reason) => {
+                                let gone = matches!(
+                                    reason,
+                                    process_identity::SignalBlockReason::ProcessNotFound
+                                );
                                 tracing::warn!(
                                     stage_run_id = attempt.stage_run_id,
                                     pid = identity.pid,
@@ -357,29 +376,55 @@ where
                                     reason = %reason,
                                     "triage process identity changed before termination; signal skipped"
                                 );
+                                gone
                             }
                             process_identity::TerminationOutcome::StillRunning => {
                                 tracing::warn!(
                                     stage_run_id = attempt.stage_run_id,
                                     pid = identity.pid,
                                     process_group_id = identity.process_group_id,
-                                    "orphaned triage process group remains live after bounded termination"
+                                    "orphaned triage process group remains live after bounded termination; retaining process record"
                                 );
+                                false
                             }
                         }
                     }
-                    process_identity::Signalability::Denied(reason) => tracing::warn!(
-                        stage_run_id = attempt.stage_run_id,
-                        pid = identity.pid,
-                        process_group_id = identity.process_group_id,
-                        reason = %reason,
-                        "skipping orphan signal; recorded triage process identity is not signalable"
-                    ),
-                }
+                    process_identity::Signalability::Denied(reason) => {
+                        let gone = matches!(
+                            reason,
+                            process_identity::SignalBlockReason::ProcessNotFound
+                        );
+                        if gone {
+                            tracing::info!(
+                                stage_run_id = attempt.stage_run_id,
+                                pid = identity.pid,
+                                process_group_id = identity.process_group_id,
+                                "recorded triage process is already gone; reclaiming attempt directory"
+                            );
+                        } else {
+                            tracing::warn!(
+                                stage_run_id = attempt.stage_run_id,
+                                pid = identity.pid,
+                                process_group_id = identity.process_group_id,
+                                reason = %reason,
+                                "skipping orphan reclaim; recorded triage process identity is not signalable"
+                            );
+                        }
+                        gone
+                    }
+                };
+            }
+
+            if !reclaim {
+                continue;
             }
 
             if let Some(workspace) = attempt.workspace_path.as_deref() {
-                match process_identity::attempt_root_for_cleanup(Path::new(workspace)) {
+                match process_identity::attempt_root_for_cleanup(
+                    Path::new(workspace),
+                    &workspace_root,
+                    &attempt.stage_run_id,
+                ) {
                     Some(root) => {
                         if let Err(err) = std::fs::remove_dir_all(&root) {
                             if err.kind() != std::io::ErrorKind::NotFound {
@@ -397,7 +442,8 @@ where
                     None => tracing::warn!(
                         stage_run_id = attempt.stage_run_id,
                         path = workspace,
-                        "recorded triage workspace is not an attempt directory; not removing"
+                        workspace_root = %workspace_root.display(),
+                        "recorded triage workspace is not an attempt directory under workspace.root; not removing"
                     ),
                 }
             }
@@ -2166,11 +2212,6 @@ mod tests {
             }
         ));
 
-        let attempt_root = temp.path().join("workspaces").join("triage-stale-attempt");
-        let workspace_path = attempt_root.join("workspace");
-        std::fs::create_dir_all(&workspace_path).unwrap();
-        std::fs::write(workspace_path.join("README.md"), "clone\n").unwrap();
-
         let stage = store
             .claim_attempt(ClaimAttemptRequest {
                 forge_host: "github.com".to_string(),
@@ -2190,6 +2231,14 @@ mod tests {
                 executable_identity: None,
             })
             .unwrap();
+        // Mirror the runner layout: triage-<stage_run_id> under workspace.root.
+        let attempt_root = workflow_dir
+            .join("workspaces")
+            .join(format!("triage-{}", stage.stage_run_id));
+        let workspace_path = attempt_root.join("workspace");
+        std::fs::create_dir_all(&workspace_path).unwrap();
+        std::fs::write(workspace_path.join("README.md"), "clone\n").unwrap();
+
         store
             .record_attempt_process(RecordAttemptProcessRequest {
                 stage_run_id: stage.stage_run_id.clone(),

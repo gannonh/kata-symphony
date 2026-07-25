@@ -1188,6 +1188,10 @@ impl FactoryRunStore for SqliteFactoryStore {
     }
 
     fn list_correction_candidates(&self, limit: usize) -> Result<Vec<CorrectionCandidate>> {
+        // Only the latest applied automatic publication per run is measurable:
+        // a later triage attempt resets the decision under observation. RANDOM
+        // ordering rotates the bounded batch so older runs are not starved when
+        // more than `limit` candidates exist.
         let mut stmt = self
             .conn
             .prepare(
@@ -1197,7 +1201,17 @@ impl FactoryRunStore for SqliteFactoryStore {
                  JOIN triage_artifacts a ON a.artifact_id = i.artifact_id
                  JOIN factory_runs r ON r.run_id = i.run_id
                  WHERE i.mode = ?1 AND i.status = ?2
-                 ORDER BY i.updated_at DESC
+                   AND NOT EXISTS (
+                     SELECT 1 FROM publication_intents newer
+                     WHERE newer.run_id = i.run_id
+                       AND newer.mode = i.mode
+                       AND newer.status = i.status
+                       AND (
+                         newer.updated_at > i.updated_at
+                         OR (newer.updated_at = i.updated_at AND newer.intent_id > i.intent_id)
+                       )
+                   )
+                 ORDER BY RANDOM()
                  LIMIT ?3",
             )
             .map_err(storage_error)?;
@@ -1972,6 +1986,100 @@ mod tests {
                 .unwrap(),
             "the same correction must only ever be recorded once"
         );
+    }
+
+    /// A later triage attempt on the same run supersedes the earlier publication
+    /// for correction measurement; comparing against both would count a legitimate
+    /// new route as a correction to the old artifact.
+    #[test]
+    fn correction_candidates_use_latest_applied_publication_per_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+
+        let first_attempt = store
+            .claim_attempt(claim_request("issue-rev-1", "config-rev"))
+            .unwrap();
+        let first_artifact = store
+            .store_artifact(StoreArtifactRequest {
+                stage_run_id: first_attempt.stage_run_id,
+                issue_revision: "issue-rev-1".to_string(),
+                configuration_revision: "config-rev".to_string(),
+                route_mapping_hash: "routes".to_string(),
+                artifact: artifact(TriageRoute::Implement),
+                bytes_len: 200,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+        let first_intent = store
+            .create_publication_intent(CreatePublicationIntentRequest {
+                run_id: first_artifact.run_id.clone(),
+                artifact_id: Some(first_artifact.artifact_id.clone()),
+                mode: PublicationMode::Automatic,
+                intake_label: "needs-triage".to_string(),
+                route_label: "ready-for-agent".to_string(),
+                project_state: Some("Todo".to_string()),
+                route_mapping_hash: "routes".to_string(),
+                desired_effects: serde_json::json!({"kind": "automatic_route"}),
+                observed_baseline: serde_json::json!({}),
+                expected_projection: serde_json::json!({}),
+            })
+            .unwrap();
+        store
+            .update_publication_step(
+                &first_intent.intent_id,
+                "comment_applied",
+                PublicationStatus::Applied,
+                None,
+            )
+            .unwrap();
+
+        let second_attempt = store
+            .claim_attempt(claim_request("issue-rev-2", "config-rev"))
+            .unwrap();
+        let second_artifact = store
+            .store_artifact(StoreArtifactRequest {
+                stage_run_id: second_attempt.stage_run_id,
+                issue_revision: "issue-rev-2".to_string(),
+                configuration_revision: "config-rev".to_string(),
+                route_mapping_hash: "routes".to_string(),
+                artifact: artifact(TriageRoute::Spec),
+                bytes_len: 200,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+        assert_eq!(
+            second_artifact.run_id, first_artifact.run_id,
+            "both attempts belong to the same factory run"
+        );
+        let second_intent = store
+            .create_publication_intent(CreatePublicationIntentRequest {
+                run_id: second_artifact.run_id.clone(),
+                artifact_id: Some(second_artifact.artifact_id.clone()),
+                mode: PublicationMode::Automatic,
+                intake_label: "needs-triage".to_string(),
+                route_label: "ready-to-spec".to_string(),
+                project_state: Some("Todo".to_string()),
+                route_mapping_hash: "routes".to_string(),
+                desired_effects: serde_json::json!({"kind": "automatic_route"}),
+                observed_baseline: serde_json::json!({}),
+                expected_projection: serde_json::json!({}),
+            })
+            .unwrap();
+        store
+            .update_publication_step(
+                &second_intent.intent_id,
+                "comment_applied",
+                PublicationStatus::Applied,
+                None,
+            )
+            .unwrap();
+
+        let candidates = store.list_correction_candidates(10).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].artifact_id, second_artifact.artifact_id);
+        assert_eq!(candidates[0].published_route, "spec");
+        assert_eq!(candidates[0].intent_id, second_intent.intent_id);
     }
 
     #[test]

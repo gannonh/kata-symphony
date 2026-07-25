@@ -723,6 +723,13 @@ async fn codex_session_start(
         .env_clear()
         .envs(env);
 
+    // Own process group, same as the Pi path: recovery must be able to signal
+    // the Codex app-server without targeting Symphony's group.
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+
     let mut child = command.spawn().map_err(|err| {
         failure(
             TriageRunnerFailureKind::Spawn,
@@ -730,7 +737,7 @@ async fn codex_session_start(
         )
     })?;
 
-    report_spawn(request, layout, child.id(), false);
+    report_spawn(request, layout, child.id(), cfg!(unix));
     let mut stdin = child.stdin.take().expect("stdin piped");
     let stdout = child.stdout.take().expect("stdout piped");
     if let Some(stderr) = child.stderr.take() {

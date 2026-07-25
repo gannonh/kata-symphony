@@ -233,17 +233,32 @@ fn ps_field(pid: i64, format: &str) -> Option<String> {
 pub const ATTEMPT_DIR_PREFIX: &str = "triage-";
 
 /// The attempt root holding a recorded workspace, or `None` when the recorded
-/// path is not one the triage runner created.
+/// path is not one the triage runner created under the configured workspace
+/// root.
 ///
 /// Cleanup deletes recursively, so it only ever accepts a directory named
-/// `triage-<attempt id>`. A stale, hand-edited, or corrupted `workspace_path`
-/// therefore cannot make recovery delete a real repository or the workspace
-/// root itself.
-pub fn attempt_root_for_cleanup(workspace_path: &Path) -> Option<PathBuf> {
+/// exactly `triage-<stage_run_id>` that is a direct child of `workspace_root`.
+/// A stale, hand-edited, or corrupted `workspace_path` therefore cannot make
+/// recovery delete a real repository or an unrelated `triage-*` tree.
+pub fn attempt_root_for_cleanup(
+    workspace_path: &Path,
+    workspace_root: &Path,
+    stage_run_id: &str,
+) -> Option<PathBuf> {
     let root = workspace_path.parent()?;
-    let name = root.file_name()?.to_str()?;
-    name.starts_with(ATTEMPT_DIR_PREFIX)
-        .then(|| root.to_path_buf())
+    let expected_name = format!("{ATTEMPT_DIR_PREFIX}{stage_run_id}");
+    if root.file_name()?.to_str()? != expected_name {
+        return None;
+    }
+    let parent = root.parent()?;
+    paths_equal(parent, workspace_root).then(|| root.to_path_buf())
+}
+
+fn paths_equal(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 /// Terminate the recorded process group after re-checking stable identity:
@@ -618,21 +633,38 @@ mod tests {
     }
 
     /// Cleanup removes directories recursively, so it must only ever accept a
-    /// root the triage runner created. Anything else could be a real repository
-    /// or the shared workspace root.
+    /// root the triage runner created under the configured workspace root.
     #[test]
     fn cleanup_root_accepts_only_runner_created_attempt_dirs() {
+        let workspace_root = Path::new("/srv/workspaces");
         assert_eq!(
-            attempt_root_for_cleanup(Path::new("/srv/workspaces/triage-abc123/workspace")),
+            attempt_root_for_cleanup(
+                Path::new("/srv/workspaces/triage-abc123/workspace"),
+                workspace_root,
+                "abc123",
+            ),
             Some(PathBuf::from("/srv/workspaces/triage-abc123"))
         );
         assert_eq!(
-            attempt_root_for_cleanup(Path::new("/home/dev/my-project/workspace")),
+            attempt_root_for_cleanup(
+                Path::new("/home/user/triage-project/workspace"),
+                workspace_root,
+                "project",
+            ),
             None,
-            "a path outside a triage attempt dir must never be deleted"
+            "a triage-* path outside the configured workspace root must never be deleted"
         );
         assert_eq!(
-            attempt_root_for_cleanup(Path::new("/srv/workspaces")),
+            attempt_root_for_cleanup(
+                Path::new("/srv/workspaces/triage-other/workspace"),
+                workspace_root,
+                "abc123",
+            ),
+            None,
+            "attempt id in the directory name must match the recorded stage_run_id"
+        );
+        assert_eq!(
+            attempt_root_for_cleanup(Path::new("/srv/workspaces"), workspace_root, "abc123"),
             None,
             "the workspace root itself must never be deleted"
         );
