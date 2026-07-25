@@ -668,11 +668,22 @@ where
                     .await?;
             }
             MutationKind::RemoveLabels(labels) => {
+                // Persist each successful removal so a crash mid-cleanup leaves
+                // expected projection on a publisher-owned intermediate state
+                // instead of looking like a human conflict on retry.
+                let mut progressive = current.clone();
                 for label in labels {
-                    if current.contains_label(&label) {
+                    if progressive.contains_label(&label) {
                         self.routing
                             .remove_issue_label(issue_number, &label)
                             .await?;
+                        progressive = progressive.without_label(&label);
+                        store.record_publication_step(
+                            &intent.intent_id,
+                            "",
+                            PublicationStatus::Pending,
+                            &progressive.to_json(),
+                        )?;
                     }
                 }
             }
@@ -1303,6 +1314,82 @@ mod tests {
             routing.labels_now(),
             vec!["docs".to_string(), "ready-for-agent".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn automatic_crash_mid_conflict_cleanup_resumes_without_false_conflict() {
+        let (_temp, mut store, intent) = store_with_automatic_intent(TriageRoute::Implement);
+        let comments = MockComments::new("symphony-bot");
+        let routing = MockRouting::new(
+            &["needs-triage", "ready-to-spec", "needs-info"],
+            Some("Backlog"),
+        );
+        let publisher = AutomaticPublisher::new(comments.clone(), routing.clone());
+
+        publisher
+            .reconcile_automatic(
+                &mut store,
+                AutomaticPublishRequest {
+                    intent: &intent,
+                    issue_number: 12,
+                    run_id: "run",
+                    stage_run_id: "stage",
+                    attempt: 1,
+                    artifact: &artifact_for(TriageRoute::Implement),
+                    managed_labels: &managed_labels(),
+                    max_pages: 10,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Simulate crash after removing one conflicting label during cleanup:
+        // rewind before conflict_cleanup completes, keep GitHub intermediate state,
+        // and leave expected projection on that publisher-owned intermediate.
+        let intermediate = ManagedProjection::observe(
+            ["needs-triage", "ready-for-agent", "needs-info"],
+            &publication_vocabulary(&managed_labels(), "needs-triage"),
+            Some("Todo"),
+        );
+        store
+            .debug_rewind_publication(
+                &intent.intent_id,
+                &[COMMENT_PENDING_STEP, ROUTE_LABEL_STEP, PROJECT_STATE_STEP],
+                &intermediate.to_json(),
+            )
+            .unwrap();
+        *routing.labels.lock().unwrap() = vec![
+            "needs-triage".to_string(),
+            "ready-for-agent".to_string(),
+            "needs-info".to_string(),
+        ];
+        *routing.project_state.lock().unwrap() = Some("Todo".to_string());
+        *routing.calls.lock().unwrap() = Vec::new();
+
+        let pending = store
+            .get_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        let status = publisher
+            .reconcile_automatic(
+                &mut store,
+                AutomaticPublishRequest {
+                    intent: &pending,
+                    issue_number: 12,
+                    run_id: "run",
+                    stage_run_id: "stage",
+                    attempt: 1,
+                    artifact: &artifact_for(TriageRoute::Implement),
+                    managed_labels: &managed_labels(),
+                    max_pages: 10,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(status, PublicationStatus::Applied);
+        assert!(!routing.labels_now().contains(&"needs-info".to_string()));
+        assert!(!routing.labels_now().contains(&"needs-triage".to_string()));
     }
 
     #[tokio::test]

@@ -29,7 +29,8 @@ use crate::session_summary::{compact_session_id, normalize_whitespace, truncate_
 use crate::shared_context::SharedContextStore;
 use crate::ssh::{self, WorkerHostSelection};
 use crate::supervisor::{SupervisorAgent, SupervisorDependencies};
-use crate::triage::runtime::TriageRuntime;
+use crate::triage::runtime::{SharedFactoryStore, TriageRuntime};
+use crate::triage::storage_path::forge_host_from_endpoint;
 use crate::workflow_store::WorkflowStore;
 use crate::{docker, path_safety, prompt_builder, workspace};
 
@@ -2071,6 +2072,11 @@ pub struct Orchestrator {
     supervisor_agent: Option<SupervisorAgent>,
     /// Optional A1 triage runtime (preview/automatic factory stage).
     triage_runtime: Option<TriageRuntime>,
+    /// Durable factory store used for automatic publication dispatch guards.
+    ///
+    /// Kept separately from [`Self::triage_runtime`] so guards remain effective
+    /// when `triage.enabled` is false after a prior automatic publication.
+    dispatch_guard_store: Option<SharedFactoryStore>,
     /// The prompt template from the WORKFLOW.md body, used to render per-issue prompts.
     prompt_template: String,
     /// Resolved workflow path used by worker helpers and workflow-relative paths.
@@ -2165,6 +2171,7 @@ impl Orchestrator {
             ),
             supervisor_agent: None,
             triage_runtime: None,
+            dispatch_guard_store: None,
             prompt_template,
             workflow_path,
         }
@@ -4555,7 +4562,13 @@ impl Orchestrator {
                 }));
             }
         }
+        self.dispatch_guard_store = Some(runtime.store());
         self.triage_runtime = Some(runtime);
+    }
+
+    /// Attach a store-backed dispatch guard source when triage intake is disabled.
+    pub fn attach_dispatch_guard_store(&mut self, store: SharedFactoryStore) {
+        self.dispatch_guard_store = Some(store);
     }
 
     pub fn triage_runtime_mut(&mut self) -> Option<&mut TriageRuntime> {
@@ -5065,10 +5078,10 @@ impl Orchestrator {
     /// Uses durable store state so the guard remains effective even if triage is
     /// disabled or its intake label is reloaded mid-publication.
     fn filter_pending_automatic_publication(&self, candidates: Vec<Issue>) -> Vec<Issue> {
-        let Some(runtime) = self.triage_runtime.as_ref() else {
+        let Some(store) = self.dispatch_guard_store.as_ref() else {
             return candidates;
         };
-        let guards = match runtime.pending_automatic_dispatch_guards() {
+        let guards = match store.pending_automatic_dispatch_guards() {
             Ok(guards) => guards,
             Err(err) => {
                 tracing::warn!(
@@ -5084,16 +5097,16 @@ impl Orchestrator {
         }
         candidates
             .into_iter()
-            .filter(|issue| !Self::issue_matches_automatic_dispatch_guard(issue, &guards))
+            .filter(|issue| !self.issue_matches_automatic_dispatch_guard(issue, &guards))
             .collect()
     }
 
     fn issue_blocked_by_pending_automatic_publication(&self, issue: &Issue) -> bool {
-        let Some(runtime) = self.triage_runtime.as_ref() else {
+        let Some(store) = self.dispatch_guard_store.as_ref() else {
             return false;
         };
-        match runtime.pending_automatic_dispatch_guards() {
-            Ok(guards) => Self::issue_matches_automatic_dispatch_guard(issue, &guards),
+        match store.pending_automatic_dispatch_guards() {
+            Ok(guards) => self.issue_matches_automatic_dispatch_guard(issue, &guards),
             Err(err) => {
                 tracing::warn!(
                     event = "triage_dispatch_guard_read_failed",
@@ -5106,14 +5119,42 @@ impl Orchestrator {
         }
     }
 
+    fn configured_tracker_identity(&self) -> Option<(String, String)> {
+        let owner = self
+            .config
+            .tracker
+            .repo_owner
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let repo = self
+            .config
+            .tracker
+            .repo_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let forge_host = forge_host_from_endpoint(&self.config.tracker.endpoint);
+        Some((forge_host, format!("{owner}/{repo}")))
+    }
+
     fn issue_matches_automatic_dispatch_guard(
+        &self,
         issue: &Issue,
         guards: &[crate::triage::store::PendingAutomaticDispatchGuard],
     ) -> bool {
-        // Reject the durable issue ID for every nonterminal automatic intent.
-        // Guards also carry the recorded intake label so handoff stays tied to
-        // the publication intent rather than live triage config.
-        guards.iter().any(|guard| guard.issue_id == issue.id)
+        // Reject by forge/repository/issue-id for every nonterminal automatic
+        // intent. Intake labels are recorded on the guard for handoff identity
+        // but are not used as a cross-issue match key.
+        let tracker = self.configured_tracker_identity();
+        guards.iter().any(|guard| match tracker.as_ref() {
+            Some((forge_host, repository)) => {
+                guard.forge_host.eq_ignore_ascii_case(forge_host)
+                    && guard.repository.eq_ignore_ascii_case(repository)
+                    && guard.issue_id == issue.id
+            }
+            None => guard.issue_id == issue.id,
+        })
     }
 
     /// Returns `true` if the issue has at least one non-terminal blocker,

@@ -555,7 +555,9 @@ impl ManagedProjection {
 
     pub fn with_project_state(&self, state: &str) -> Self {
         let mut next = self.clone();
-        next.project_state = Some(normalize_managed_value(state));
+        let normalized = normalize_managed_value(state);
+        // Match observe(): blank/whitespace states are absent, not Some("").
+        next.project_state = (!normalized.is_empty()).then_some(normalized);
         next
     }
 
@@ -717,5 +719,16 @@ mod tests {
     fn truncation_preserves_utf8_boundaries() {
         assert_eq!(truncate_utf8_bytes("abcdef", 3), "abc");
         assert_eq!(truncate_utf8_bytes("ééé", 5), "éé");
+    }
+
+    #[test]
+    fn with_project_state_drops_blank_like_observe() {
+        let base = ManagedProjection::default();
+        assert_eq!(
+            base.with_project_state("Todo").project_state.as_deref(),
+            Some("todo")
+        );
+        assert_eq!(base.with_project_state("").project_state, None);
+        assert_eq!(base.with_project_state("   ").project_state, None);
     }
 }

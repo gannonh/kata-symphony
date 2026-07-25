@@ -80,7 +80,7 @@ pub struct StoredCommentIdentity {
 }
 
 /// Durable guard used by the implementation scheduler while automatic
-/// publication is still nonterminal.
+/// publication is still nonterminal (`pending`, `conflict`, or `blocked`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingAutomaticDispatchGuard {
     pub forge_host: String,
@@ -788,7 +788,7 @@ impl FactoryRunStore for SqliteFactoryStore {
                 "SELECT r.forge_host, r.repository, r.issue_id, i.intake_label
                  FROM publication_intents i
                  INNER JOIN factory_runs r ON r.run_id = i.run_id
-                 WHERE i.mode = ?1 AND i.status = ?2
+                 WHERE i.mode = ?1 AND i.status IN (?2, ?3, ?4)
                  ORDER BY i.updated_at ASC",
             )
             .map_err(storage_error)?;
@@ -796,7 +796,9 @@ impl FactoryRunStore for SqliteFactoryStore {
             .query_map(
                 params![
                     PublicationMode::Automatic.as_str(),
-                    PublicationStatus::Pending.as_str()
+                    PublicationStatus::Pending.as_str(),
+                    PublicationStatus::Conflict.as_str(),
+                    PublicationStatus::Blocked.as_str(),
                 ],
                 |row| {
                     Ok(PendingAutomaticDispatchGuard {
@@ -1636,6 +1638,13 @@ mod tests {
         assert_eq!(guards.len(), 1);
         assert_eq!(guards[0].issue_id, "123");
         assert_eq!(guards[0].intake_label, "needs-triage");
+
+        store
+            .update_publication_step(&automatic.intent_id, "", PublicationStatus::Conflict, None)
+            .unwrap();
+        let conflict_guards = store.list_pending_automatic_dispatch_guards().unwrap();
+        assert_eq!(conflict_guards.len(), 1);
+        assert_eq!(conflict_guards[0].issue_id, "123");
 
         store
             .update_publication_step(

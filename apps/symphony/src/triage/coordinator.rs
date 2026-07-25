@@ -918,6 +918,14 @@ where
             )
         })?;
         let publisher = AutomaticPublisher::new(self.comments.clone(), routing);
+        // Prefer the five route labels persisted on the intent so a live mapping
+        // reload cannot reinterpret an in-flight automatic publication.
+        let managed_from_intent = managed_labels_from_automatic_intent(intent);
+        let live_managed = service.triage.routes.managed_labels();
+        let managed_labels = managed_from_intent
+            .as_deref()
+            .unwrap_or(live_managed.as_slice());
+        let prior_status = intent.status;
         let status = publisher
             .reconcile_automatic(
                 &mut self.store,
@@ -928,7 +936,7 @@ where
                     stage_run_id,
                     attempt,
                     artifact,
-                    managed_labels: &service.triage.routes.managed_labels(),
+                    managed_labels,
                     max_pages: self.max_pages,
                 },
             )
@@ -953,7 +961,7 @@ where
                     }),
                 )?;
             }
-            PublicationStatus::Conflict => {
+            PublicationStatus::Conflict if prior_status != PublicationStatus::Conflict => {
                 self.emit_event(
                     "triage_publication_conflict",
                     Some(&format!("#{issue_number}")),
@@ -968,7 +976,7 @@ where
                     }),
                 )?;
             }
-            PublicationStatus::Blocked => {
+            PublicationStatus::Blocked if prior_status != PublicationStatus::Blocked => {
                 self.emit_event(
                     "triage_publication_blocked",
                     Some(&format!("#{issue_number}")),
@@ -983,9 +991,49 @@ where
                     }),
                 )?;
             }
-            PublicationStatus::Pending | PublicationStatus::None => {}
+            PublicationStatus::Pending
+            | PublicationStatus::None
+            | PublicationStatus::Conflict
+            | PublicationStatus::Blocked => {}
         }
         Ok(status)
+    }
+
+    /// Finish run completion + durable applied event when an intent is already
+    /// applied but a prior crash skipped finalization.
+    fn finalize_applied_automatic_publication(
+        &mut self,
+        issue_number: u64,
+        run_id: &str,
+        stage_run_id: &str,
+        intent: &crate::triage::domain::PublicationIntentRecord,
+        artifact: &crate::triage::domain::TriageArtifact,
+    ) -> Result<()> {
+        let Some(run) = self.store.get_run_by_id(run_id)? else {
+            return Ok(());
+        };
+        if run.status == FactoryRunStatus::Completed {
+            return Ok(());
+        }
+        self.emit_event(
+            "triage_route_applied",
+            Some(&format!("#{issue_number}")),
+            Some(run_id),
+            Some(stage_run_id),
+            serde_json::json!({
+                "run_id": run_id,
+                "stage_run_id": stage_run_id,
+                "publication_intent_id": intent.intent_id,
+                "route": artifact.route.as_str(),
+                "route_label": intent.route_label,
+                "project_state": intent.project_state,
+                "status": "applied",
+                "error_code": serde_json::Value::Null,
+            }),
+        )?;
+        self.store
+            .mark_run_status(run_id, FactoryRunStatus::Completed)?;
+        Ok(())
     }
 
     /// Recover preview publication, or promote/resume automatic publication.
@@ -1022,6 +1070,13 @@ where
                 && record.mode == PublicationMode::Automatic
         }) {
             if intent.status == PublicationStatus::Applied {
+                self.finalize_applied_automatic_publication(
+                    issue.issue_number,
+                    &artifact.run_id,
+                    &artifact.stage_run_id,
+                    intent,
+                    &artifact.artifact,
+                )?;
                 return Ok(());
             }
             let stage = self
@@ -1291,6 +1346,29 @@ fn triage_model(service: &ServiceConfig) -> Option<String> {
 
 fn desired_kind(value: &serde_json::Value) -> Option<&str> {
     value.get("kind").and_then(|kind| kind.as_str())
+}
+
+/// Reconstruct the managed route-label vocabulary from a persisted automatic intent.
+fn managed_labels_from_automatic_intent(
+    intent: &crate::triage::domain::PublicationIntentRecord,
+) -> Option<Vec<String>> {
+    let labels = intent.desired_effects.get("route_labels")?.as_object()?;
+    let keys = [
+        "implement",
+        "spec",
+        "needs_information",
+        "park",
+        "human_owned",
+    ];
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+        let label = labels.get(key)?.as_str()?.trim();
+        if label.is_empty() {
+            return None;
+        }
+        out.push(label.to_string());
+    }
+    Some(out)
 }
 
 fn parse_issue_number(issue_id: &str) -> Result<u64> {

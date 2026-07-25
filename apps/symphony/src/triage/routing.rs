@@ -13,6 +13,8 @@ pub struct GithubTriageRouting {
     client: GithubClient,
     projects: ProjectsV2Client,
     owner: String,
+    /// `owner/repo` for the configured tracker repository.
+    repository: String,
     project_number: u64,
     max_pages: u32,
 }
@@ -22,15 +24,33 @@ impl GithubTriageRouting {
         client: GithubClient,
         projects: ProjectsV2Client,
         owner: impl Into<String>,
+        repo: impl Into<String>,
         project_number: u64,
         max_pages: u32,
     ) -> Self {
+        let owner = owner.into();
+        let repo = repo.into();
+        let repository = format!("{owner}/{repo}");
         Self {
             client,
             projects,
-            owner: owner.into(),
+            owner,
+            repository,
             project_number,
             max_pages: max_pages.max(1),
+        }
+    }
+
+    fn matches_configured_repository(&self, item_repository: Option<&str>) -> bool {
+        let configured = self.repository.to_ascii_lowercase();
+        match item_repository
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(repository) => repository.eq_ignore_ascii_case(&configured),
+            // Older payloads without repository metadata are treated as the
+            // configured tracker repo, matching intake membership heuristics.
+            None => true,
         }
     }
 }
@@ -53,7 +73,10 @@ impl TriageRoutingPort for GithubTriageRouting {
             .await?;
         Ok(items
             .into_iter()
-            .find(|item| item.issue_number == issue_number)
+            .find(|item| {
+                item.issue_number == issue_number
+                    && self.matches_configured_repository(item.repository.as_deref())
+            })
             .and_then(|item| item.status))
     }
 
@@ -84,13 +107,18 @@ impl TriageRoutingPort for GithubTriageRouting {
             .projects
             .query_all_items(&status_field.project_id, self.max_pages)
             .await?;
+        // Issue numbers are only unique within a repository. Qualify by
+        // owner/repo so multi-repo boards cannot mutate the wrong item.
         let item = items
             .into_iter()
-            .find(|item| item.issue_number == issue_number)
+            .find(|item| {
+                item.issue_number == issue_number
+                    && self.matches_configured_repository(item.repository.as_deref())
+            })
             .ok_or_else(|| {
                 SymphonyError::GithubProjectsV2Error(format!(
-                    "issue #{issue_number} is not on project board #{}",
-                    self.project_number
+                    "issue {}#{} is not on project board #{}",
+                    self.repository, issue_number, self.project_number
                 ))
             })?;
         self.projects

@@ -488,6 +488,19 @@ impl BootstrapDeps for RuntimeBootstrapDeps {
                     event = "triage_runtime_disabled",
                     "triage.enabled is false; triage runtime not started"
                 );
+                match symphony::triage::runtime::TriageRuntime::try_open_dispatch_guard_store(
+                    &context.effective_config,
+                ) {
+                    Ok(Some(store)) => {
+                        orchestrator.attach_dispatch_guard_store(store);
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        return Err(format!(
+                            "failed to open triage dispatch guard store while triage is disabled: {err}"
+                        ));
+                    }
+                }
             }
             Err(err) => {
                 return Err(format!("failed to start triage runtime: {err}"));

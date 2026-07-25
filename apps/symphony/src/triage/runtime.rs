@@ -21,7 +21,9 @@ use crate::triage::domain::{
 };
 use crate::triage::intake::GithubTriageIntake;
 use crate::triage::routing::GithubTriageRouting;
-use crate::triage::storage_path::{resolve_storage_path, storage_path_for_log};
+use crate::triage::storage_path::{
+    forge_host_from_endpoint, resolve_storage_path, storage_path_for_log,
+};
 use crate::triage::store::{
     ClaimAttemptRequest, CreatePublicationIntentRequest, FactoryRunStore,
     PendingAutomaticDispatchGuard, SqliteFactoryStore, StoreArtifactRequest, StoredCommentIdentity,
@@ -40,6 +42,11 @@ impl SharedFactoryStore {
         Ok(Self {
             inner: Arc::new(Mutex::new(store)),
         })
+    }
+
+    /// Read durable nonterminal automatic publication guards for dispatch.
+    pub fn pending_automatic_dispatch_guards(&self) -> Result<Vec<PendingAutomaticDispatchGuard>> {
+        self.with_store(|store| store.list_pending_automatic_dispatch_guards())
     }
 
     fn with_store<T>(&self, f: impl FnOnce(&SqliteFactoryStore) -> Result<T>) -> Result<T> {
@@ -310,6 +317,52 @@ pub struct TriageRuntime {
 }
 
 impl TriageRuntime {
+    /// Open the durable factory store for dispatch-guard reads when triage intake
+    /// is disabled. Returns `Ok(None)` when triage is enabled (the full runtime
+    /// owns the store), the tracker is not GitHub, or no existing DB is present.
+    pub fn try_open_dispatch_guard_store(
+        config: &ServiceConfig,
+    ) -> Result<Option<SharedFactoryStore>> {
+        if config.triage.enabled {
+            return Ok(None);
+        }
+        if !matches!(config.tracker.kind.as_deref(), Some("github")) {
+            return Ok(None);
+        }
+        let Some(owner) = config
+            .tracker
+            .repo_owner
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(None);
+        };
+        let Some(repo) = config
+            .tracker
+            .repo_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(None);
+        };
+        let forge_host = forge_host_from_endpoint(&config.tracker.endpoint);
+        let storage_path = resolve_storage_path(&config.storage, &forge_host, owner, repo);
+        if !storage_path.exists() {
+            return Ok(None);
+        }
+        tracing::info!(
+            event = "triage_dispatch_guard_store_opened",
+            path = %storage_path_for_log(&storage_path),
+            "opened durable triage store for dispatch guards while triage.enabled=false"
+        );
+        Ok(Some(SharedFactoryStore::open(
+            &storage_path,
+            config.storage.busy_timeout_ms,
+        )?))
+    }
+
     /// Start triage when `triage.enabled` is true. Returns `Ok(None)` when disabled.
     pub fn try_start(
         config: &ServiceConfig,
@@ -358,8 +411,7 @@ impl TriageRuntime {
             .ok_or(SymphonyError::MissingGithubApiToken)?;
         let token = resolved.token;
 
-        let forge_host =
-            crate::triage::storage_path::forge_host_from_endpoint(&config.tracker.endpoint);
+        let forge_host = forge_host_from_endpoint(&config.tracker.endpoint);
         let repository = format!("{owner}/{repo}");
         let storage_path = resolve_storage_path(&config.storage, &forge_host, owner, repo);
         tracing::info!(
@@ -398,6 +450,7 @@ impl TriageRuntime {
             client.clone(),
             projects,
             owner,
+            repo,
             project_number,
             config.triage.max_intake_pages,
         );
@@ -444,9 +497,9 @@ impl TriageRuntime {
     }
 
     /// Issue IDs / intake labels that must not enter implementation dispatch
-    /// while automatic publication is still pending.
+    /// while automatic publication is still nonterminal.
     pub fn pending_automatic_dispatch_guards(&self) -> Result<Vec<PendingAutomaticDispatchGuard>> {
-        self.store.list_pending_automatic_dispatch_guards()
+        self.store.pending_automatic_dispatch_guards()
     }
 
     pub async fn poll(&mut self, config: &ServiceConfig) -> Result<TriagePollSummary> {
