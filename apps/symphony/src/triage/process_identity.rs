@@ -291,24 +291,32 @@ mod tests {
     /// an agent running against a workspace it is about to delete.
     #[tokio::test]
     async fn terminates_a_live_process_group() {
-        let mut child = tokio::process::Command::new("sleep")
-            .arg("60")
-            .process_group(0)
-            .spawn()
-            .expect("spawn sleep");
-        let pid = child.id().expect("child pid") as i64;
-        let identity = capture_child(pid as u32, true);
+        // Spawned and reaped through std: `tokio::process` relies on SIGCHLD
+        // reaching the runtime that owns the child, which is unreliable when
+        // many test runtimes share one process.
+        let mut child = {
+            use std::os::unix::process::CommandExt;
+            let mut command = std::process::Command::new("sleep");
+            command.arg("60").process_group(0);
+            command.spawn().expect("spawn sleep")
+        };
+        let identity = capture_child(child.id(), true);
         assert!(
             is_signalable(&identity),
             "a foreign group leader must be signalable"
         );
 
+        let (reaped_tx, reaped_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = reaped_tx.send(child.wait().is_ok());
+        });
+
         terminate_process_group(identity.process_group_id).await;
 
-        let status = tokio::time::timeout(std::time::Duration::from_secs(10), child.wait())
-            .await
+        let reaped = reaped_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
             .expect("child must exit after termination");
-        assert!(status.is_ok());
+        assert!(reaped);
     }
 
     /// An attempt recorded without a usable identity must never be signalled.
