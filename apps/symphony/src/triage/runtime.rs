@@ -274,6 +274,22 @@ impl FactoryRunStore for SharedFactoryStore {
         self.with_store_mut(|store| store.clear_attempt_process(stage_run_id))
     }
 
+    fn list_correction_candidates(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<crate::triage::store::CorrectionCandidate>> {
+        self.with_store(|store| store.list_correction_candidates(limit))
+    }
+
+    fn record_route_observation(
+        &mut self,
+        artifact_id: &str,
+        kind: crate::triage::store::RouteObservationKind,
+        value: &str,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| store.record_route_observation(artifact_id, kind, value))
+    }
+
     fn triage_metrics(&self) -> Result<crate::triage::domain::TriageMetricsAggregate> {
         self.with_store(|store| store.triage_metrics())
     }

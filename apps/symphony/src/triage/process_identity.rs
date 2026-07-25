@@ -22,8 +22,7 @@ pub struct ProcessIdentity {
     pub executable: Option<String>,
 }
 
-/// Capture identity for `pid`, reading the real process group rather than
-/// assuming the child leads its own.
+/// Capture identity for a live `pid`, reading its current process group.
 pub fn capture(pid: u32) -> ProcessIdentity {
     let pid = i64::from(pid);
     ProcessIdentity {
@@ -32,6 +31,20 @@ pub fn capture(pid: u32) -> ProcessIdentity {
         start_token: start_token(pid),
         executable: executable(pid),
     }
+}
+
+/// Capture identity for a child we just spawned.
+///
+/// A child placed in its own group calls `setpgid` after `fork`, so reading the
+/// group here would race it and could return *Symphony's* group. When the
+/// caller asked for a new group the id is known to equal the child pid, so it
+/// is recorded directly rather than read back.
+pub fn capture_child(pid: u32, group_leader: bool) -> ProcessIdentity {
+    let mut identity = capture(pid);
+    if group_leader {
+        identity.process_group_id = identity.pid;
+    }
+    identity
 }
 
 /// Whether the live process still matches every recorded identity field.
@@ -216,6 +229,29 @@ mod tests {
         let _ = child.wait();
     }
 
+    /// A child placed in its own group calls `setpgid` after `fork`, so reading
+    /// the group back can still see Symphony's group and make recovery refuse
+    /// to terminate a real orphan. Recording the known group id avoids the race.
+    #[test]
+    fn child_group_is_recorded_without_racing_setpgid() {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30").process_group(0);
+        let mut child = command.spawn().expect("spawn sleep");
+
+        let identity = capture_child(child.id(), true);
+
+        assert_eq!(identity.process_group_id, identity.pid);
+        assert_ne!(
+            identity.process_group_id,
+            own_process_group(),
+            "a group-leader child must never be recorded as Symphony's group"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
     /// A child that never got its own process group shares Symphony's, so
     /// signalling that group would kill the orchestrator. Recovery must refuse
     /// even though every identity field matches a live process.
@@ -261,7 +297,7 @@ mod tests {
             .spawn()
             .expect("spawn sleep");
         let pid = child.id().expect("child pid") as i64;
-        let identity = capture(pid as u32);
+        let identity = capture_child(pid as u32, true);
         assert!(
             is_signalable(&identity),
             "a foreign group leader must be signalable"

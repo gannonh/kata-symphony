@@ -1,6 +1,7 @@
 pub mod artifact;
 pub mod comment;
 pub mod coordinator;
+pub mod correction;
 pub mod domain;
 pub mod fingerprint;
 pub mod intake;

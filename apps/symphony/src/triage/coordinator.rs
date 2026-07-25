@@ -9,6 +9,7 @@ use crate::domain::{AgentBackend, Issue, ServiceConfig, TriageSessionInfo, Triag
 use crate::error::{Result, SymphonyError};
 use crate::path_safety;
 use crate::repo_url::repo_is_remote;
+use crate::triage::correction::{compare_route_labels, RouteAgreement, ROUTE_KEYS};
 use crate::triage::domain::{
     FactoryError, FactoryEventRecord, FactoryRunStatus, PublicationMode, PublicationStatus,
     TriageMode, TRIAGE_LEASE_RENEW_INTERVAL_MS, TRIAGE_STAGE_NAME,
@@ -30,10 +31,15 @@ use crate::triage::runner::{
 };
 use crate::triage::store::{
     ClaimAttemptRequest, CreatePublicationIntentRequest, FactoryRunStore,
-    RecordAttemptProcessRequest, StoreArtifactRequest, UpsertFactoryRunRequest,
+    RecordAttemptProcessRequest, RouteObservationKind, StoreArtifactRequest,
+    UpsertFactoryRunRequest,
 };
 
 const PENDING_INTENT_BATCH: usize = 256;
+const CORRECTION_BATCH: usize = 256;
+/// Durable-only diagnostic. Deliberately outside the live triage event
+/// vocabulary, which the spec fixes to nine names.
+const TRIAGE_ROUTE_CONSISTENCY_EVENT: &str = "triage_route_consistency";
 const INELIGIBLE_REMEDIATION: &str =
     "Add the issue to the configured GitHub Project, then leave the intake label in place.";
 const DESIRED_KIND_PREVIEW: &str = "preview_comment";
@@ -81,6 +87,7 @@ pub struct TriagePollSummary {
     pub skipped: u32,
     pub reconciled_intents: u32,
     pub recovered_attempts: u32,
+    pub route_corrections: u32,
 }
 
 pub struct TriageCoordinator<S, I, C, X = DefaultTriageExecutor> {
@@ -226,6 +233,9 @@ where
         summary.reconciled_intents = self
             .reconcile_pending_intents(service, self.max_pages)
             .await?;
+        // Runs whether or not intake is enabled: published routes stay under
+        // measurement even after triage is switched off.
+        summary.route_corrections = self.reconcile_route_corrections().await?;
 
         if !service.triage.enabled {
             return Ok(summary);
@@ -356,6 +366,128 @@ where
         }
 
         Ok(recovered)
+    }
+
+    /// Measure whether humans kept or changed the routes Symphony published.
+    ///
+    /// Published issues are re-read from durable records, independently of the
+    /// intake and implementation-candidate queries, and compared against the
+    /// five route labels recorded on their publication intent. A correction is
+    /// recorded at most once per artifact and observed route.
+    async fn reconcile_route_corrections(&mut self) -> Result<u32> {
+        let Some(routing) = self.routing.clone() else {
+            return Ok(0);
+        };
+        let candidates = self.store.list_correction_candidates(CORRECTION_BATCH)?;
+        let mut corrections = 0;
+
+        for candidate in candidates {
+            let Some(recorded_labels) =
+                route_labels_from_desired_effects(&candidate.desired_effects)
+            else {
+                continue;
+            };
+            let issue_number = match parse_issue_number(&candidate.issue_id) {
+                Ok(number) => number,
+                Err(err) => {
+                    tracing::warn!(
+                        issue = candidate.issue_identifier,
+                        error = %err,
+                        "skipping correction check for unparsable durable issue id"
+                    );
+                    continue;
+                }
+            };
+
+            let current_labels = match routing.list_issue_labels(issue_number).await {
+                Ok(labels) => labels,
+                Err(err) => {
+                    // A transient read failure must not look like agreement;
+                    // the next poll retries this candidate.
+                    tracing::warn!(
+                        issue = candidate.issue_identifier,
+                        error = %err,
+                        "failed to read issue labels for correction measurement"
+                    );
+                    continue;
+                }
+            };
+
+            // Re-applied intake means a fresh triage attempt is coming, so the
+            // published route is no longer the decision under measurement.
+            if current_labels.iter().any(|label| {
+                label
+                    .trim()
+                    .eq_ignore_ascii_case(candidate.intake_label.trim())
+            }) {
+                continue;
+            }
+
+            match compare_route_labels(
+                &candidate.published_route,
+                &recorded_labels,
+                &current_labels,
+            ) {
+                RouteAgreement::Agreed => {}
+                RouteAgreement::Corrected { route, label } => {
+                    if self.store.record_route_observation(
+                        &candidate.artifact_id,
+                        RouteObservationKind::Corrected,
+                        &route,
+                    )? {
+                        self.emit_event(
+                            "triage_route_corrected",
+                            Some(&candidate.issue_identifier),
+                            Some(&candidate.run_id),
+                            candidate.stage_run_id.as_deref(),
+                            serde_json::json!({
+                                "run_id": candidate.run_id,
+                                "stage_run_id": candidate.stage_run_id,
+                                "artifact_id": candidate.artifact_id,
+                                "publication_intent_id": candidate.intent_id,
+                                "route": candidate.published_route,
+                                "corrected_route": route,
+                                "corrected_label": label,
+                                "status": "corrected",
+                                "error_code": serde_json::Value::Null,
+                            }),
+                        )?;
+                        corrections += 1;
+                    }
+                }
+                RouteAgreement::Inconsistent { observed } => {
+                    // Durable diagnostic only: an ambiguous label set is not an
+                    // agreement result and must not reach the live event
+                    // vocabulary or the correction count.
+                    let value = observed.join(",");
+                    if self.store.record_route_observation(
+                        &candidate.artifact_id,
+                        RouteObservationKind::Inconsistent,
+                        &value,
+                    )? {
+                        self.store.record_event(FactoryEventRecord {
+                            event_id: Uuid::now_v7().to_string(),
+                            run_id: Some(candidate.run_id.clone()),
+                            stage_run_id: candidate.stage_run_id.clone(),
+                            event_type: TRIAGE_ROUTE_CONSISTENCY_EVENT.to_string(),
+                            timestamp: Utc::now(),
+                            payload: serde_json::json!({
+                                "run_id": candidate.run_id,
+                                "stage_run_id": candidate.stage_run_id,
+                                "artifact_id": candidate.artifact_id,
+                                "publication_intent_id": candidate.intent_id,
+                                "route": candidate.published_route,
+                                "observed_route_labels": observed,
+                                "status": "inconsistent",
+                                "error_code": "route_label_inconsistent",
+                            }),
+                        })?;
+                    }
+                }
+            }
+        }
+
+        Ok(corrections)
     }
 
     async fn reconcile_pending_intents(
@@ -1441,16 +1573,17 @@ fn desired_kind(value: &serde_json::Value) -> Option<&str> {
 fn managed_labels_from_automatic_intent(
     intent: &crate::triage::domain::PublicationIntentRecord,
 ) -> Option<Vec<String>> {
-    let labels = intent.desired_effects.get("route_labels")?.as_object()?;
-    let keys = [
-        "implement",
-        "spec",
-        "needs_information",
-        "park",
-        "human_owned",
-    ];
-    let mut out = Vec::with_capacity(keys.len());
-    for key in keys {
+    route_labels_from_desired_effects(&intent.desired_effects)
+}
+
+/// The five route labels an automatic intent recorded, in [`ROUTE_KEYS`] order.
+///
+/// Publication and correction measurement both read the mapping from here so a
+/// live `WORKFLOW.md` reload cannot reinterpret an existing publication.
+fn route_labels_from_desired_effects(desired_effects: &serde_json::Value) -> Option<Vec<String>> {
+    let labels = desired_effects.get("route_labels")?.as_object()?;
+    let mut out = Vec::with_capacity(ROUTE_KEYS.len());
+    for key in ROUTE_KEYS {
         let label = labels.get(key)?.as_str()?.trim();
         if label.is_empty() {
             return None;
@@ -1980,12 +2113,24 @@ mod tests {
         let mut store = open_store(&temp);
 
         // Stand in for the orphaned triage child left behind by a prior process.
-        let mut orphan = tokio::process::Command::new("sleep")
-            .arg("60")
-            .process_group(0)
-            .spawn()
-            .unwrap();
-        let identity = crate::triage::process_identity::capture(orphan.id().expect("orphan pid"));
+        // Spawned and reaped through std so the assertion does not depend on
+        // which tokio runtime happens to receive SIGCHLD.
+        let mut orphan = {
+            use std::os::unix::process::CommandExt;
+            let mut command = std::process::Command::new("sleep");
+            command.arg("60").process_group(0);
+            command.spawn().unwrap()
+        };
+        let identity = crate::triage::process_identity::capture_child(orphan.id(), true);
+        // A real orphan predates this process by a restart. Wait for the child
+        // to finish entering its own group so the test observes that settled
+        // state rather than the instant after fork.
+        for _ in 0..100 {
+            if crate::triage::process_identity::matches(&identity) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
 
         let attempt_root = temp.path().join("workspaces").join("triage-stale-attempt");
         let workspace_path = attempt_root.join("workspace");
@@ -2015,7 +2160,7 @@ mod tests {
             .record_attempt_process(RecordAttemptProcessRequest {
                 stage_run_id: stage.stage_run_id.clone(),
                 owner_instance: "prior-owner".to_string(),
-                identity,
+                identity: identity.clone(),
                 workspace_path: Some(workspace_path.display().to_string()),
                 output_path: Some(
                     attempt_root
@@ -2044,15 +2189,38 @@ mod tests {
             FakeExecutor::success(sample_artifact()),
         );
 
+        assert!(
+            crate::triage::process_identity::is_signalable(&identity),
+            "precondition: the orphan must be identifiable and signalable"
+        );
+        assert_eq!(
+            coordinator
+                .store_mut()
+                .list_recoverable_attempts()
+                .unwrap()
+                .len(),
+            1,
+            "precondition: the interrupted attempt must be recoverable work"
+        );
+
+        // Reap concurrently: a real orphan is reparented to init and reaped
+        // there, so recovery sees it disappear. Left unreaped here it would
+        // linger as a zombie and only die at the force-kill deadline.
+        let (reaped_tx, reaped_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let status = orphan.wait();
+            let _ = reaped_tx.send(status.is_ok());
+        });
+
         coordinator
             .poll_once(&service_config(true, &workflow_dir))
             .await
             .unwrap();
 
-        let status = tokio::time::timeout(std::time::Duration::from_secs(10), orphan.wait())
-            .await
+        let reaped = reaped_rx
+            .recv_timeout(std::time::Duration::from_secs(30))
             .expect("orphaned child must be terminated by recovery");
-        assert!(status.is_ok());
+        assert!(reaped);
         assert!(
             !attempt_root.exists(),
             "attempt directory must be reclaimed before retry"
@@ -2074,6 +2242,296 @@ mod tests {
             .list_recoverable_attempts()
             .unwrap()
             .is_empty());
+    }
+
+    #[derive(Default)]
+    struct FakeRouting {
+        labels: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl TriageRoutingPort for Arc<FakeRouting> {
+        async fn list_issue_labels(&self, _issue_number: u64) -> Result<Vec<String>> {
+            Ok(self.labels.lock().unwrap().clone())
+        }
+
+        async fn issue_project_state(&self, _issue_number: u64) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        async fn add_issue_label(&self, _issue_number: u64, _label: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn remove_issue_label(&self, _issue_number: u64, _label: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn set_issue_project_state(&self, _issue_number: u64, _state: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Build an applied automatic publication so correction measurement has a
+    /// published route to compare against.
+    fn seed_applied_automatic_publication(
+        store: &mut SqliteFactoryStore,
+        service: &ServiceConfig,
+        issue_number: u64,
+    ) -> String {
+        let stage = store
+            .claim_attempt(ClaimAttemptRequest {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                issue_id: issue_number.to_string(),
+                issue_identifier: format!("#{issue_number}"),
+                issue_revision: "rev".to_string(),
+                configuration_revision: "config".to_string(),
+                owner_instance: "test-owner".to_string(),
+                harness: "pi".to_string(),
+                model: None,
+                workspace_path: None,
+                output_path: None,
+                pid: None,
+                process_group_id: None,
+                process_start_token: None,
+                executable_identity: None,
+            })
+            .unwrap();
+        let artifact = store
+            .store_artifact(StoreArtifactRequest {
+                stage_run_id: stage.stage_run_id.clone(),
+                issue_revision: "rev".to_string(),
+                configuration_revision: "config".to_string(),
+                route_mapping_hash: "routes".to_string(),
+                artifact: sample_artifact(),
+                bytes_len: 200,
+                usage: crate::triage::domain::StageUsage::default(),
+            })
+            .unwrap();
+        let routes = &service.triage.routes;
+        let intent = store
+            .create_publication_intent(CreatePublicationIntentRequest {
+                run_id: artifact.run_id.clone(),
+                artifact_id: Some(artifact.artifact_id.clone()),
+                mode: PublicationMode::Automatic,
+                intake_label: service.triage.intake_label.clone(),
+                route_label: routes.implement.label.clone(),
+                project_state: routes.implement.state.clone(),
+                route_mapping_hash: "routes".to_string(),
+                desired_effects: serde_json::json!({
+                    "kind": DESIRED_KIND_AUTOMATIC,
+                    "route": "implement",
+                    "route_labels": {
+                        "implement": routes.implement.label.clone(),
+                        "spec": routes.spec.label.clone(),
+                        "needs_information": routes.needs_information.label.clone(),
+                        "park": routes.park.label.clone(),
+                        "human_owned": routes.human_owned.label.clone(),
+                    },
+                }),
+                observed_baseline: serde_json::json!({}),
+                expected_projection: serde_json::json!({}),
+            })
+            .unwrap();
+        store
+            .update_publication_step(
+                &intent.intent_id,
+                "comment_applied",
+                PublicationStatus::Applied,
+                None,
+            )
+            .unwrap();
+        artifact.artifact_id
+    }
+
+    /// A maintainer replacing Symphony's route label is the disagreement signal
+    /// A1 measures. It must be recorded exactly once no matter how often the
+    /// reconciler re-reads the issue, otherwise the correction rate inflates on
+    /// every poll.
+    #[tokio::test]
+    async fn human_route_swap_records_one_correction_across_repeated_polls() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = prep_workflow(&temp);
+        let service = service_config(true, &workflow_dir);
+        let mut store = open_store(&temp);
+        seed_applied_automatic_publication(&mut store, &service, 42);
+
+        // Maintainer swapped ready-for-agent for needs-info.
+        let routing = Arc::new(FakeRouting {
+            labels: Mutex::new(vec!["needs-info".to_string(), "bug".to_string()]),
+        });
+        let emitter = Arc::new(RecordingEmitter::default());
+        let mut coordinator = TriageCoordinator::with_executor(
+            store,
+            Arc::new(FakeIntake::default()),
+            FakeComments::new("symphony-bot"),
+            TriageCoordinatorConfig {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                owner_instance: "test-owner".to_string(),
+                workflow_dir: workflow_dir.clone(),
+                project_display_name: "Factory".to_string(),
+            },
+            FakeExecutor::success(sample_artifact()),
+        )
+        .with_routing(routing.clone())
+        .with_events(emitter.clone());
+
+        let first = coordinator.poll_once(&service).await.unwrap();
+        let second = coordinator.poll_once(&service).await.unwrap();
+
+        assert_eq!(first.route_corrections, 1);
+        assert_eq!(second.route_corrections, 0, "correction must not repeat");
+        let corrected: Vec<_> = emitter
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(name, _)| name == "triage_route_corrected")
+            .cloned()
+            .collect();
+        assert_eq!(corrected.len(), 1);
+        assert_eq!(corrected[0].1.as_deref(), Some("#42"));
+    }
+
+    /// Leaving Symphony's label in place is agreement, so nothing is recorded.
+    #[tokio::test]
+    async fn unchanged_route_label_records_no_correction() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = prep_workflow(&temp);
+        let service = service_config(true, &workflow_dir);
+        let mut store = open_store(&temp);
+        seed_applied_automatic_publication(&mut store, &service, 43);
+
+        let routing = Arc::new(FakeRouting {
+            labels: Mutex::new(vec!["ready-for-agent".to_string()]),
+        });
+        let emitter = Arc::new(RecordingEmitter::default());
+        let mut coordinator = TriageCoordinator::with_executor(
+            store,
+            Arc::new(FakeIntake::default()),
+            FakeComments::new("symphony-bot"),
+            TriageCoordinatorConfig {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                owner_instance: "test-owner".to_string(),
+                workflow_dir: workflow_dir.clone(),
+                project_display_name: "Factory".to_string(),
+            },
+            FakeExecutor::success(sample_artifact()),
+        )
+        .with_routing(routing.clone())
+        .with_events(emitter.clone());
+
+        let summary = coordinator.poll_once(&service).await.unwrap();
+
+        assert_eq!(summary.route_corrections, 0);
+        assert!(!emitter
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(name, _)| name == "triage_route_corrected"));
+    }
+
+    /// Two route labels at once is a diagnostic, not disagreement. It must stay
+    /// out of the live event vocabulary and out of the correction count, while
+    /// still being durable for operators.
+    #[tokio::test]
+    async fn ambiguous_route_labels_record_durable_diagnostic_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = prep_workflow(&temp);
+        let service = service_config(true, &workflow_dir);
+        let mut store = open_store(&temp);
+        seed_applied_automatic_publication(&mut store, &service, 44);
+
+        let routing = Arc::new(FakeRouting {
+            labels: Mutex::new(vec![
+                "ready-for-agent".to_string(),
+                "needs-info".to_string(),
+            ]),
+        });
+        let emitter = Arc::new(RecordingEmitter::default());
+        let mut coordinator = TriageCoordinator::with_executor(
+            store,
+            Arc::new(FakeIntake::default()),
+            FakeComments::new("symphony-bot"),
+            TriageCoordinatorConfig {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                owner_instance: "test-owner".to_string(),
+                workflow_dir: workflow_dir.clone(),
+                project_display_name: "Factory".to_string(),
+            },
+            FakeExecutor::success(sample_artifact()),
+        )
+        .with_routing(routing.clone())
+        .with_events(emitter.clone());
+
+        let summary = coordinator.poll_once(&service).await.unwrap();
+
+        assert_eq!(
+            summary.route_corrections, 0,
+            "ambiguity is not a correction"
+        );
+        let live = emitter.events.lock().unwrap();
+        assert!(
+            !live
+                .iter()
+                .any(|(name, _)| name == "triage_route_corrected"),
+            "ambiguity must not be counted as disagreement"
+        );
+        assert!(
+            !live
+                .iter()
+                .any(|(name, _)| name == TRIAGE_ROUTE_CONSISTENCY_EVENT),
+            "consistency diagnostics stay out of the live event vocabulary"
+        );
+        assert_eq!(
+            coordinator
+                .store_mut()
+                .triage_metrics()
+                .unwrap()
+                .correction_count,
+            0
+        );
+    }
+
+    /// Re-applying the intake label means a new triage attempt is coming, so the
+    /// old published route is no longer the decision under measurement.
+    #[tokio::test]
+    async fn reapplied_intake_label_suspends_correction_measurement() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = prep_workflow(&temp);
+        let service = service_config(true, &workflow_dir);
+        let mut store = open_store(&temp);
+        seed_applied_automatic_publication(&mut store, &service, 45);
+
+        let routing = Arc::new(FakeRouting {
+            labels: Mutex::new(vec![
+                "needs-info".to_string(),
+                service.triage.intake_label.clone(),
+            ]),
+        });
+        let mut coordinator = TriageCoordinator::with_executor(
+            store,
+            Arc::new(FakeIntake::default()),
+            FakeComments::new("symphony-bot"),
+            TriageCoordinatorConfig {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                owner_instance: "test-owner".to_string(),
+                workflow_dir: workflow_dir.clone(),
+                project_display_name: "Factory".to_string(),
+            },
+            FakeExecutor::success(sample_artifact()),
+        )
+        .with_routing(routing.clone());
+
+        let summary = coordinator.poll_once(&service).await.unwrap();
+
+        assert_eq!(summary.route_corrections, 0);
     }
 
     #[tokio::test]

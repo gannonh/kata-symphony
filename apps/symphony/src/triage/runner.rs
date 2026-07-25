@@ -314,12 +314,17 @@ fn finish_attempt(
 ///
 /// Recovery after a crash depends entirely on this record, so it is emitted as
 /// soon as the child exists rather than when the turn completes.
-fn report_spawn(request: &TriageRunnerRequest, layout: &AttemptLayout, child_id: Option<u32>) {
+fn report_spawn(
+    request: &TriageRunnerRequest,
+    layout: &AttemptLayout,
+    child_id: Option<u32>,
+    group_leader: bool,
+) {
     let (Some(sink), Some(pid)) = (request.spawned.as_ref(), child_id) else {
         return;
     };
     sink(TriageSpawnInfo {
-        identity: process_identity::capture(pid),
+        identity: process_identity::capture_child(pid, group_leader),
         workspace_path: layout.workspace_path.clone(),
         output_path: layout.output_path.clone(),
     });
@@ -380,7 +385,7 @@ async fn run_pi_turn(
     };
 
     let child_id = child.id();
-    report_spawn(request, layout, child_id);
+    report_spawn(request, layout, child_id, cfg!(unix));
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
     let turn_timeout = Duration::from_millis(request.turn_timeout_ms);
@@ -725,7 +730,7 @@ async fn codex_session_start(
         )
     })?;
 
-    report_spawn(request, layout, child.id());
+    report_spawn(request, layout, child.id(), false);
     let mut stdin = child.stdin.take().expect("stdin piped");
     let stdout = child.stdout.take().expect("stdout piped");
     if let Some(stderr) = child.stderr.take() {
