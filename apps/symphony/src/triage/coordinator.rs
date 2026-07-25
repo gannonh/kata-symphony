@@ -390,10 +390,8 @@ where
                         }
                     }
                     process_identity::Signalability::Denied(reason) => {
-                        let gone = matches!(
-                            reason,
-                            process_identity::SignalBlockReason::ProcessNotFound
-                        );
+                        let gone =
+                            matches!(reason, process_identity::SignalBlockReason::ProcessNotFound);
                         if gone {
                             tracing::info!(
                                 stage_run_id = attempt.stage_run_id,
