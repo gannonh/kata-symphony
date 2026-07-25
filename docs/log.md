@@ -1,5 +1,8 @@
 # Docs Update Log
 
+## 2026-07-25
+* **A1 PR3 Verify rejected**: Added the [Verify report](/specs/2026-07-25-a1-pr3-verify-report.md) and updated the [roadmap](/specs/index.md), [A1 design](/specs/2026-07-16-a1-github-issue-triage-design.md), and [factory PRD](/specs/symphony-software-factory-platform-prd.md). Live correction/metrics checks passed; restart recovery leaked a post-`exec` orphan.
+
 ## 2026-07-24
 * **A1 PR2 Verify accepted**: Live UAT on `gannonh/uat-symphony` Project #16 + automated suite; [verify report](/specs/2026-07-24-a1-pr2-verify-report.md). Roadmap/PRD/A1 design mark PR2 verified (merge pending).
 * **A1 PR2 build**: Automatic route publication implemented; added [build report](/specs/2026-07-24-a1-pr2-build-report.md) and updated [specs roadmap](/specs/index.md), [A1 design](/specs/2026-07-16-a1-github-issue-triage-design.md), and [factory PRD](/specs/symphony-software-factory-platform-prd.md).

@@ -1,6 +1,7 @@
 # Specs Update Log
 
 ## 2026-07-25
+* **A1 PR3 Verify rejected**: Live GitHub UAT passed retry records, preview/automatic publication, correction events, metrics, and dedupe, but restart recovery left a post-`exec` orphan alive because the executable identity changed from the recorded launcher. See [Verify report](/specs/2026-07-25-a1-pr3-verify-report.md).
 * **A1 PR3 build**: Interrupted-attempt recovery and human route correction measurement implemented in Symphony triage; see [A1 PR3 build report](/specs/2026-07-25-a1-pr3-build-report.md). Adds `triage::process_identity` (identity-matched bounded termination, attempt cleanup) and `triage::correction` (agreement/correction/ambiguity comparison, `triage_route_corrected`, durable-only `triage_route_consistency`). Automated gates pass; live restart/correction UAT on `gannonh/uat-symphony` pending Verify.
 
 ## 2026-07-24
