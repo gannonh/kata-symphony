@@ -14,6 +14,7 @@ use crate::error::{Result, SymphonyError};
 use crate::triage::artifact::{self, ArtifactValidationError};
 use crate::triage::domain::{StageUsage, TriageArtifact};
 use crate::triage::integrity::{self, RepoBaseline};
+use crate::triage::process_identity::{self, ProcessIdentity};
 
 const FORCE_KILL_WAIT: Duration = Duration::from_secs(5);
 const OUTPUT_ENV: &str = "SYMPHONY_STAGE_OUTPUT";
@@ -60,10 +61,24 @@ pub struct TriageRunnerRequest {
     pub codex: Option<CodexConfig>,
     /// Live progress sink; events arrive as the turn executes.
     pub progress: Option<TriageProgressSink>,
+    /// Notified once the child is running, so the attempt's OS identity and
+    /// disposable paths are durable before the turn can be interrupted.
+    pub spawned: Option<TriageSpawnSink>,
 }
 
 /// Callback receiving structured progress during a triage turn.
 pub type TriageProgressSink = std::sync::Arc<dyn Fn(TriageProgress) + Send + Sync>;
+
+/// Callback receiving the spawned child's identity, fired once per turn.
+pub type TriageSpawnSink = std::sync::Arc<dyn Fn(TriageSpawnInfo) + Send + Sync>;
+
+/// What a restart needs to identify and clean up an abandoned attempt.
+#[derive(Debug, Clone)]
+pub struct TriageSpawnInfo {
+    pub identity: ProcessIdentity,
+    pub workspace_path: PathBuf,
+    pub output_path: PathBuf,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct TriageProgress {
@@ -293,6 +308,21 @@ fn finish_attempt(
 }
 
 /// Remove the isolated home (and any seeded credentials) after the child exits.
+/// Publish the running child's identity and disposable paths to the caller.
+///
+/// Recovery after a crash depends entirely on this record, so it is emitted as
+/// soon as the child exists rather than when the turn completes.
+fn report_spawn(request: &TriageRunnerRequest, layout: &AttemptLayout, child_id: Option<u32>) {
+    let (Some(sink), Some(pid)) = (request.spawned.as_ref(), child_id) else {
+        return;
+    };
+    sink(TriageSpawnInfo {
+        identity: process_identity::capture(pid),
+        workspace_path: layout.workspace_path.clone(),
+        output_path: layout.output_path.clone(),
+    });
+}
+
 fn scrub_isolated_home(home_dir: &Path) -> std::io::Result<()> {
     if home_dir.exists() {
         fs::remove_dir_all(home_dir)?;
@@ -348,6 +378,7 @@ async fn run_pi_turn(
     };
 
     let child_id = child.id();
+    report_spawn(request, layout, child_id);
     let stdout = child.stdout.take().expect("stdout piped");
     let stderr = child.stderr.take().expect("stderr piped");
     let turn_timeout = Duration::from_millis(request.turn_timeout_ms);
@@ -573,7 +604,7 @@ async fn run_codex_turn(
         parent_identifier: None,
     };
 
-    let handle = codex_session_start(&config, &issue, layout).await;
+    let handle = codex_session_start(request, &config, &issue, layout).await;
     let mut handle = match handle {
         Ok(handle) => handle,
         Err(outcome) => return Err(outcome),
@@ -666,6 +697,7 @@ fn codex_failure_kind(err: &SymphonyError) -> TriageRunnerFailureKind {
 /// Environment is cleared and rebuilt with an isolated `HOME` (same policy as
 /// the Pi path) so operator credentials such as `GH_TOKEN` are not inherited.
 async fn codex_session_start(
+    request: &TriageRunnerRequest,
     config: &CodexConfig,
     issue: &Issue,
     layout: &AttemptLayout,
@@ -691,6 +723,7 @@ async fn codex_session_start(
         )
     })?;
 
+    report_spawn(request, layout, child.id());
     let mut stdin = child.stdin.take().expect("stdin piped");
     let stdout = child.stdout.take().expect("stdout piped");
     if let Some(stderr) = child.stderr.take() {
@@ -1114,7 +1147,53 @@ mod tests {
             },
             codex: None,
             progress: None,
+            spawned: None,
         }
+    }
+
+    /// Restart recovery can only terminate an orphaned triage child if the
+    /// running attempt published the child's identity and disposable paths
+    /// while the turn was still in flight.
+    #[tokio::test]
+    async fn reports_spawned_child_identity_and_attempt_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+        let workspace_root = temp.path().join("workspaces");
+
+        let script = temp.path().join("fake-pi.sh");
+        write_script(
+            &script,
+            &format!(
+                "#!/bin/sh\nprintf '%s' '{artifact}' > \"$SYMPHONY_STAGE_OUTPUT\"\n",
+                artifact = valid_artifact_json().replace('\'', "'\"'\"'")
+            ),
+        );
+
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<TriageSpawnInfo>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let mut request = pi_request(&repo, &workspace_root, vec![script.display().to_string()]);
+        request.spawned = Some(std::sync::Arc::new(move |info: TriageSpawnInfo| {
+            sink.lock().unwrap().push(info);
+        }));
+
+        let outcome = TriageRunner::run(request).await.unwrap();
+        assert!(matches!(outcome, TriageRunnerOutcome::Success(_)));
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "exactly one spawn notification per turn");
+        let info = &seen[0];
+        assert!(info.identity.pid > 0);
+        assert_eq!(
+            info.identity.process_group_id, info.identity.pid,
+            "child runs in its own process group"
+        );
+        assert!(
+            info.workspace_path.starts_with(&workspace_root),
+            "workspace path must locate the disposable clone"
+        );
+        assert!(info.output_path.ends_with("result.json"));
     }
 
     #[test]

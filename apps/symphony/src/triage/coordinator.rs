@@ -25,11 +25,11 @@ use crate::triage::publisher::{
 use crate::triage::runner::{
     effective_pi_model, TriageHarness, TriageIssueIdentity, TriageProgress, TriageProgressSink,
     TriageRunner, TriageRunnerFailureKind, TriageRunnerOutcome, TriageRunnerRequest,
-    TriageRunnerSuccess,
+    TriageRunnerSuccess, TriageSpawnInfo,
 };
 use crate::triage::store::{
-    ClaimAttemptRequest, CreatePublicationIntentRequest, FactoryRunStore, StoreArtifactRequest,
-    UpsertFactoryRunRequest,
+    ClaimAttemptRequest, CreatePublicationIntentRequest, FactoryRunStore,
+    RecordAttemptProcessRequest, StoreArtifactRequest, UpsertFactoryRunRequest,
 };
 
 const PENDING_INTENT_BATCH: usize = 256;
@@ -602,9 +602,14 @@ where
             current_tool_args_preview: None,
             total_tokens: 0,
         });
+        // The spawn notification arrives on a channel because the runner holds
+        // no store handle; the lease-renewal loop drains it and persists the
+        // identity while the turn is still in flight.
+        let (spawn_tx, spawn_rx) = tokio::sync::mpsc::channel::<TriageSpawnInfo>(1);
         let outcome = self
             .execute_with_lease_renewal(
                 &stage.stage_run_id,
+                spawn_rx,
                 TriageRunnerRequest {
                     attempt_id: stage.stage_run_id.clone(),
                     workspace_root: workspace_root.to_path_buf(),
@@ -621,6 +626,9 @@ where
                     },
                     codex: (harness == TriageHarness::Codex).then(|| service.codex.clone()),
                     progress: self.progress_sink(&stage.stage_run_id),
+                    spawned: Some(Arc::new(move |info: TriageSpawnInfo| {
+                        let _ = spawn_tx.try_send(info);
+                    })),
                 },
             )
             .await;
@@ -677,6 +685,7 @@ where
     async fn execute_with_lease_renewal(
         &mut self,
         stage_run_id: &str,
+        mut spawned: tokio::sync::mpsc::Receiver<TriageSpawnInfo>,
         request: TriageRunnerRequest,
     ) -> Result<TriageRunnerOutcome> {
         let owner_instance = self.config.owner_instance.clone();
@@ -691,6 +700,23 @@ where
             tokio::select! {
                 biased;
                 outcome = &mut execute => return outcome,
+                Some(info) = spawned.recv() => {
+                    if let Err(err) = self.store.record_attempt_process(RecordAttemptProcessRequest {
+                        stage_run_id: stage_run_id.to_string(),
+                        owner_instance: owner_instance.clone(),
+                        identity: info.identity,
+                        workspace_path: Some(info.workspace_path.display().to_string()),
+                        output_path: Some(info.output_path.display().to_string()),
+                    }) {
+                        // Losing this record only costs a restart the ability to
+                        // reclaim the child, so warn instead of failing the turn.
+                        tracing::warn!(
+                            stage_run_id,
+                            error = %err,
+                            "failed to record triage attempt process identity"
+                        );
+                    }
+                }
                 _ = ticker.tick() => {
                     match self.store.renew_lease(stage_run_id, &owner_instance) {
                         Ok(true) => {}

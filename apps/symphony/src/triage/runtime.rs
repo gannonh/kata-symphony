@@ -255,6 +255,25 @@ impl FactoryRunStore for SharedFactoryStore {
         self.with_store_mut(|store| store.interrupt_stale_attempts())
     }
 
+    fn interrupt_attempt(&mut self, stage_run_id: &str, owner_instance: &str) -> Result<bool> {
+        self.with_store_mut(|store| store.interrupt_attempt(stage_run_id, owner_instance))
+    }
+
+    fn record_attempt_process(
+        &mut self,
+        request: crate::triage::store::RecordAttemptProcessRequest,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.record_attempt_process(request.clone()))
+    }
+
+    fn list_recoverable_attempts(&self) -> Result<Vec<crate::triage::store::RecoverableAttempt>> {
+        self.with_store(|store| store.list_recoverable_attempts())
+    }
+
+    fn clear_attempt_process(&mut self, stage_run_id: &str) -> Result<()> {
+        self.with_store_mut(|store| store.clear_attempt_process(stage_run_id))
+    }
+
     fn triage_metrics(&self) -> Result<crate::triage::domain::TriageMetricsAggregate> {
         self.with_store(|store| store.triage_metrics())
     }

@@ -5,6 +5,7 @@ pub mod domain;
 pub mod fingerprint;
 pub mod intake;
 pub mod integrity;
+pub mod process_identity;
 pub mod publisher;
 pub mod routing;
 pub mod runner;
