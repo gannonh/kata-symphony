@@ -3,9 +3,10 @@
 //! A restart has to decide whether the process group recorded against an
 //! abandoned attempt is still *that* process, or whether the PID has since been
 //! reused by something unrelated. Comparing the PID alone is not enough, so an
-//! attempt also records the OS-provided process start token and the executable
-//! the child was running. Signalling only happens when every recorded field
-//! still matches the live process.
+//! attempt also records its process group and the OS-provided process start
+//! token. The executable is retained as diagnostic context, but is not stable
+//! identity: a launcher can legitimately replace itself with a worker through
+//! `exec` while keeping the same PID, process group, and start token.
 
 use std::path::{Path, PathBuf};
 
@@ -17,9 +18,68 @@ pub struct ProcessIdentity {
     /// OS-provided start marker. `None` when this platform exposes none, which
     /// forces recovery to skip signalling rather than risk a reused PID.
     pub start_token: Option<String>,
-    /// Executable backing the process, used to reject a reused PID that now
-    /// runs an unrelated program.
+    /// Executable observed when the process was captured. This is diagnostic
+    /// context only because a legitimate child may replace it through `exec`.
     pub executable: Option<String>,
+}
+
+/// Diagnostic comparison of the executable recorded at spawn with the live
+/// executable observed during recovery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutableComparison {
+    Unchanged,
+    Changed {
+        recorded: Option<String>,
+        live: Option<String>,
+    },
+}
+
+/// Why recovery refused to signal a recorded process group.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignalBlockReason {
+    InvalidPidOrGroup,
+    OwnProcessGroup,
+    MissingStartToken,
+    ProcessNotFound,
+    LiveIdentityUnavailable,
+    ProcessGroupMismatch { recorded: i64, live: i64 },
+    StartTokenMismatch { recorded: String, live: String },
+}
+
+impl std::fmt::Display for SignalBlockReason {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidPidOrGroup => formatter.write_str("invalid pid or process group"),
+            Self::OwnProcessGroup => formatter.write_str("recorded group is Symphony's group"),
+            Self::MissingStartToken => formatter.write_str("recorded start token is missing"),
+            Self::ProcessNotFound => formatter.write_str("recorded process is no longer present"),
+            Self::LiveIdentityUnavailable => {
+                formatter.write_str("live process start token is unavailable")
+            }
+            Self::ProcessGroupMismatch { recorded, live } => {
+                write!(
+                    formatter,
+                    "process group mismatch (recorded {recorded}, live {live})"
+                )
+            }
+            Self::StartTokenMismatch { .. } => formatter.write_str("process start token mismatch"),
+        }
+    }
+}
+
+/// Recovery's authorization decision for a recorded child.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Signalability {
+    Authorized { executable: ExecutableComparison },
+    Denied(SignalBlockReason),
+}
+
+/// Verified result of bounded process-group termination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TerminationOutcome {
+    Terminated,
+    NoLongerSignalable(SignalBlockReason),
+    StillRunning,
 }
 
 /// Capture identity for a live `pid`, reading its current process group.
@@ -47,35 +107,69 @@ pub fn capture_child(pid: u32, group_leader: bool) -> ProcessIdentity {
     identity
 }
 
-/// Whether the live process still matches every recorded identity field.
+/// Whether the live process still matches the recorded stable identity.
 ///
-/// Missing recorded or live values are treated as a mismatch: an attempt whose
-/// identity cannot be proven must never be signalled.
+/// Executable equality is intentionally excluded because `exec` changes the
+/// executable without changing the process identity that authorizes recovery.
 pub fn matches(recorded: &ProcessIdentity) -> bool {
-    let (Some(recorded_token), Some(recorded_exe)) = (&recorded.start_token, &recorded.executable)
-    else {
+    let Some(recorded_token) = recorded.start_token.as_ref() else {
         return false;
     };
-    if recorded.pid <= 0 {
+    if recorded.pid <= 0 || recorded.process_group_id <= 0 {
         return false;
     }
-
-    let live = capture(recorded.pid as u32);
-    live.process_group_id == recorded.process_group_id
-        && live.start_token.as_ref() == Some(recorded_token)
-        && live.executable.as_ref() == Some(recorded_exe)
+    process_group_of(recorded.pid) == Some(recorded.process_group_id)
+        && start_token(recorded.pid).as_ref() == Some(recorded_token)
 }
 
-/// Whether recovery may signal this attempt's recorded process group.
-///
-/// Beyond a full identity match the group must be a real, foreign group: a
-/// child that never got its own group would share Symphony's, and signalling
-/// that would take down the orchestrator itself.
-pub fn is_signalable(recorded: &ProcessIdentity) -> bool {
-    if recorded.process_group_id <= 0 || recorded.process_group_id == own_process_group() {
-        return false;
+/// Assess whether recovery may signal this attempt's recorded process group.
+pub fn assess_signalability(recorded: &ProcessIdentity) -> Signalability {
+    if recorded.pid <= 0 || recorded.process_group_id <= 0 {
+        return Signalability::Denied(SignalBlockReason::InvalidPidOrGroup);
     }
-    matches(recorded)
+    if recorded.process_group_id == own_process_group() {
+        return Signalability::Denied(SignalBlockReason::OwnProcessGroup);
+    }
+    let Some(recorded_token) = recorded.start_token.as_ref() else {
+        return Signalability::Denied(SignalBlockReason::MissingStartToken);
+    };
+    let Some(live_group) = process_group_of(recorded.pid) else {
+        return Signalability::Denied(SignalBlockReason::ProcessNotFound);
+    };
+    if live_group != recorded.process_group_id {
+        return Signalability::Denied(SignalBlockReason::ProcessGroupMismatch {
+            recorded: recorded.process_group_id,
+            live: live_group,
+        });
+    }
+    let Some(live_token) = start_token(recorded.pid) else {
+        return Signalability::Denied(SignalBlockReason::LiveIdentityUnavailable);
+    };
+    if &live_token != recorded_token {
+        return Signalability::Denied(SignalBlockReason::StartTokenMismatch {
+            recorded: recorded_token.clone(),
+            live: live_token,
+        });
+    }
+
+    let live_executable = executable(recorded.pid);
+    let executable = if live_executable == recorded.executable {
+        ExecutableComparison::Unchanged
+    } else {
+        ExecutableComparison::Changed {
+            recorded: recorded.executable.clone(),
+            live: live_executable,
+        }
+    };
+    Signalability::Authorized { executable }
+}
+
+/// Boolean compatibility wrapper for callers that do not need diagnostics.
+pub fn is_signalable(recorded: &ProcessIdentity) -> bool {
+    matches!(
+        assess_signalability(recorded),
+        Signalability::Authorized { .. }
+    )
 }
 
 fn own_process_group() -> i64 {
@@ -152,12 +246,19 @@ pub fn attempt_root_for_cleanup(workspace_path: &Path) -> Option<PathBuf> {
         .then(|| root.to_path_buf())
 }
 
-/// Send a bounded termination to `process_group_id`: `SIGTERM`, then `SIGKILL`
-/// if the group is still alive after [`FORCE_KILL_WAIT`].
-pub async fn terminate_process_group(process_group_id: i64) {
-    let group = match i32::try_from(process_group_id) {
+/// Terminate the recorded process group after re-checking stable identity:
+/// `SIGTERM`, then `SIGKILL` if a running member remains after
+/// [`FORCE_KILL_WAIT`].
+pub async fn terminate_process_group(recorded: &ProcessIdentity) -> TerminationOutcome {
+    if let Signalability::Denied(reason) = assess_signalability(recorded) {
+        return TerminationOutcome::NoLongerSignalable(reason);
+    }
+
+    let group = match i32::try_from(recorded.process_group_id) {
         Ok(group) if group > 0 => group,
-        _ => return,
+        _ => {
+            return TerminationOutcome::NoLongerSignalable(SignalBlockReason::InvalidPidOrGroup);
+        }
     };
 
     // SAFETY: kill against a negative pid signals the process group; the call
@@ -166,20 +267,199 @@ pub async fn terminate_process_group(process_group_id: i64) {
 
     let deadline = std::time::Instant::now() + FORCE_KILL_WAIT;
     while std::time::Instant::now() < deadline {
-        if unsafe { kill(-group, 0) } != 0 {
-            return;
+        if !process_group_has_running_members(group) {
+            return TerminationOutcome::Terminated;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     unsafe { kill(-group, SIGKILL) };
+
+    let deadline = std::time::Instant::now() + FORCE_KILL_CONFIRM_WAIT;
+    while std::time::Instant::now() < deadline {
+        if !process_group_has_running_members(group) {
+            return TerminationOutcome::Terminated;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    if process_group_has_running_members(group) {
+        TerminationOutcome::StillRunning
+    } else {
+        TerminationOutcome::Terminated
+    }
 }
 
 const SIGTERM: i32 = 15;
 const SIGKILL: i32 = 9;
 const FORCE_KILL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+const FORCE_KILL_CONFIRM_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
+}
+
+#[cfg(target_os = "linux")]
+fn process_group_has_running_members(process_group_id: i32) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        // Fail closed when the process table cannot be inspected.
+        return true;
+    };
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<i64>().ok())
+        else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some((_, after_comm)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut fields = after_comm.split_whitespace();
+        let Some(state) = fields.next() else {
+            continue;
+        };
+        let _parent_pid = fields.next();
+        let Some(group) = fields.next().and_then(|value| value.parse::<i32>().ok()) else {
+            continue;
+        };
+        if group == process_group_id && state != "Z" && state != "X" {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_group_has_running_members(process_group_id: i32) -> bool {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-g", &process_group_id.to_string()])
+        .output();
+    let Ok(output) = output else {
+        return true;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .any(|state| !state.is_empty() && !state.starts_with('Z') && !state.starts_with('X'))
+}
+
+/// Deterministic launcher-to-worker fixture shared by recovery tests.
+#[cfg(test)]
+pub(crate) struct ExecTransitionChild {
+    child: Option<std::process::Child>,
+    identity: ProcessIdentity,
+    release_path: PathBuf,
+    _temp: tempfile::TempDir,
+}
+
+#[cfg(test)]
+impl ExecTransitionChild {
+    pub(crate) fn spawn() -> Self {
+        use std::os::unix::process::CommandExt;
+
+        let temp = tempfile::tempdir().expect("create exec-transition fixture");
+        let release_path = temp.path().join("release.fifo");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&release_path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo must create the release barrier");
+
+        let mut command = std::process::Command::new("sh");
+        command
+            .args([
+                "-c",
+                "read -r _ < \"$1\"; exec sleep 60",
+                "symphony-test-launcher",
+            ])
+            .arg(&release_path)
+            .process_group(0);
+        let child = command.spawn().expect("spawn launcher");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let identity = loop {
+            let candidate = capture_child(child.id(), true);
+            let settled = process_group_of(candidate.pid) == Some(candidate.process_group_id)
+                && candidate.start_token.is_some()
+                && candidate
+                    .executable
+                    .as_deref()
+                    .is_some_and(|value| value.contains("sh") || value.contains("dash"));
+            if settled {
+                break candidate;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "launcher must settle before identity capture"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+
+        Self {
+            child: Some(child),
+            identity,
+            release_path,
+            _temp: temp,
+        }
+    }
+
+    pub(crate) fn identity(&self) -> &ProcessIdentity {
+        &self.identity
+    }
+
+    pub(crate) fn release_and_wait_for_exec(&self) {
+        use std::io::Write;
+
+        let mut release = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&self.release_path)
+            .expect("open release barrier");
+        release.write_all(b"go\n").expect("release launcher");
+        drop(release);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if matches!(
+                assess_signalability(&self.identity),
+                Signalability::Authorized {
+                    executable: ExecutableComparison::Changed { .. }
+                }
+            ) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "launcher must replace itself while stable identity remains"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    pub(crate) fn wait_for_exit(&mut self) -> bool {
+        let mut child = self.child.take().expect("child has not been reaped");
+        child.wait().is_ok()
+    }
+}
+
+#[cfg(test)]
+impl Drop for ExecTransitionChild {
+    fn drop(&mut self) {
+        let Some(child) = self.child.as_mut() else {
+            return;
+        };
+        if let Ok(group) = i32::try_from(self.identity.process_group_id) {
+            // SAFETY: this fixture owns the foreign process group.
+            unsafe { kill(-group, SIGKILL) };
+        }
+        let _ = child.wait();
+    }
 }
 
 #[cfg(test)]
@@ -227,6 +507,77 @@ mod tests {
 
         let _ = child.kill();
         let _ = child.wait();
+    }
+
+    #[test]
+    fn executable_drift_after_exec_remains_signalable() {
+        let fixture = ExecTransitionChild::spawn();
+        let recorded = fixture.identity().clone();
+
+        fixture.release_and_wait_for_exec();
+
+        assert_eq!(
+            assess_signalability(&recorded),
+            Signalability::Authorized {
+                executable: ExecutableComparison::Changed {
+                    recorded: recorded.executable.clone(),
+                    live: executable(recorded.pid),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn missing_executable_is_diagnostic_not_authorization() {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30").process_group(0);
+        let mut child = command.spawn().expect("spawn sleep");
+        let mut identity = capture_child(child.id(), true);
+        identity.executable = None;
+
+        assert!(is_signalable(&identity));
+        assert!(matches!(
+            assess_signalability(&identity),
+            Signalability::Authorized { .. }
+        ));
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn rejects_identity_whose_process_group_changed() {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30").process_group(0);
+        let mut child = command.spawn().expect("spawn sleep");
+        let mut identity = capture_child(child.id(), true);
+        identity.process_group_id += 1;
+
+        assert!(matches!(
+            assess_signalability(&identity),
+            Signalability::Denied(SignalBlockReason::ProcessGroupMismatch { .. })
+        ));
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn rejects_identity_for_dead_process() {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new("sleep");
+        command.arg("30").process_group(0);
+        let mut child = command.spawn().expect("spawn sleep");
+        let identity = capture_child(child.id(), true);
+        child.kill().expect("kill child");
+        child.wait().expect("reap child");
+
+        assert_eq!(
+            assess_signalability(&identity),
+            Signalability::Denied(SignalBlockReason::ProcessNotFound)
+        );
     }
 
     /// A child placed in its own group calls `setpgid` after `fork`, so reading
@@ -291,37 +642,20 @@ mod tests {
     /// an agent running against a workspace it is about to delete.
     #[tokio::test]
     async fn terminates_a_live_process_group() {
-        // Spawned and reaped through std: `tokio::process` relies on SIGCHLD
-        // reaching the runtime that owns the child, which is unreliable when
-        // many test runtimes share one process.
-        let mut child = {
-            use std::os::unix::process::CommandExt;
-            let mut command = std::process::Command::new("sleep");
-            command.arg("60").process_group(0);
-            command.spawn().expect("spawn sleep")
-        };
-        let identity = capture_child(child.id(), true);
-        assert!(
-            is_signalable(&identity),
-            "a foreign group leader must be signalable"
+        let mut fixture = ExecTransitionChild::spawn();
+        let identity = fixture.identity().clone();
+        fixture.release_and_wait_for_exec();
+
+        assert_eq!(
+            terminate_process_group(&identity).await,
+            TerminationOutcome::Terminated
         );
-
-        let (reaped_tx, reaped_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = reaped_tx.send(child.wait().is_ok());
-        });
-
-        terminate_process_group(identity.process_group_id).await;
-
-        let reaped = reaped_rx
-            .recv_timeout(std::time::Duration::from_secs(30))
-            .expect("child must exit after termination");
-        assert!(reaped);
+        assert!(fixture.wait_for_exit(), "child must be reaped");
     }
 
     /// An attempt recorded without a usable identity must never be signalled.
     #[test]
-    fn rejects_identity_missing_os_fields() {
+    fn rejects_identity_missing_start_token() {
         let identity = ProcessIdentity {
             pid: 1,
             process_group_id: 1,
@@ -330,5 +664,9 @@ mod tests {
         };
 
         assert!(!matches(&identity));
+        assert_eq!(
+            assess_signalability(&identity),
+            Signalability::Denied(SignalBlockReason::MissingStartToken)
+        );
     }
 }

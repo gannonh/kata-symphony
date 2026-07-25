@@ -311,9 +311,10 @@ where
     /// Reclaim attempts a previous process abandoned.
     ///
     /// An interrupted attempt may still own a live child and a disposable
-    /// workspace. The child is signalled only when every recorded identity
-    /// field still matches the live process, so a reused PID is never killed;
-    /// the attempt directory is then removed so the retry starts clean. The
+    /// workspace. The child is signalled only when its PID, group, and OS start
+    /// token still match, so a reused PID is never killed. Its executable may
+    /// change legitimately through `exec` and is logged as diagnostic drift.
+    /// The attempt directory is then removed so the retry starts clean. The
     /// attempt itself stays interrupted and counts against `max_attempts`.
     async fn recover_interrupted_attempts(&mut self) -> Result<u32> {
         let attempts = self.store.list_recoverable_attempts()?;
@@ -321,19 +322,59 @@ where
 
         for attempt in attempts {
             if let Some(identity) = attempt.identity.as_ref() {
-                if process_identity::is_signalable(identity) {
-                    tracing::info!(
-                        stage_run_id = attempt.stage_run_id,
-                        process_group_id = identity.process_group_id,
-                        "terminating orphaned triage process group"
-                    );
-                    process_identity::terminate_process_group(identity.process_group_id).await;
-                } else {
-                    tracing::debug!(
+                match process_identity::assess_signalability(identity) {
+                    process_identity::Signalability::Authorized { executable } => {
+                        if let process_identity::ExecutableComparison::Changed { recorded, live } =
+                            &executable
+                        {
+                            tracing::info!(
+                                stage_run_id = attempt.stage_run_id,
+                                pid = identity.pid,
+                                recorded_executable =
+                                    recorded.as_deref().unwrap_or("<unavailable>"),
+                                live_executable = live.as_deref().unwrap_or("<unavailable>"),
+                                "triage child executable changed after spawn"
+                            );
+                        }
+                        tracing::info!(
+                            stage_run_id = attempt.stage_run_id,
+                            process_group_id = identity.process_group_id,
+                            "terminating orphaned triage process group"
+                        );
+                        match process_identity::terminate_process_group(identity).await {
+                            process_identity::TerminationOutcome::Terminated => {
+                                tracing::info!(
+                                    stage_run_id = attempt.stage_run_id,
+                                    process_group_id = identity.process_group_id,
+                                    "orphaned triage process group terminated"
+                                );
+                            }
+                            process_identity::TerminationOutcome::NoLongerSignalable(reason) => {
+                                tracing::warn!(
+                                    stage_run_id = attempt.stage_run_id,
+                                    pid = identity.pid,
+                                    process_group_id = identity.process_group_id,
+                                    reason = %reason,
+                                    "triage process identity changed before termination; signal skipped"
+                                );
+                            }
+                            process_identity::TerminationOutcome::StillRunning => {
+                                tracing::warn!(
+                                    stage_run_id = attempt.stage_run_id,
+                                    pid = identity.pid,
+                                    process_group_id = identity.process_group_id,
+                                    "orphaned triage process group remains live after bounded termination"
+                                );
+                            }
+                        }
+                    }
+                    process_identity::Signalability::Denied(reason) => tracing::warn!(
                         stage_run_id = attempt.stage_run_id,
                         pid = identity.pid,
-                        "skipping signal; recorded triage process identity no longer matches"
-                    );
+                        process_group_id = identity.process_group_id,
+                        reason = %reason,
+                        "skipping orphan signal; recorded triage process identity is not signalable"
+                    ),
                 }
             }
 
@@ -2112,25 +2153,18 @@ mod tests {
         let workflow_dir = prep_workflow(&temp);
         let mut store = open_store(&temp);
 
-        // Stand in for the orphaned triage child left behind by a prior process.
-        // Spawned and reaped through std so the assertion does not depend on
-        // which tokio runtime happens to receive SIGCHLD.
-        let mut orphan = {
-            use std::os::unix::process::CommandExt;
-            let mut command = std::process::Command::new("sleep");
-            command.arg("60").process_group(0);
-            command.spawn().unwrap()
-        };
-        let identity = crate::triage::process_identity::capture_child(orphan.id(), true);
-        // A real orphan predates this process by a restart. Wait for the child
-        // to finish entering its own group so the test observes that settled
-        // state rather than the instant after fork.
-        for _ in 0..100 {
-            if crate::triage::process_identity::matches(&identity) {
-                break;
+        // Capture a shell launcher, then let it replace itself with the worker.
+        // This is the live failure shape that previously made executable
+        // equality reject a legitimate orphan.
+        let mut orphan = crate::triage::process_identity::ExecTransitionChild::spawn();
+        let identity = orphan.identity().clone();
+        orphan.release_and_wait_for_exec();
+        assert!(matches!(
+            crate::triage::process_identity::assess_signalability(&identity),
+            crate::triage::process_identity::Signalability::Authorized {
+                executable: crate::triage::process_identity::ExecutableComparison::Changed { .. }
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+        ));
 
         let attempt_root = temp.path().join("workspaces").join("triage-stale-attempt");
         let workspace_path = attempt_root.join("workspace");
@@ -2203,24 +2237,15 @@ mod tests {
             "precondition: the interrupted attempt must be recoverable work"
         );
 
-        // Reap concurrently: a real orphan is reparented to init and reaped
-        // there, so recovery sees it disappear. Left unreaped here it would
-        // linger as a zombie and only die at the force-kill deadline.
-        let (reaped_tx, reaped_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let status = orphan.wait();
-            let _ = reaped_tx.send(status.is_ok());
-        });
-
         coordinator
             .poll_once(&service_config(true, &workflow_dir))
             .await
             .unwrap();
 
-        let reaped = reaped_rx
-            .recv_timeout(std::time::Duration::from_secs(30))
-            .expect("orphaned child must be terminated by recovery");
-        assert!(reaped);
+        assert!(
+            orphan.wait_for_exit(),
+            "orphaned child must be terminated and reaped by recovery"
+        );
         assert!(
             !attempt_root.exists(),
             "attempt directory must be reclaimed before retry"
@@ -2237,6 +2262,12 @@ mod tests {
             crate::triage::domain::StageStatus::Interrupted,
             "recovery must not resurrect the attempt"
         );
+        assert_eq!(stage.pid, None);
+        assert_eq!(stage.process_group_id, None);
+        assert_eq!(stage.process_start_token, None);
+        assert_eq!(stage.executable_identity, None);
+        assert_eq!(stage.workspace_path, None);
+        assert_eq!(stage.output_path, None);
         assert!(coordinator
             .store_mut()
             .list_recoverable_attempts()
