@@ -1,5 +1,8 @@
 # Specs Update Log
 
+## 2026-07-25
+* **A1 PR3 build**: Interrupted-attempt recovery and human route correction measurement implemented in Symphony triage; see [A1 PR3 build report](/specs/2026-07-25-a1-pr3-build-report.md). Adds `triage::process_identity` (identity-matched bounded termination, attempt cleanup) and `triage::correction` (agreement/correction/ambiguity comparison, `triage_route_corrected`, durable-only `triage_route_consistency`). Automated gates pass; live restart/correction UAT on `gannonh/uat-symphony` pending Verify.
+
 ## 2026-07-24
 * **A1 PR2 Verify accepted**: [Verify report](/specs/2026-07-24-a1-pr2-verify-report.md) signed off after live UAT on Project #16; PR2 merge still pending. PR3 remains planned.
 * **A1 PR2 build**: Automatic route publication + implement handoff implemented in Symphony triage/orchestrator; see [A1 PR2 build report](/specs/2026-07-24-a1-pr2-build-report.md).

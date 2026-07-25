@@ -2393,6 +2393,12 @@ mod tests {
             .collect();
         assert_eq!(corrected.len(), 1);
         assert_eq!(corrected[0].1.as_deref(), Some("#42"));
+
+        // The agreement metrics on the read surface come from the same durable
+        // events, so repeated polling must not inflate them either.
+        let metrics = coordinator.store_mut().triage_metrics().unwrap();
+        assert_eq!(metrics.correction_count, 1);
+        assert_eq!(metrics.correction_rate, 1.0);
     }
 
     /// Leaving Symphony's label in place is agreement, so nothing is recorded.

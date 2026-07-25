@@ -508,10 +508,26 @@ server:
 # be distinct and must not equal `intake_label`. Optional `state` values must exist
 # on the Projects v2 Status field.
 #
+# Restart recovery: each poll interrupts attempts whose lease went stale, then
+# reclaims them. A recorded triage child is terminated only when its pid,
+# process group, OS start token and executable all still match, so a reused PID
+# is never signalled; otherwise Symphony skips the signal. The attempt's
+# disposable directory is removed before retry, and the attempt stays
+# interrupted so it still counts against `max_attempts`. Late output from an
+# interrupted attempt is rejected rather than recorded as success.
+#
+# Agreement measurement: after a route is published, Symphony re-reads the issue
+# from its durable record and compares current labels against the five route
+# labels stored on that publication, so reloading this file with a different
+# mapping cannot reinterpret an older publication. Replacing the route label
+# emits `triage_route_corrected` once per artifact and observed route. Zero or
+# several route labels is recorded as a durable `triage_route_consistency`
+# diagnostic instead, and is not counted as disagreement.
+#
 # HTTP (when the observability server is enabled):
 #   GET /api/v1/factory-runs/{run_id}
 #   GET /api/v1/factory-runs?issue={issue_identifier}
-#   GET /api/v1/factory-runs/metrics?stage=triage
+#   GET /api/v1/factory-runs/metrics?stage=triage   # includes correction_count / correction_rate
 #
 # triage:
 #   enabled: false

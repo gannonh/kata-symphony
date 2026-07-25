@@ -12,8 +12,8 @@
 //! Correction is a proxy for disagreement. Absence of a correction does not
 //! prove the route was right.
 
-/// Canonical routes in the order [`route_labels_in_canonical_order`] records
-/// them on a publication intent.
+/// Canonical routes in the order an automatic publication intent records its
+/// route labels.
 pub const ROUTE_KEYS: [&str; 5] = [
     "implement",
     "spec",
