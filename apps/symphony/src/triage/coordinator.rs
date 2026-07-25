@@ -309,8 +309,7 @@ where
             let issue_number = parse_issue_number(&run.issue_id)?;
             let kind = desired_kind(&intent.desired_effects);
 
-            if intent.mode == PublicationMode::Automatic || kind == Some(DESIRED_KIND_AUTOMATIC)
-            {
+            if intent.mode == PublicationMode::Automatic || kind == Some(DESIRED_KIND_AUTOMATIC) {
                 let Some(artifact_id) = intent.artifact_id.as_deref() else {
                     return Err(SymphonyError::TriageError(format!(
                         "automatic intent {} is missing artifact_id",

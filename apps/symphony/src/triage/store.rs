@@ -123,9 +123,7 @@ pub trait FactoryRunStore {
     fn get_publication_intent(&self, intent_id: &str) -> Result<Option<PublicationIntentRecord>>;
     fn get_latest_publication(&self, run_id: &str) -> Result<Option<PublicationIntentRecord>>;
     fn list_pending_intents(&self, limit: usize) -> Result<Vec<PublicationIntentRecord>>;
-    fn list_pending_automatic_dispatch_guards(
-        &self,
-    ) -> Result<Vec<PendingAutomaticDispatchGuard>>;
+    fn list_pending_automatic_dispatch_guards(&self) -> Result<Vec<PendingAutomaticDispatchGuard>>;
     fn list_intents_for_run(&self, run_id: &str) -> Result<Vec<PublicationIntentRecord>>;
     fn list_verified_comment_identities(&self, run_id: &str) -> Result<Vec<StoredCommentIdentity>>;
     fn list_stage_attempts_for_revision(
@@ -783,9 +781,7 @@ impl FactoryRunStore for SqliteFactoryStore {
             .map_err(storage_error)
     }
 
-    fn list_pending_automatic_dispatch_guards(
-        &self,
-    ) -> Result<Vec<PendingAutomaticDispatchGuard>> {
+    fn list_pending_automatic_dispatch_guards(&self) -> Result<Vec<PendingAutomaticDispatchGuard>> {
         let mut stmt = self
             .conn
             .prepare(

@@ -459,13 +459,19 @@ where
         vocabulary: &std::collections::BTreeSet<String>,
         step: &str,
     ) -> Result<PublicationStatus> {
-        let expected = ManagedProjection::from_json(&intent.expected_projection)
-            .unwrap_or_default();
+        let expected =
+            ManagedProjection::from_json(&intent.expected_projection).unwrap_or_default();
         match step {
             COMMENT_PENDING_STEP => {
                 let body = automatic_body(request, intent, AutomaticCommentPhase::Pending);
-                self.upsert_marked_comment(store, intent, request.issue_number, &body, request.max_pages)
-                    .await?;
+                self.upsert_marked_comment(
+                    store,
+                    intent,
+                    request.issue_number,
+                    &body,
+                    request.max_pages,
+                )
+                .await?;
                 store.record_publication_step(
                     &intent.intent_id,
                     COMMENT_PENDING_STEP,
@@ -522,7 +528,11 @@ where
                 }
             }
             CONFLICT_CLEANUP_STEP => {
-                let desired = conflict_cleanup_desired(&expected, request.managed_labels, &intent.route_label);
+                let desired = conflict_cleanup_desired(
+                    &expected,
+                    request.managed_labels,
+                    &intent.route_label,
+                );
                 let to_remove = conflicting_route_labels(
                     &expected,
                     request.managed_labels,
@@ -548,8 +558,14 @@ where
             COMMENT_ROUTE_EFFECTS_STEP => {
                 let body =
                     automatic_body(request, intent, AutomaticCommentPhase::RouteEffectsApplied);
-                self.upsert_marked_comment(store, intent, request.issue_number, &body, request.max_pages)
-                    .await?;
+                self.upsert_marked_comment(
+                    store,
+                    intent,
+                    request.issue_number,
+                    &body,
+                    request.max_pages,
+                )
+                .await?;
                 store.record_publication_step(
                     &intent.intent_id,
                     COMMENT_ROUTE_EFFECTS_STEP,
@@ -579,8 +595,14 @@ where
             }
             COMMENT_APPLIED_STEP => {
                 let body = automatic_body(request, intent, AutomaticCommentPhase::Applied);
-                self.upsert_marked_comment(store, intent, request.issue_number, &body, request.max_pages)
-                    .await?;
+                self.upsert_marked_comment(
+                    store,
+                    intent,
+                    request.issue_number,
+                    &body,
+                    request.max_pages,
+                )
+                .await?;
                 store.record_publication_step(
                     &intent.intent_id,
                     COMMENT_APPLIED_STEP,
@@ -1254,10 +1276,7 @@ mod tests {
     async fn automatic_conflict_cleanup_removes_other_managed_route_labels() {
         let (_temp, mut store, intent) = store_with_automatic_intent(TriageRoute::Implement);
         let comments = MockComments::new("symphony-bot");
-        let routing = MockRouting::new(
-            &["needs-triage", "ready-to-spec", "docs"],
-            Some("Backlog"),
-        );
+        let routing = MockRouting::new(&["needs-triage", "ready-to-spec", "docs"], Some("Backlog"));
         let publisher = AutomaticPublisher::new(comments.clone(), routing.clone());
 
         publisher
@@ -1277,7 +1296,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(routing.calls().contains(&"remove:ready-to-spec".to_string()));
+        assert!(routing
+            .calls()
+            .contains(&"remove:ready-to-spec".to_string()));
         assert_eq!(
             routing.labels_now(),
             vec!["docs".to_string(), "ready-for-agent".to_string()]
@@ -1344,7 +1365,10 @@ mod tests {
 
         assert_eq!(status, PublicationStatus::Conflict);
         assert!(routing.labels_now().contains(&"needs-triage".to_string()));
-        assert!(!routing.calls().iter().any(|call| call == "remove:needs-triage"));
+        assert!(!routing
+            .calls()
+            .iter()
+            .any(|call| call == "remove:needs-triage"));
     }
 
     #[tokio::test]
@@ -1421,8 +1445,7 @@ mod tests {
 
     #[tokio::test]
     async fn automatic_needs_information_comment_includes_clarification_question() {
-        let (_temp, mut store, intent) =
-            store_with_automatic_intent(TriageRoute::NeedsInformation);
+        let (_temp, mut store, intent) = store_with_automatic_intent(TriageRoute::NeedsInformation);
         let comments = MockComments::new("symphony-bot");
         let routing = MockRouting::new(&["needs-triage"], None);
         let publisher = AutomaticPublisher::new(comments.clone(), routing.clone());

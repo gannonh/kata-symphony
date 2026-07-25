@@ -39,11 +39,7 @@ impl GithubTriageRouting {
 impl TriageRoutingPort for GithubTriageRouting {
     async fn list_issue_labels(&self, issue_number: u64) -> Result<Vec<String>> {
         let issue = self.client.get_issue(issue_number).await?;
-        Ok(issue
-            .labels
-            .into_iter()
-            .map(|label| label.name)
-            .collect())
+        Ok(issue.labels.into_iter().map(|label| label.name).collect())
     }
 
     async fn issue_project_state(&self, issue_number: u64) -> Result<Option<String>> {

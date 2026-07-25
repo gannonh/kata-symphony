@@ -167,9 +167,7 @@ impl FactoryRunStore for SharedFactoryStore {
         self.with_store(|store| store.list_pending_intents(limit))
     }
 
-    fn list_pending_automatic_dispatch_guards(
-        &self,
-    ) -> Result<Vec<PendingAutomaticDispatchGuard>> {
+    fn list_pending_automatic_dispatch_guards(&self) -> Result<Vec<PendingAutomaticDispatchGuard>> {
         self.with_store(|store| store.list_pending_automatic_dispatch_guards())
     }
 
@@ -447,9 +445,7 @@ impl TriageRuntime {
 
     /// Issue IDs / intake labels that must not enter implementation dispatch
     /// while automatic publication is still pending.
-    pub fn pending_automatic_dispatch_guards(
-        &self,
-    ) -> Result<Vec<PendingAutomaticDispatchGuard>> {
+    pub fn pending_automatic_dispatch_guards(&self) -> Result<Vec<PendingAutomaticDispatchGuard>> {
         self.store.list_pending_automatic_dispatch_guards()
     }
 

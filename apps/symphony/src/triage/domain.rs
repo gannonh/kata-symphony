@@ -521,7 +521,9 @@ impl ManagedProjection {
             .collect();
         Self {
             managed_labels,
-            project_state: project_state.map(normalize_managed_value).filter(|state| !state.is_empty()),
+            project_state: project_state
+                .map(normalize_managed_value)
+                .filter(|state| !state.is_empty()),
         }
     }
 
@@ -558,7 +560,8 @@ impl ManagedProjection {
     }
 
     pub fn contains_label(&self, label: &str) -> bool {
-        self.managed_labels.contains(&normalize_managed_value(label))
+        self.managed_labels
+            .contains(&normalize_managed_value(label))
     }
 }
 
