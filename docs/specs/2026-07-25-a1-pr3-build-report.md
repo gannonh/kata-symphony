@@ -4,7 +4,7 @@ title: A1 PR3 Recovery and Agreement Measurement Build Report
 status: Implemented
 description: Build completion report for A1 PR3 interrupted-attempt recovery, route correction measurement, and agreement metrics.
 tags: [symphony, triage, a1, pr3, recovery, correction]
-timestamp: 2026-07-25T00:00:00Z
+timestamp: 2026-07-25T22:35:00Z
 ---
 
 # A1 PR3 Recovery and Agreement Measurement — Build Report
@@ -104,7 +104,7 @@ New behaviour coverage:
 ## Known gaps and follow-ups
 
 - **Live UAT outstanding (AC18).** Restart and correction evidence against `gannonh/uat-symphony` is Verify-phase work; the maintainer confirmed that target.
-- **Codex children are not process-group leaders.** `codex_session_start` does not call `process_group(0)`, so its child shares Symphony's group. Identity is recorded faithfully and recovery correctly refuses to signal it, meaning an orphaned Codex app-server is cleaned up by directory removal but not terminated. The Pi path is unaffected. Worth closing separately.
+- **Spawn identity has a narrow durability window.** Identity is sent to the coordinator immediately after spawn, but a process exit before the coordinator persists it can still leave an unrecorded worker and attempt directory. Closing that window requires runner-side durable recording and remains a focused follow-up.
 - **Non-Linux start tokens use `ps`.** Linux reads `/proc/<pid>/stat`; other platforms shell out to `ps -o lstart=`. Only the Linux path was exercised in this environment.
 - Broader orchestrator integration test proving dispatch exclusion across config reload (carried over from PR2).
 
@@ -129,3 +129,25 @@ Commit `424bd4b` makes Symphony UAT evidence self-contained and validates every
 GitHub cleanup target before provider work. The automated remediation gates pass;
 live re-verification remains gated on credential containment as recorded in the
 [re-verify report](2026-07-25-a1-pr3-reverify-report.md).
+
+## 2026-07-25 PR review addendum
+
+PR [#599](https://github.com/gannonh/kata-symphony/pull/599) review remediation
+closed the following runtime and measurement gaps in `ea6bd9d9`:
+
+- Codex children now start as Unix process-group leaders, matching the Pi path.
+- Recovery retains durable process and workspace state until the process group is
+  confirmed terminated or absent; denied or bounded-still-running outcomes are
+  retried on later polls.
+- Recursive attempt cleanup requires the exact `triage-<stage_run_id>` directory
+  directly under configured `workspace.root`.
+- Correction measurement uses only each run's latest applied automatic
+  publication and randomizes bounded candidate batches instead of repeatedly
+  selecting the fixed newest set.
+
+The focused `triage::` suite passed 89/89 tests. PR CI run
+[`30177679884`](https://github.com/gannonh/kata-symphony/actions/runs/30177679884)
+passed validate, Symphony coverage, GitHub backend validation, golden-path smoke,
+distribution, and aggregate gate checks after the formatting follow-up
+`6833395a`. All PR review threads are resolved. These results close automated PR
+review findings; they do not replace the blocked live-UAT acceptance gate.

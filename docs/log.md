@@ -1,6 +1,7 @@
 # Docs Update Log
 
 ## 2026-07-25
+* **A1 PR3 review threads resolved and CI passed**: [PR #599](https://github.com/gannonh/kata-symphony/pull/599) now isolates Codex process groups, retains unresolved orphan records, authorizes recursive cleanup against `workspace.root` and stage identity, and measures only latest publications using randomized bounded correction batches. All review threads and required CI checks pass; the [re-verify report](/specs/2026-07-25-a1-pr3-reverify-report.md) remains Incomplete pending credential rotation, UAT cleanup PR #18, and live verification.
 * **A1 PR3 remediation automated gates passed; live re-verify blocked**: Stable PID/group/start-token recovery now permits launcher `exec`, UAT evidence records sanitized coordinates, cleanup validates all targets before provider work, and ten repeated library suites plus full validation pass. Added [ADR-0002](/adrs/0002-triage-process-recovery-identity.md) and an [incomplete re-verify report](/specs/2026-07-25-a1-pr3-reverify-report.md). Live UAT awaits provider credential rotation and merge of `gannonh/uat-symphony` cleanup PR #18.
 * **A1 PR3 Verify rejected**: Added the [Verify report](/specs/2026-07-25-a1-pr3-verify-report.md) and updated the [roadmap](/specs/index.md), [A1 design](/specs/2026-07-16-a1-github-issue-triage-design.md), and [factory PRD](/specs/symphony-software-factory-platform-prd.md). Live correction/metrics checks passed; restart recovery leaked a post-`exec` orphan.
 
