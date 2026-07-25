@@ -1,7 +1,8 @@
 # Docs Update Log
 
 ## 2026-07-24
-* **A1 PR2 build**: Automatic route publication implemented pending Verify; added [build report](/specs/2026-07-24-a1-pr2-build-report.md) and updated [specs roadmap](/specs/index.md), [A1 design](/specs/2026-07-16-a1-github-issue-triage-design.md), and [factory PRD](/specs/symphony-software-factory-platform-prd.md).
+* **A1 PR2 Verify accepted**: Live UAT on `gannonh/uat-symphony` Project #16 + automated suite; [verify report](/specs/2026-07-24-a1-pr2-verify-report.md). Roadmap/PRD/A1 design mark PR2 verified (merge pending).
+* **A1 PR2 build**: Automatic route publication implemented; added [build report](/specs/2026-07-24-a1-pr2-build-report.md) and updated [specs roadmap](/specs/index.md), [A1 design](/specs/2026-07-16-a1-github-issue-triage-design.md), and [factory PRD](/specs/symphony-software-factory-platform-prd.md).
 
 ## 2026-07-18
 * **Release model**: Switched to dispatch-driven releases (kata-code style). Symphony binary + Pi extension ship together at one version via `symphony-release.yml` (manual stable/nightly + 3h scheduled nightly). CLI stays independent via manual `cli-release.yml`. Removed push-to-main path-filter releases and standalone `pi-symphony-extension-release.yml`.

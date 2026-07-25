@@ -1,7 +1,8 @@
 # Specs Update Log
 
 ## 2026-07-24
-* **A1 PR2 build**: Automatic route publication + implement handoff implemented in Symphony triage/orchestrator; see [A1 PR2 build report](/specs/2026-07-24-a1-pr2-build-report.md). Roadmap marks PR2 pending Verify; PR3 remains planned.
+* **A1 PR2 Verify accepted**: [Verify report](/specs/2026-07-24-a1-pr2-verify-report.md) signed off after live UAT on Project #16; PR2 merge still pending. PR3 remains planned.
+* **A1 PR2 build**: Automatic route publication + implement handoff implemented in Symphony triage/orchestrator; see [A1 PR2 build report](/specs/2026-07-24-a1-pr2-build-report.md).
 
 ## 2026-07-18
 * **A1 PR1 shipped**: Marked [A1 GitHub Issue Triage](/specs/2026-07-16-a1-github-issue-triage-design.md) Active with PR1 preview complete ([#587](https://github.com/gannonh/kata-symphony/pull/587)); roadmap lists PR2/PR3 as planned and PR1 under completed.

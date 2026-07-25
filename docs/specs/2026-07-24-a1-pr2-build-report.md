@@ -1,24 +1,24 @@
 ---
 type: Build Report
 title: A1 PR2 Automatic Route Publication Build Report
-status: Implemented
+status: Verified
 description: Build completion report for A1 PR2 automatic route publication and implementation handoff.
 tags: [symphony, triage, a1, pr2]
-timestamp: 2026-07-24T16:30:00-07:00
+timestamp: 2026-07-24T17:16:00-07:00
 ---
 
 # A1 PR2 Automatic Route Publication — Build Report
 
 ## Status
 
-Implemented (pending Verify / UAT)
+Implemented — **Verify accepted** ([verify report](2026-07-24-a1-pr2-verify-report.md)); merge/PR pending
 
 ## Spec
 
 - Spec path: [`2026-07-16-a1-github-issue-triage-design.md`](2026-07-16-a1-github-issue-triage-design.md)
 - Scope: A1 PR2 delivery slice only (acceptance criteria 9–13 + automatic-publication portions of 14, 15, 17)
 - User approval: explicit Build go-ahead for existing Active A1 design PR2 slice
-- Non-goals: A1 PR3 correction reconciler / agreement metrics; live GitHub UAT evidence (Verify)
+- Non-goals: A1 PR3 correction reconciler / agreement metrics
 
 ## Git range
 
@@ -60,7 +60,7 @@ Results: **61** triage tests passed; **206** lib tests passed.
 
 - Bundled TDD workflow used for publisher vertical slices
 - Independent subagent review: **unavailable** (Task dispatch failed earlier); single-agent path used
-- Spec compliance (self-check): AC 9–13 covered in code/tests for publisher, promotion path, and dispatch guard; AC 18 UAT not run
+- Spec compliance (self-check): AC 9–13 covered in code/tests; live UAT completed on uat-symphony Project #16
 - Code quality (self-check): no Critical issues found; follow-ups below
 
 ## Approved deviations
@@ -69,11 +69,11 @@ Results: **61** triage tests passed; **206** lib tests passed.
 
 ## Known follow-ups
 
-- Manual GitHub UAT for promotion + implement handoff (AC 18 portion for PR2)
 - Broader orchestrator integration test that attaches a real/fake triage store and proves dispatch exclusion across config reload
+- Dedicated automated test for promotion hash matching (covered live)
 - A1 PR3: interrupted-process recovery hardening and agreement/correction measurement
 - Commit + PR when maintainer requests
 
 ## Build handoff to Verify
 
-Ready for Verify against PR2 acceptance criteria once the working tree is committed or explicitly accepted as the verification target.
+Verify report: [`2026-07-24-a1-pr2-verify-report.md`](2026-07-24-a1-pr2-verify-report.md).
