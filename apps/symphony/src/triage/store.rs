@@ -79,6 +79,16 @@ pub struct StoredCommentIdentity {
     pub publisher_login: String,
 }
 
+/// Durable guard used by the implementation scheduler while automatic
+/// publication is still nonterminal (`pending`, `conflict`, or `blocked`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAutomaticDispatchGuard {
+    pub forge_host: String,
+    pub repository: String,
+    pub issue_id: String,
+    pub intake_label: String,
+}
+
 pub trait FactoryRunStore {
     fn claim_attempt(&mut self, request: ClaimAttemptRequest) -> Result<StageRunRecord>;
     fn store_artifact(&mut self, request: StoreArtifactRequest) -> Result<ArtifactRecord>;
@@ -113,6 +123,7 @@ pub trait FactoryRunStore {
     fn get_publication_intent(&self, intent_id: &str) -> Result<Option<PublicationIntentRecord>>;
     fn get_latest_publication(&self, run_id: &str) -> Result<Option<PublicationIntentRecord>>;
     fn list_pending_intents(&self, limit: usize) -> Result<Vec<PublicationIntentRecord>>;
+    fn list_pending_automatic_dispatch_guards(&self) -> Result<Vec<PendingAutomaticDispatchGuard>>;
     fn list_intents_for_run(&self, run_id: &str) -> Result<Vec<PublicationIntentRecord>>;
     fn list_verified_comment_identities(&self, run_id: &str) -> Result<Vec<StoredCommentIdentity>>;
     fn list_stage_attempts_for_revision(
@@ -127,6 +138,23 @@ pub trait FactoryRunStore {
         completed_step: &str,
         status: PublicationStatus,
         error: Option<FactoryError>,
+    ) -> Result<()>;
+    /// Record a completed publication step and the expected managed projection
+    /// it produced in one write, so a crash can never leave the two disagreeing.
+    fn record_publication_step(
+        &mut self,
+        intent_id: &str,
+        completed_step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()>;
+    /// Persist the managed baseline observed before any GitHub effect together
+    /// with the initial expected projection.
+    fn set_publication_baseline(
+        &mut self,
+        intent_id: &str,
+        observed_baseline: &serde_json::Value,
+        expected_projection: &serde_json::Value,
     ) -> Result<()>;
     fn set_publication_comment(
         &mut self,
@@ -181,6 +209,40 @@ impl SqliteFactoryStore {
 
     fn now() -> DateTime<Utc> {
         Utc::now()
+    }
+
+    /// Test-only helper to simulate crash windows by rewinding completed steps
+    /// and expected projection while leaving GitHub side effects intact.
+    #[cfg(test)]
+    pub fn debug_rewind_publication(
+        &mut self,
+        intent_id: &str,
+        completed_steps: &[&str],
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE publication_intents
+                 SET completed_steps_json = ?1, status = ?2, expected_projection_json = ?3,
+                     updated_at = ?4
+                 WHERE intent_id = ?5",
+                params![
+                    serde_json::to_string(&completed_steps).map_err(storage_error)?,
+                    PublicationStatus::Pending.as_str(),
+                    bounded_json(expected_projection)?,
+                    now_s,
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "publication intent {intent_id} not found"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -719,6 +781,39 @@ impl FactoryRunStore for SqliteFactoryStore {
             .map_err(storage_error)
     }
 
+    fn list_pending_automatic_dispatch_guards(&self) -> Result<Vec<PendingAutomaticDispatchGuard>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT r.forge_host, r.repository, r.issue_id, i.intake_label
+                 FROM publication_intents i
+                 INNER JOIN factory_runs r ON r.run_id = i.run_id
+                 WHERE i.mode = ?1 AND i.status IN (?2, ?3, ?4)
+                 ORDER BY i.updated_at ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(
+                params![
+                    PublicationMode::Automatic.as_str(),
+                    PublicationStatus::Pending.as_str(),
+                    PublicationStatus::Conflict.as_str(),
+                    PublicationStatus::Blocked.as_str(),
+                ],
+                |row| {
+                    Ok(PendingAutomaticDispatchGuard {
+                        forge_host: row.get(0)?,
+                        repository: row.get(1)?,
+                        issue_id: row.get(2)?,
+                        intake_label: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
     fn update_publication_step(
         &mut self,
         intent_id: &str,
@@ -754,6 +849,72 @@ impl FactoryRunStore for SqliteFactoryStore {
                 ],
             )
             .map_err(storage_error)?;
+        Ok(())
+    }
+
+    fn record_publication_step(
+        &mut self,
+        intent_id: &str,
+        completed_step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        let mut intent = select_publication_intent(&self.conn, intent_id)?;
+        if !completed_step.trim().is_empty()
+            && !intent
+                .completed_steps
+                .iter()
+                .any(|step| step == completed_step.trim())
+        {
+            intent
+                .completed_steps
+                .push(completed_step.trim().to_string());
+        }
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "UPDATE publication_intents
+                 SET completed_steps_json = ?1, status = ?2, last_error_json = NULL,
+                     expected_projection_json = ?3, updated_at = ?4
+                 WHERE intent_id = ?5",
+                params![
+                    serde_json::to_string(&intent.completed_steps).map_err(storage_error)?,
+                    status.as_str(),
+                    bounded_json(expected_projection)?,
+                    now_s,
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    fn set_publication_baseline(
+        &mut self,
+        intent_id: &str,
+        observed_baseline: &serde_json::Value,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE publication_intents
+                 SET observed_baseline_json = ?1, expected_projection_json = ?2, updated_at = ?3
+                 WHERE intent_id = ?4",
+                params![
+                    bounded_json(observed_baseline)?,
+                    bounded_json(expected_projection)?,
+                    now_s,
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "publication intent {intent_id} not found"
+            )));
+        }
         Ok(())
     }
 
@@ -1418,6 +1579,85 @@ mod tests {
             )
             .unwrap();
         assert!(store.list_pending_intents(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn lists_pending_automatic_dispatch_guards_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let attempt = store
+            .claim_attempt(claim_request("issue-rev", "config-rev"))
+            .unwrap();
+        let artifact = store
+            .store_artifact(StoreArtifactRequest {
+                stage_run_id: attempt.stage_run_id,
+                issue_revision: "issue-rev".to_string(),
+                configuration_revision: "config-rev".to_string(),
+                route_mapping_hash: "routes".to_string(),
+                artifact: artifact(TriageRoute::Implement),
+                bytes_len: 200,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+
+        store
+            .create_publication_intent(CreatePublicationIntentRequest {
+                run_id: artifact.run_id.clone(),
+                artifact_id: Some(artifact.artifact_id.clone()),
+                mode: PublicationMode::Preview,
+                intake_label: "needs-triage".to_string(),
+                route_label: "ready-for-agent".to_string(),
+                project_state: Some("Todo".to_string()),
+                route_mapping_hash: "routes".to_string(),
+                desired_effects: serde_json::json!({"kind": "preview_comment"}),
+                observed_baseline: serde_json::json!({}),
+                expected_projection: serde_json::json!({}),
+            })
+            .unwrap();
+        assert!(store
+            .list_pending_automatic_dispatch_guards()
+            .unwrap()
+            .is_empty());
+
+        let automatic = store
+            .create_publication_intent(CreatePublicationIntentRequest {
+                run_id: artifact.run_id,
+                artifact_id: Some(artifact.artifact_id),
+                mode: PublicationMode::Automatic,
+                intake_label: "needs-triage".to_string(),
+                route_label: "ready-for-agent".to_string(),
+                project_state: Some("Todo".to_string()),
+                route_mapping_hash: "routes".to_string(),
+                desired_effects: serde_json::json!({"kind": "automatic_route"}),
+                observed_baseline: serde_json::json!({}),
+                expected_projection: serde_json::json!({}),
+            })
+            .unwrap();
+        let guards = store.list_pending_automatic_dispatch_guards().unwrap();
+        assert_eq!(guards.len(), 1);
+        assert_eq!(guards[0].issue_id, "123");
+        assert_eq!(guards[0].intake_label, "needs-triage");
+
+        store
+            .update_publication_step(&automatic.intent_id, "", PublicationStatus::Conflict, None)
+            .unwrap();
+        let conflict_guards = store.list_pending_automatic_dispatch_guards().unwrap();
+        assert_eq!(conflict_guards.len(), 1);
+        assert_eq!(conflict_guards[0].issue_id, "123");
+
+        store
+            .update_publication_step(
+                &automatic.intent_id,
+                "comment_applied",
+                PublicationStatus::Applied,
+                None,
+            )
+            .unwrap();
+        assert!(store
+            .list_pending_automatic_dispatch_guards()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

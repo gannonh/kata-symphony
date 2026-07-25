@@ -215,7 +215,7 @@ A new GitHub or Linear issue triggers a triage stage. Symphony creates the minim
 | Slice | Status | Notes |
 | --- | --- | --- |
 | PR1 preview | **Shipped** | Intake label + Projects v2 membership, local Pi/Codex triage, immutable artifact, durable preview comment, factory-run HTTP read API, doctor/starter assets |
-| PR2 automatic route publication | Planned | Apply route labels/states, remove intake label, implement handoff |
+| PR2 automatic route publication | **Verify accepted** (merge pending) | Apply route labels/states, remove intake label, implement handoff ([build](/specs/2026-07-24-a1-pr2-build-report.md), [verify](/specs/2026-07-24-a1-pr2-verify-report.md)) |
 | PR3 recovery and agreement | Planned | Interrupted-process recovery, correction events, agreement metrics |
 | Linear triage | Deferred | Separate vertical slice after GitHub path is complete |
 

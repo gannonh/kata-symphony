@@ -23,6 +23,25 @@ pub struct IneligibleCommentInput<'a> {
     pub remediation: &'a str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutomaticCommentPhase {
+    Pending,
+    RouteEffectsApplied,
+    Applied,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutomaticCommentInput<'a> {
+    pub intent_id: &'a str,
+    pub run_id: &'a str,
+    pub stage_run_id: &'a str,
+    pub attempt: u32,
+    pub artifact: &'a TriageArtifact,
+    pub route_label: &'a str,
+    pub project_state: Option<&'a str>,
+    pub phase: AutomaticCommentPhase,
+}
+
 pub fn render_preview_comment(input: &PreviewCommentInput<'_>) -> String {
     let artifact = input.artifact;
     let mut body = String::new();
@@ -94,6 +113,89 @@ pub fn render_ineligible_diagnostic_comment(input: &IneligibleCommentInput<'_>) 
         bounded(input.run_id, 200),
         bounded(input.intent_id, 200)
     )
+}
+
+pub fn render_automatic_comment(input: &AutomaticCommentInput<'_>) -> String {
+    let artifact = input.artifact;
+    let mut body = String::new();
+    body.push_str(&marker(input.intent_id));
+    body.push_str("\n\n## Symphony triage publication\n\n");
+    match input.phase {
+        AutomaticCommentPhase::Pending => {
+            body.push_str("Publication: `pending`\n\n");
+        }
+        AutomaticCommentPhase::RouteEffectsApplied => {
+            body.push_str("Route effects: `applied`; publication: `pending`\n\n");
+            body.push_str(&format!(
+                "- Applied route label: `{}`\n",
+                bounded(input.route_label, COMMENT_FIELD_MAX_BYTES)
+            ));
+            if let Some(state) = input.project_state {
+                body.push_str(&format!(
+                    "- Applied project state: `{}`\n",
+                    bounded(state, COMMENT_FIELD_MAX_BYTES)
+                ));
+            }
+            body.push('\n');
+        }
+        AutomaticCommentPhase::Applied => {
+            body.push_str("Publication: `applied`\n\n");
+            body.push_str(&format!(
+                "- Applied route label: `{}`\n",
+                bounded(input.route_label, COMMENT_FIELD_MAX_BYTES)
+            ));
+            if let Some(state) = input.project_state {
+                body.push_str(&format!(
+                    "- Applied project state: `{}`\n",
+                    bounded(state, COMMENT_FIELD_MAX_BYTES)
+                ));
+            }
+            body.push('\n');
+        }
+    }
+
+    body.push_str(&format!("- Route: `{}`\n", artifact.route));
+    body.push_str(&format!("- Risk: `{}`\n", artifact.risk_class));
+    body.push_str(&format!(
+        "- Rationale: {}\n",
+        bounded(&artifact.rationale, COMMENT_FIELD_MAX_BYTES)
+    ));
+    body.push_str(&format!(
+        "- Next action: {}\n",
+        bounded(&artifact.next_action, COMMENT_FIELD_MAX_BYTES)
+    ));
+    if let Some(question) = artifact.clarification_question.as_deref() {
+        body.push_str(&format!(
+            "- Clarification question: {}\n",
+            bounded(question, COMMENT_FIELD_MAX_BYTES)
+        ));
+    }
+
+    body.push_str("\n### Evidence\n");
+    for evidence in artifact.evidence.iter().take(COMMENT_EVIDENCE_MAX_ITEMS) {
+        body.push_str(&format!(
+            "- `{}` `{}`: {}\n",
+            evidence.kind,
+            bounded(&evidence.reference, COMMENT_FIELD_MAX_BYTES),
+            bounded(&evidence.summary, COMMENT_FIELD_MAX_BYTES)
+        ));
+    }
+
+    body.push_str("\n### Run\n");
+    body.push_str(&format!(
+        "- Factory run: `{}`\n",
+        bounded(input.run_id, 200)
+    ));
+    body.push_str(&format!(
+        "- Stage attempt: `{}` attempt `{}`\n",
+        bounded(input.stage_run_id, 200),
+        input.attempt
+    ));
+    body.push_str(&format!(
+        "- Publication intent: `{}`\n",
+        bounded(input.intent_id, 200)
+    ));
+    body
 }
 
 pub fn marker(intent_id: &str) -> String {

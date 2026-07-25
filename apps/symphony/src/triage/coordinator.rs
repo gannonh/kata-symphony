@@ -11,7 +11,7 @@ use crate::path_safety;
 use crate::repo_url::repo_is_remote;
 use crate::triage::domain::{
     FactoryError, FactoryEventRecord, FactoryRunStatus, PublicationMode, PublicationStatus,
-    TRIAGE_LEASE_RENEW_INTERVAL_MS, TRIAGE_STAGE_NAME,
+    TriageMode, TRIAGE_LEASE_RENEW_INTERVAL_MS, TRIAGE_STAGE_NAME,
 };
 use crate::triage::fingerprint::{
     configuration_revision, issue_revision, route_mapping_hash, ConfigurationRevisionInput,
@@ -19,7 +19,8 @@ use crate::triage::fingerprint::{
 };
 use crate::triage::intake::{TriageIntakeIssue, TriageIntakePort};
 use crate::triage::publisher::{
-    IneligiblePublishRequest, PreviewPublishRequest, PreviewPublisher, TriageCommentPort,
+    AutomaticPublishRequest, AutomaticPublisher, IneligiblePublishRequest, PreviewPublishRequest,
+    PreviewPublisher, TriageCommentPort, TriageRoutingPort,
 };
 use crate::triage::runner::{
     effective_pi_model, TriageHarness, TriageIssueIdentity, TriageProgress, TriageProgressSink,
@@ -36,6 +37,7 @@ const INELIGIBLE_REMEDIATION: &str =
     "Add the issue to the configured GitHub Project, then leave the intake label in place.";
 const DESIRED_KIND_PREVIEW: &str = "preview_comment";
 const DESIRED_KIND_INELIGIBLE: &str = "ineligible_diagnostic";
+const DESIRED_KIND_AUTOMATIC: &str = "automatic_route";
 
 /// Live triage event sink (optional). Durable events are always written to the store.
 pub trait EventEmitter: Send + Sync {
@@ -82,7 +84,9 @@ pub struct TriagePollSummary {
 pub struct TriageCoordinator<S, I, C, X = DefaultTriageExecutor> {
     store: S,
     intake: I,
+    comments: C,
     publisher: PreviewPublisher<C>,
+    routing: Option<Arc<dyn TriageRoutingPort>>,
     executor: X,
     config: TriageCoordinatorConfig,
     events: Option<Arc<dyn EventEmitter>>,
@@ -94,7 +98,7 @@ impl<S, I, C> TriageCoordinator<S, I, C, DefaultTriageExecutor>
 where
     S: FactoryRunStore,
     I: TriageIntakePort,
-    C: TriageCommentPort,
+    C: TriageCommentPort + Clone,
 {
     pub fn new(store: S, intake: I, comments: C, config: TriageCoordinatorConfig) -> Self {
         Self::with_executor(store, intake, comments, config, DefaultTriageExecutor)
@@ -105,7 +109,7 @@ impl<S, I, C, X> TriageCoordinator<S, I, C, X>
 where
     S: FactoryRunStore,
     I: TriageIntakePort,
-    C: TriageCommentPort,
+    C: TriageCommentPort + Clone,
     X: TriageExecutor,
 {
     pub fn with_executor(
@@ -118,13 +122,20 @@ where
         Self {
             store,
             intake,
+            comments: comments.clone(),
             publisher: PreviewPublisher::new(comments),
+            routing: None,
             executor,
             config,
             events: None,
             sessions: None,
             max_pages: 100,
         }
+    }
+
+    pub fn with_routing(mut self, routing: impl TriageRoutingPort + 'static) -> Self {
+        self.routing = Some(Arc::new(routing));
+        self
     }
 
     pub fn with_events(mut self, events: Arc<dyn EventEmitter>) -> Self {
@@ -187,8 +198,9 @@ where
         &mut self.store
     }
 
-    pub async fn reconcile_pending(&mut self) -> Result<()> {
-        self.reconcile_pending_intents(self.max_pages).await?;
+    pub async fn reconcile_pending(&mut self, service: &ServiceConfig) -> Result<()> {
+        self.reconcile_pending_intents(service, self.max_pages)
+            .await?;
         Ok(())
     }
 
@@ -208,7 +220,9 @@ where
         };
 
         self.store.interrupt_stale_attempts()?;
-        summary.reconciled_intents = self.reconcile_pending_intents(self.max_pages).await?;
+        summary.reconciled_intents = self
+            .reconcile_pending_intents(service, self.max_pages)
+            .await?;
 
         if !service.triage.enabled {
             return Ok(summary);
@@ -281,7 +295,11 @@ where
         Ok(summary)
     }
 
-    async fn reconcile_pending_intents(&mut self, max_pages: u32) -> Result<u32> {
+    async fn reconcile_pending_intents(
+        &mut self,
+        service: &ServiceConfig,
+        max_pages: u32,
+    ) -> Result<u32> {
         let pending = self.store.list_pending_intents(PENDING_INTENT_BATCH)?;
         let mut reconciled = 0u32;
         for intent in pending {
@@ -290,6 +308,42 @@ where
             };
             let issue_number = parse_issue_number(&run.issue_id)?;
             let kind = desired_kind(&intent.desired_effects);
+
+            if intent.mode == PublicationMode::Automatic || kind == Some(DESIRED_KIND_AUTOMATIC) {
+                let Some(artifact_id) = intent.artifact_id.as_deref() else {
+                    return Err(SymphonyError::TriageError(format!(
+                        "automatic intent {} is missing artifact_id",
+                        intent.intent_id
+                    )));
+                };
+                let Some(artifact) = self.store.get_artifact_by_id(artifact_id)? else {
+                    return Err(SymphonyError::TriageError(format!(
+                        "artifact {artifact_id} missing for intent {}",
+                        intent.intent_id
+                    )));
+                };
+                let stage = self
+                    .store
+                    .get_stage_run(&artifact.stage_run_id)?
+                    .ok_or_else(|| {
+                        SymphonyError::TriageError(format!(
+                            "stage run {} missing for artifact {artifact_id}",
+                            artifact.stage_run_id
+                        ))
+                    })?;
+                self.publish_automatic_intent(
+                    service,
+                    &intent,
+                    issue_number,
+                    &run.run_id,
+                    &stage.stage_run_id,
+                    stage.attempt,
+                    &artifact.artifact,
+                )
+                .await?;
+                reconciled += 1;
+                continue;
+            }
 
             if intent.artifact_id.is_some() || kind == Some(DESIRED_KIND_PREVIEW) {
                 let Some(artifact_id) = intent.artifact_id.as_deref() else {
@@ -471,8 +525,9 @@ where
             )? {
                 // Artifact may exist without a publication intent if the process
                 // crashed (or intent creation failed) after store_artifact.
-                // Ensure a preview intent exists and publish if still pending.
-                self.recover_orphaned_preview_artifact(issue, service, mapping_hash, &artifact)
+                // In automatic mode, promote a matching preview artifact or
+                // resume a pending automatic intent without re-running the agent.
+                self.recover_or_promote_artifact(issue, service, mapping_hash, &artifact)
                     .await?;
                 return Ok(IssuePollOutcome::Skipped);
             }
@@ -682,8 +737,18 @@ where
             usage: success.usage,
         })?;
 
-        let intent =
-            self.ensure_preview_intent_for_artifact(issue, service, mapping_hash, &artifact)?;
+        let stage = self.store.get_stage_run(stage_run_id)?.ok_or_else(|| {
+            SymphonyError::TriageError(format!("stage run {stage_run_id} missing after store"))
+        })?;
+
+        let intent = match service.triage.mode {
+            TriageMode::Preview => {
+                self.ensure_preview_intent_for_artifact(issue, service, mapping_hash, &artifact)?
+            }
+            TriageMode::Automatic => {
+                self.ensure_automatic_intent_for_artifact(issue, service, mapping_hash, &artifact)?
+            }
+        };
 
         self.emit_event(
             "triage_completed",
@@ -716,26 +781,43 @@ where
             }),
         )?;
 
-        let stage = self.store.get_stage_run(stage_run_id)?.ok_or_else(|| {
-            SymphonyError::TriageError(format!("stage run {stage_run_id} missing after store"))
-        })?;
-        self.publisher
-            .reconcile_preview(
-                &mut self.store,
-                PreviewPublishRequest {
-                    intent: &intent,
-                    issue_number: issue.issue_number,
-                    run_id: &artifact.run_id,
-                    stage_run_id,
-                    attempt: stage.attempt,
-                    artifact: &success.artifact,
-                    max_pages: self.max_pages,
-                },
-            )
-            .await?;
-
-        self.store
-            .mark_run_status(&artifact.run_id, FactoryRunStatus::Completed)?;
+        match service.triage.mode {
+            TriageMode::Preview => {
+                self.publisher
+                    .reconcile_preview(
+                        &mut self.store,
+                        PreviewPublishRequest {
+                            intent: &intent,
+                            issue_number: issue.issue_number,
+                            run_id: &artifact.run_id,
+                            stage_run_id,
+                            attempt: stage.attempt,
+                            artifact: &success.artifact,
+                            max_pages: self.max_pages,
+                        },
+                    )
+                    .await?;
+                self.store
+                    .mark_run_status(&artifact.run_id, FactoryRunStatus::Completed)?;
+            }
+            TriageMode::Automatic => {
+                let status = self
+                    .publish_automatic_intent(
+                        service,
+                        &intent,
+                        issue.issue_number,
+                        &artifact.run_id,
+                        stage_run_id,
+                        stage.attempt,
+                        &success.artifact,
+                    )
+                    .await?;
+                if status == PublicationStatus::Applied {
+                    self.store
+                        .mark_run_status(&artifact.run_id, FactoryRunStatus::Completed)?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -746,7 +828,7 @@ where
     /// crash between `store_artifact` and intent creation.
     fn ensure_preview_intent_for_artifact(
         &mut self,
-        issue: &TriageIntakeIssue,
+        _issue: &TriageIntakeIssue,
         service: &ServiceConfig,
         mapping_hash: &str,
         artifact: &crate::triage::domain::ArtifactRecord,
@@ -773,13 +855,304 @@ where
                     "kind": DESIRED_KIND_PREVIEW,
                     "route": artifact.artifact.route.as_str(),
                 }),
-                observed_baseline: serde_json::json!({
-                    "labels": issue.labels,
-                }),
-                expected_projection: serde_json::json!({
-                    "labels": issue.labels,
-                }),
+                observed_baseline: serde_json::json!({}),
+                expected_projection: serde_json::json!({}),
             })
+    }
+
+    fn ensure_automatic_intent_for_artifact(
+        &mut self,
+        _issue: &TriageIntakeIssue,
+        service: &ServiceConfig,
+        mapping_hash: &str,
+        artifact: &crate::triage::domain::ArtifactRecord,
+    ) -> Result<crate::triage::domain::PublicationIntentRecord> {
+        let existing = self.store.list_intents_for_run(&artifact.run_id)?;
+        if let Some(intent) = existing.into_iter().find(|record| {
+            record.artifact_id.as_deref() == Some(artifact.artifact_id.as_str())
+                && record.mode == PublicationMode::Automatic
+        }) {
+            return Ok(intent);
+        }
+
+        let route_mapping = service.triage.routes.mapping_for(artifact.artifact.route);
+        self.store
+            .create_publication_intent(CreatePublicationIntentRequest {
+                run_id: artifact.run_id.clone(),
+                artifact_id: Some(artifact.artifact_id.clone()),
+                mode: PublicationMode::Automatic,
+                intake_label: service.triage.intake_label.clone(),
+                route_label: route_mapping.label.clone(),
+                project_state: route_mapping.state.clone(),
+                route_mapping_hash: mapping_hash.to_string(),
+                desired_effects: serde_json::json!({
+                    "kind": DESIRED_KIND_AUTOMATIC,
+                    "route": artifact.artifact.route.as_str(),
+                    "route_labels": {
+                        "implement": service.triage.routes.implement.label.clone(),
+                        "spec": service.triage.routes.spec.label.clone(),
+                        "needs_information": service.triage.routes.needs_information.label.clone(),
+                        "park": service.triage.routes.park.label.clone(),
+                        "human_owned": service.triage.routes.human_owned.label.clone(),
+                    },
+                }),
+                observed_baseline: serde_json::json!({}),
+                expected_projection: serde_json::json!({}),
+            })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn publish_automatic_intent(
+        &mut self,
+        service: &ServiceConfig,
+        intent: &crate::triage::domain::PublicationIntentRecord,
+        issue_number: u64,
+        run_id: &str,
+        stage_run_id: &str,
+        attempt: u32,
+        artifact: &crate::triage::domain::TriageArtifact,
+    ) -> Result<PublicationStatus> {
+        let routing = self.routing.clone().ok_or_else(|| {
+            SymphonyError::TriageError(
+                "automatic triage publication requires a routing port".to_string(),
+            )
+        })?;
+        let publisher = AutomaticPublisher::new(self.comments.clone(), routing);
+        // Prefer the five route labels persisted on the intent so a live mapping
+        // reload cannot reinterpret an in-flight automatic publication.
+        let managed_from_intent = managed_labels_from_automatic_intent(intent);
+        let live_managed = service.triage.routes.managed_labels();
+        let managed_labels = managed_from_intent
+            .as_deref()
+            .unwrap_or(live_managed.as_slice());
+        let prior_status = intent.status;
+        let status = publisher
+            .reconcile_automatic(
+                &mut self.store,
+                AutomaticPublishRequest {
+                    intent,
+                    issue_number,
+                    run_id,
+                    stage_run_id,
+                    attempt,
+                    artifact,
+                    managed_labels,
+                    max_pages: self.max_pages,
+                },
+            )
+            .await?;
+
+        match status {
+            PublicationStatus::Applied => {
+                self.emit_event(
+                    "triage_route_applied",
+                    Some(&format!("#{issue_number}")),
+                    Some(run_id),
+                    Some(stage_run_id),
+                    serde_json::json!({
+                        "run_id": run_id,
+                        "stage_run_id": stage_run_id,
+                        "publication_intent_id": intent.intent_id,
+                        "route": artifact.route.as_str(),
+                        "route_label": intent.route_label,
+                        "project_state": intent.project_state,
+                        "status": "applied",
+                        "error_code": serde_json::Value::Null,
+                    }),
+                )?;
+            }
+            PublicationStatus::Conflict if prior_status != PublicationStatus::Conflict => {
+                self.emit_event(
+                    "triage_publication_conflict",
+                    Some(&format!("#{issue_number}")),
+                    Some(run_id),
+                    Some(stage_run_id),
+                    serde_json::json!({
+                        "run_id": run_id,
+                        "stage_run_id": stage_run_id,
+                        "publication_intent_id": intent.intent_id,
+                        "status": "conflict",
+                        "error_code": "human_conflict",
+                    }),
+                )?;
+            }
+            PublicationStatus::Blocked if prior_status != PublicationStatus::Blocked => {
+                self.emit_event(
+                    "triage_publication_blocked",
+                    Some(&format!("#{issue_number}")),
+                    Some(run_id),
+                    Some(stage_run_id),
+                    serde_json::json!({
+                        "run_id": run_id,
+                        "stage_run_id": stage_run_id,
+                        "publication_intent_id": intent.intent_id,
+                        "status": "blocked",
+                        "error_code": "publication_blocked",
+                    }),
+                )?;
+            }
+            PublicationStatus::Pending
+            | PublicationStatus::None
+            | PublicationStatus::Conflict
+            | PublicationStatus::Blocked => {}
+        }
+        Ok(status)
+    }
+
+    /// Finish run completion + durable applied event when an intent is already
+    /// applied but a prior crash skipped finalization.
+    fn finalize_applied_automatic_publication(
+        &mut self,
+        issue_number: u64,
+        run_id: &str,
+        stage_run_id: &str,
+        intent: &crate::triage::domain::PublicationIntentRecord,
+        artifact: &crate::triage::domain::TriageArtifact,
+    ) -> Result<()> {
+        let Some(run) = self.store.get_run_by_id(run_id)? else {
+            return Ok(());
+        };
+        if run.status == FactoryRunStatus::Completed {
+            return Ok(());
+        }
+        self.emit_event(
+            "triage_route_applied",
+            Some(&format!("#{issue_number}")),
+            Some(run_id),
+            Some(stage_run_id),
+            serde_json::json!({
+                "run_id": run_id,
+                "stage_run_id": stage_run_id,
+                "publication_intent_id": intent.intent_id,
+                "route": artifact.route.as_str(),
+                "route_label": intent.route_label,
+                "project_state": intent.project_state,
+                "status": "applied",
+                "error_code": serde_json::Value::Null,
+            }),
+        )?;
+        self.store
+            .mark_run_status(run_id, FactoryRunStatus::Completed)?;
+        Ok(())
+    }
+
+    /// Recover preview publication, or promote/resume automatic publication.
+    async fn recover_or_promote_artifact(
+        &mut self,
+        issue: &TriageIntakeIssue,
+        service: &ServiceConfig,
+        mapping_hash: &str,
+        artifact: &crate::triage::domain::ArtifactRecord,
+    ) -> Result<()> {
+        match service.triage.mode {
+            TriageMode::Preview => {
+                self.recover_orphaned_preview_artifact(issue, service, mapping_hash, artifact)
+                    .await
+            }
+            TriageMode::Automatic => {
+                self.promote_or_resume_automatic(issue, service, mapping_hash, artifact)
+                    .await
+            }
+        }
+    }
+
+    async fn promote_or_resume_automatic(
+        &mut self,
+        issue: &TriageIntakeIssue,
+        service: &ServiceConfig,
+        mapping_hash: &str,
+        artifact: &crate::triage::domain::ArtifactRecord,
+    ) -> Result<()> {
+        // Resume an existing automatic intent for this artifact when present.
+        let existing = self.store.list_intents_for_run(&artifact.run_id)?;
+        if let Some(intent) = existing.iter().find(|record| {
+            record.artifact_id.as_deref() == Some(artifact.artifact_id.as_str())
+                && record.mode == PublicationMode::Automatic
+        }) {
+            if intent.status == PublicationStatus::Applied {
+                self.finalize_applied_automatic_publication(
+                    issue.issue_number,
+                    &artifact.run_id,
+                    &artifact.stage_run_id,
+                    intent,
+                    &artifact.artifact,
+                )?;
+                return Ok(());
+            }
+            let stage = self
+                .store
+                .get_stage_run(&artifact.stage_run_id)?
+                .ok_or_else(|| {
+                    SymphonyError::TriageError(format!(
+                        "stage run {} missing for automatic artifact {}",
+                        artifact.stage_run_id, artifact.artifact_id
+                    ))
+                })?;
+            let status = self
+                .publish_automatic_intent(
+                    service,
+                    intent,
+                    issue.issue_number,
+                    &artifact.run_id,
+                    &artifact.stage_run_id,
+                    stage.attempt,
+                    &artifact.artifact,
+                )
+                .await?;
+            if status == PublicationStatus::Applied {
+                self.store
+                    .mark_run_status(&artifact.run_id, FactoryRunStatus::Completed)?;
+            }
+            return Ok(());
+        }
+
+        // Promote an immutable preview artifact only when revision + mapping still match.
+        if artifact.route_mapping_hash != mapping_hash {
+            return Ok(());
+        }
+        let intent =
+            self.ensure_automatic_intent_for_artifact(issue, service, mapping_hash, artifact)?;
+        let stage = self
+            .store
+            .get_stage_run(&artifact.stage_run_id)?
+            .ok_or_else(|| {
+                SymphonyError::TriageError(format!(
+                    "stage run {} missing for promoted artifact {}",
+                    artifact.stage_run_id, artifact.artifact_id
+                ))
+            })?;
+        self.emit_event(
+            "triage_publication_started",
+            Some(&issue.identifier),
+            Some(&artifact.run_id),
+            Some(&artifact.stage_run_id),
+            serde_json::json!({
+                "run_id": artifact.run_id,
+                "stage_run_id": artifact.stage_run_id,
+                "artifact_id": artifact.artifact_id,
+                "publication_intent_id": intent.intent_id,
+                "route": artifact.artifact.route.as_str(),
+                "status": "pending",
+                "error_code": serde_json::Value::Null,
+                "promoted_from_preview": true,
+            }),
+        )?;
+        let status = self
+            .publish_automatic_intent(
+                service,
+                &intent,
+                issue.issue_number,
+                &artifact.run_id,
+                &artifact.stage_run_id,
+                stage.attempt,
+                &artifact.artifact,
+            )
+            .await?;
+        if status == PublicationStatus::Applied {
+            self.store
+                .mark_run_status(&artifact.run_id, FactoryRunStatus::Completed)?;
+        }
+        Ok(())
     }
 
     /// Recover when a durable artifact exists without a published preview.
@@ -973,6 +1346,29 @@ fn triage_model(service: &ServiceConfig) -> Option<String> {
 
 fn desired_kind(value: &serde_json::Value) -> Option<&str> {
     value.get("kind").and_then(|kind| kind.as_str())
+}
+
+/// Reconstruct the managed route-label vocabulary from a persisted automatic intent.
+fn managed_labels_from_automatic_intent(
+    intent: &crate::triage::domain::PublicationIntentRecord,
+) -> Option<Vec<String>> {
+    let labels = intent.desired_effects.get("route_labels")?.as_object()?;
+    let keys = [
+        "implement",
+        "spec",
+        "needs_information",
+        "park",
+        "human_owned",
+    ];
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+        let label = labels.get(key)?.as_str()?.trim();
+        if label.is_empty() {
+            return None;
+        }
+        out.push(label.to_string());
+    }
+    Some(out)
 }
 
 fn parse_issue_number(issue_id: &str) -> Result<u64> {

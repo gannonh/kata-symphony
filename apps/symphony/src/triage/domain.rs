@@ -493,6 +493,95 @@ pub struct PublicationIntentRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Managed GitHub state the publisher is allowed to compare and mutate: the
+/// configured route labels plus intake label, and the Projects v2 state.
+///
+/// Values are normalized for comparison, so a projection is only meaningful as
+/// a conflict-detection artifact and never as display text.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedProjection {
+    #[serde(default)]
+    pub managed_labels: std::collections::BTreeSet<String>,
+    #[serde(default)]
+    pub project_state: Option<String>,
+}
+
+impl ManagedProjection {
+    /// Project `labels` down to the managed vocabulary, discarding every label
+    /// Symphony does not own.
+    pub fn observe<'a>(
+        labels: impl IntoIterator<Item = &'a str>,
+        managed_labels: &std::collections::BTreeSet<String>,
+        project_state: Option<&str>,
+    ) -> Self {
+        let managed_labels = labels
+            .into_iter()
+            .map(normalize_managed_value)
+            .filter(|label| managed_labels.contains(label))
+            .collect();
+        Self {
+            managed_labels,
+            project_state: project_state
+                .map(normalize_managed_value)
+                .filter(|state| !state.is_empty()),
+        }
+    }
+
+    /// Parse a persisted projection. Returns `None` when no projection was
+    /// recorded yet, which is distinct from an empty projection.
+    pub fn from_json(value: &serde_json::Value) -> Option<Self> {
+        value.get("managed_labels")?;
+        serde_json::from_value(value.clone()).ok()
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "managed_labels": self.managed_labels,
+            "project_state": self.project_state,
+        })
+    }
+
+    pub fn with_label(&self, label: &str) -> Self {
+        let mut next = self.clone();
+        next.managed_labels.insert(normalize_managed_value(label));
+        next
+    }
+
+    pub fn without_label(&self, label: &str) -> Self {
+        let mut next = self.clone();
+        next.managed_labels.remove(&normalize_managed_value(label));
+        next
+    }
+
+    pub fn with_project_state(&self, state: &str) -> Self {
+        let mut next = self.clone();
+        let normalized = normalize_managed_value(state);
+        // Match observe(): blank/whitespace states are absent, not Some("").
+        next.project_state = (!normalized.is_empty()).then_some(normalized);
+        next
+    }
+
+    pub fn contains_label(&self, label: &str) -> bool {
+        self.managed_labels
+            .contains(&normalize_managed_value(label))
+    }
+}
+
+/// Managed label vocabulary: configured route labels plus the recorded intake label.
+pub fn managed_label_set<'a>(
+    labels: impl IntoIterator<Item = &'a str>,
+) -> std::collections::BTreeSet<String> {
+    labels
+        .into_iter()
+        .map(normalize_managed_value)
+        .filter(|label| !label.is_empty())
+        .collect()
+}
+
+fn normalize_managed_value(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FactoryEventRecord {
     pub event_id: String,
@@ -630,5 +719,16 @@ mod tests {
     fn truncation_preserves_utf8_boundaries() {
         assert_eq!(truncate_utf8_bytes("abcdef", 3), "abc");
         assert_eq!(truncate_utf8_bytes("ééé", 5), "éé");
+    }
+
+    #[test]
+    fn with_project_state_drops_blank_like_observe() {
+        let base = ManagedProjection::default();
+        assert_eq!(
+            base.with_project_state("Todo").project_state.as_deref(),
+            Some("todo")
+        );
+        assert_eq!(base.with_project_state("").project_state, None);
+        assert_eq!(base.with_project_state("   ").project_state, None);
     }
 }
