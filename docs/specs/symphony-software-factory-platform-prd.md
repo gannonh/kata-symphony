@@ -237,6 +237,13 @@ A spec-routed issue produces versioned product behavior, technical approach, acc
 
 Implementation consumes the approved artifact version, runs repository validation, and opens a draft PR that links the issue, spec version, factory run, and validation summary.
 
+**Design (2026-07-26):** [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md) defines A2-approved-only intake, credential-isolated local and Docker implementation, a committed approved-spec file, deterministic validation with bounded repair, durable Git bundles, and Symphony-owned draft-PR publication.
+
+| Slice | Status | Notes |
+| --- | --- | --- |
+| PR1 implementation and validation preview | Planned | Local/Docker runners, typed manifest, committed approved spec, blocking validation/repair, durable bundle, tracker-visible preview |
+| PR2 deterministic draft-PR publication | Planned | Expected-projection branch push, owned draft PR, restart recovery, Agent Review handoff |
+
 **Demo:** Approve a spec and watch Symphony produce a draft PR whose description records the intended behavior and evidence.
 
 **Measure:** draft-PR success rate, implementation cycle time, retries, human interventions, and cost.

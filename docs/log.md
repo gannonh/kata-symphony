@@ -1,6 +1,7 @@
 # Docs Update Log
 
 ## 2026-07-26
+* **A3 draft**: Added the [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md) on the shipped A2 approved-artifact boundary, covering credential-isolated local/Docker implementation, deterministic validation and repair, durable Git bundles, Symphony-owned draft-PR publication, and Agent Review handoff.
 * **A2 completed**: Live GitHub UAT accepted for the durable GitHub spec stage ([verify report](/specs/2026-07-26-a2-uat-verify-report.md)). Nine product defects and two measure gaps found during UAT were fixed (`4fda65a1`, `17999528`). Roadmap, [A2 design](/specs/2026-07-18-a2-spec-stage-design.md), and [factory PRD](/specs/symphony-software-factory-platform-prd.md) mark A2 complete under the documented tracker-only narrowings.
 * **A2 implementation**: Added the durable GitHub spec stage with isolated draft/review/revise turns, immutable versioned artifacts, tracker revision and approval decisions, pinned implement handoff, HTTP/metrics/events, doctor checks, starter prompts, and [ADR-0003](/adrs/0003-a2-spec-stage-artifacts-and-gates.md).
 

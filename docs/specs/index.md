@@ -11,7 +11,7 @@ Roadmap for planned and completed work. Historical Superpowers designs and plans
 
 # Planned
 
-_None recorded._
+* [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md) - Draft design; pinned A2 approved spec → credential-isolated local/Docker implementation → deterministic validation and repair → durable change bundle → linked draft GitHub PR. A2 prerequisite shipped and live UAT accepted.
 
 # Blocked
 

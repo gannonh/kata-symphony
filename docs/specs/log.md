@@ -1,6 +1,7 @@
 # Specs Update Log
 
 ## 2026-07-26
+* **A3 draft**: Added [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md), defining A2-approved-only intake, credential-isolated local and Docker implementation, committed approved-spec records, deterministic validation and repair, durable Git bundles, Symphony-owned draft-PR publication, and Agent Review handoff. A3 is Planned on the shipped, live-verified A2 pinning boundary.
 * **A2 UAT accepted**: [Verify report](/specs/2026-07-26-a2-uat-verify-report.md) signs off criteria 15–16 plus criterion 11 metrics/token measures on `gannonh/uat-symphony` Project #16. [A2 Spec Stage](/specs/2026-07-18-a2-spec-stage-design.md) status is Completed; roadmap and PRD progress updated.
 * **A2 implementation**: [A2 Spec Stage](/specs/2026-07-18-a2-spec-stage-design.md) GitHub tracker workflow implemented end to end: durable isolated review pipeline, versioned publication, human revision/approval, approved artifact pin, and implementation route handoff.
 
