@@ -311,6 +311,11 @@ fn test_config_defaults() {
     );
     assert_eq!(config.storage.path, None);
     assert_eq!(config.storage.busy_timeout_ms, 5_000);
+    assert!(!config.spec.enabled);
+    assert_eq!(config.spec.intake_label, "ready-to-spec");
+    assert_eq!(config.spec.max_review_cycles, 3);
+    assert_eq!(config.spec.labels.approved, "spec-approved");
+    assert_eq!(config.spec.approval_route.label, "ready-for-agent");
 }
 
 #[test]
@@ -390,6 +395,95 @@ triage:
     );
 
     validate(&config).expect("valid triage preview config should pass validation");
+}
+
+#[test]
+fn test_spec_stage_parses_and_validates_full_configuration() {
+    let yaml_str = r#"
+tracker:
+  kind: github
+  api_key: github-test-token
+  repo_owner: kata-sh
+  repo_name: kata-mono
+  github_project_owner_type: org
+  github_project_number: 42
+agent:
+  name: pi
+spec:
+  enabled: true
+  intake_label: ready-to-spec
+  prompts:
+    draft: prompts/my-draft.md
+    review: prompts/my-review.md
+    revise: prompts/my-revise.md
+  model: draft-model
+  review_model: review-model
+  turn_timeout_ms: 120000
+  max_intake_pages: 20
+  max_review_cycles: 2
+  max_attempts: 4
+  max_revision_requests: 5
+  labels:
+    approved: approve-it
+    revise: revise-it
+  approval_route:
+    label: implement-it
+    state: Todo
+"#;
+    let config = parse_yaml_config(yaml_str);
+    assert!(config.spec.enabled);
+    assert_eq!(config.spec.prompts.draft, "prompts/my-draft.md");
+    assert_eq!(config.spec.model.as_deref(), Some("draft-model"));
+    assert_eq!(config.spec.review_model.as_deref(), Some("review-model"));
+    assert_eq!(config.spec.turn_timeout_ms, 120_000);
+    assert_eq!(config.spec.max_intake_pages, 20);
+    assert_eq!(config.spec.max_review_cycles, 2);
+    assert_eq!(config.spec.max_attempts, 4);
+    assert_eq!(config.spec.max_revision_requests, 5);
+    assert_eq!(config.spec.labels.approved, "approve-it");
+    assert_eq!(config.spec.approval_route.label, "implement-it");
+    validate(&config).expect("valid spec configuration");
+}
+
+#[test]
+fn test_spec_rejects_codex_models_and_label_collisions() {
+    let yaml_str = r#"
+tracker:
+  kind: github
+  api_key: github-test-token
+  repo_owner: kata-sh
+  repo_name: kata-mono
+  github_project_owner_type: org
+  github_project_number: 42
+agent:
+  name: codex
+spec:
+  enabled: true
+  model: forbidden
+"#;
+    let config = parse_yaml_config(yaml_str);
+    let error = validate(&config).expect_err("Codex model override must fail");
+    assert!(error.to_string().contains("spec.model"));
+
+    let collision = parse_yaml_config(
+        r#"
+tracker:
+  kind: github
+  api_key: github-test-token
+  repo_owner: kata-sh
+  repo_name: kata-mono
+  github_project_owner_type: org
+  github_project_number: 42
+spec:
+  enabled: true
+  labels:
+    approved: ready-to-spec
+"#,
+    );
+    assert!(validate(&collision)
+        .expect_err("managed labels must be distinct")
+        .to_string()
+        .contains("distinct labels"));
 }
 
 #[test]

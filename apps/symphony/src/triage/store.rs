@@ -1,4 +1,10 @@
 use crate::error::{Result, SymphonyError};
+use crate::spec::artifact::validate_spec;
+use crate::spec::domain::{
+    ReviewFinding, SpecArtifact, SpecArtifactRecord, SpecDecision, SpecPublicationIntent,
+    SpecPublicationKind, SpecRunState, SpecTurnKind, SpecTurnRecord, SpecTurnStatus,
+    SPEC_STAGE_NAME,
+};
 use crate::triage::domain::{
     truncate_utf8_bytes, ArtifactRecord, FactoryError, FactoryEventRecord, FactoryRunRecord,
     FactoryRunStatus, PublicationIntentRecord, PublicationMode, PublicationStatus, StageRunRecord,
@@ -17,9 +23,10 @@ use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 /// Embedded migrations, applied in order while the exclusive store lock is held.
-const MIGRATIONS: [&str; 2] = [
+const MIGRATIONS: [&str; 3] = [
     include_str!("migrations/001_init.sql"),
     include_str!("migrations/002_route_observations.sql"),
+    include_str!("migrations/003_spec_stage.sql"),
 ];
 
 #[derive(Debug, Clone)]
@@ -48,6 +55,34 @@ pub struct StoreArtifactRequest {
     pub configuration_revision: String,
     pub route_mapping_hash: String,
     pub artifact: TriageArtifact,
+    pub bytes_len: u64,
+    pub usage: StageUsage,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreSpecTurnRequest {
+    pub turn_id: String,
+    pub stage_run_id: String,
+    pub ordinal: u32,
+    pub kind: SpecTurnKind,
+    pub status: SpecTurnStatus,
+    pub harness: String,
+    pub model: Option<String>,
+    pub usage: StageUsage,
+    pub output_json: Option<serde_json::Value>,
+    pub error: Option<FactoryError>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreSpecArtifactRequest {
+    pub stage_run_id: String,
+    pub issue_revision: String,
+    pub configuration_revision: String,
+    pub artifact: SpecArtifact,
+    pub review_cycles: u32,
+    pub unresolved_blocking_findings: Vec<ReviewFinding>,
     pub bytes_len: u64,
     pub usage: StageUsage,
 }
@@ -333,6 +368,109 @@ impl SqliteFactoryStore {
             )));
         }
         Ok(())
+    }
+
+    /// Claim an attempt for a typed factory stage. A1's trait method delegates
+    /// to its original triage-specific implementation; A2 uses this method so
+    /// triage and spec attempts can coexist for one revision pair.
+    pub fn claim_stage_attempt(
+        &mut self,
+        stage: &str,
+        request: ClaimAttemptRequest,
+    ) -> Result<StageRunRecord> {
+        if stage.trim().is_empty() {
+            return Err(SymphonyError::StorageError(
+                "factory stage name must be non-empty".to_string(),
+            ));
+        }
+        let now = Self::now();
+        let now_s = ts(now);
+        let tx = self.conn.transaction().map_err(storage_error)?;
+        let existing_run_id: Option<String> = tx
+            .query_row(
+                "SELECT run_id FROM factory_runs WHERE forge_host = ?1 AND repository = ?2 AND issue_id = ?3",
+                params![request.forge_host, request.repository, request.issue_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        let run_id = existing_run_id.unwrap_or_else(new_id);
+        tx.execute(
+            "INSERT INTO factory_runs (
+                run_id, forge_host, repository, issue_id, issue_identifier, issue_revision,
+                status, current_stage, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(forge_host, repository, issue_id) DO UPDATE SET
+                issue_identifier = excluded.issue_identifier,
+                issue_revision = excluded.issue_revision,
+                status = excluded.status,
+                current_stage = excluded.current_stage,
+                updated_at = excluded.updated_at",
+            params![
+                run_id,
+                request.forge_host,
+                request.repository,
+                request.issue_id,
+                request.issue_identifier,
+                request.issue_revision,
+                FactoryRunStatus::Active.as_str(),
+                stage,
+                now_s,
+                now_s,
+            ],
+        )
+        .map_err(storage_error)?;
+        let run_id: String = tx
+            .query_row(
+                "SELECT run_id FROM factory_runs WHERE forge_host = ?1 AND repository = ?2 AND issue_id = ?3",
+                params![request.forge_host, request.repository, request.issue_id],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let attempt = tx
+            .query_row(
+                "SELECT COALESCE(MAX(attempt), 0) + 1 FROM stage_runs WHERE run_id = ?1 AND stage = ?2",
+                params![run_id, stage],
+                |row| row.get::<_, u32>(0),
+            )
+            .map_err(storage_error)?;
+        let stage_run_id = new_id();
+        tx.execute(
+            "INSERT INTO stage_runs (
+                stage_run_id, run_id, stage, issue_revision, configuration_revision, attempt,
+                owner_instance, pid, process_group_id, process_start_token, executable_identity,
+                lease_heartbeat_at, status, harness, model, workspace_path, output_path,
+                started_at, completed_at, input_tokens, output_tokens, total_tokens, error_json,
+                created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
+                ?17, ?18, NULL, 0, 0, 0, NULL, ?19, ?20)",
+            params![
+                stage_run_id,
+                run_id,
+                stage,
+                request.issue_revision,
+                request.configuration_revision,
+                attempt,
+                request.owner_instance,
+                request.pid,
+                request.process_group_id,
+                request.process_start_token,
+                request.executable_identity,
+                now_s,
+                StageStatus::Running.as_str(),
+                request.harness,
+                request.model,
+                request.workspace_path,
+                request.output_path,
+                now_s,
+                now_s,
+                now_s,
+            ],
+        )
+        .map_err(storage_error)?;
+        let record = select_stage_run(&tx, &stage_run_id)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(record)
     }
 }
 
@@ -885,11 +1023,18 @@ impl FactoryRunStore for SqliteFactoryStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT r.forge_host, r.repository, r.issue_id, i.intake_label
+                "SELECT r.forge_host, r.repository, r.issue_id, i.intake_label, i.updated_at
                  FROM publication_intents i
                  INNER JOIN factory_runs r ON r.run_id = i.run_id
                  WHERE i.mode = ?1 AND i.status IN (?2, ?3, ?4)
-                 ORDER BY i.updated_at ASC",
+                 UNION ALL
+                 SELECT r.forge_host, r.repository, r.issue_id,
+                    COALESCE(json_extract(i.desired_effects_json, '$.intake_label'), 'ready-to-spec'),
+                    i.updated_at
+                 FROM spec_publication_intents i
+                 INNER JOIN factory_runs r ON r.run_id = i.run_id
+                 WHERE i.kind = 'approval' AND i.status IN (?2, ?3, ?4)
+                 ORDER BY 5 ASC",
             )
             .map_err(storage_error)?;
         let rows = stmt
@@ -1449,6 +1594,543 @@ impl FactoryRunStore for SqliteFactoryStore {
     }
 }
 
+impl SqliteFactoryStore {
+    pub fn store_spec_turn(&mut self, request: StoreSpecTurnRequest) -> Result<SpecTurnRecord> {
+        let stage = select_stage_run(&self.conn, &request.stage_run_id)?;
+        if stage.stage != SPEC_STAGE_NAME || stage.status != StageStatus::Running {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is not a running spec attempt",
+                request.stage_run_id
+            )));
+        }
+        let output_json = request.output_json.as_ref().map(bounded_json).transpose()?;
+        self.conn
+            .execute(
+                "INSERT INTO spec_turns (
+                    turn_id, stage_run_id, ordinal, kind, status, harness, model,
+                    input_tokens, output_tokens, total_tokens, output_json, error_json,
+                    started_at, completed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    request.turn_id,
+                    request.stage_run_id,
+                    request.ordinal,
+                    request.kind.as_str(),
+                    request.status.as_str(),
+                    request.harness,
+                    request.model,
+                    request.usage.input_tokens,
+                    request.usage.output_tokens,
+                    request.usage.total_tokens,
+                    output_json,
+                    optional_json(&request.error)?,
+                    ts(request.started_at),
+                    request.completed_at.map(ts),
+                ],
+            )
+            .map_err(storage_error)?;
+        self.get_spec_turn(&request.turn_id)?.ok_or_else(|| {
+            SymphonyError::StorageError(format!("spec turn {} was not stored", request.turn_id))
+        })
+    }
+
+    pub fn get_spec_turn(&self, turn_id: &str) -> Result<Option<SpecTurnRecord>> {
+        self.conn
+            .query_row(
+                "SELECT turn_id, stage_run_id, ordinal, kind, status, harness, model,
+                    input_tokens, output_tokens, total_tokens, output_json, error_json,
+                    started_at, completed_at
+                 FROM spec_turns WHERE turn_id = ?1",
+                params![turn_id],
+                spec_turn_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_spec_turns(&self, stage_run_id: &str) -> Result<Vec<SpecTurnRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT turn_id, stage_run_id, ordinal, kind, status, harness, model,
+                    input_tokens, output_tokens, total_tokens, output_json, error_json,
+                    started_at, completed_at
+                 FROM spec_turns WHERE stage_run_id = ?1 ORDER BY ordinal ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![stage_run_id], spec_turn_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn store_spec_artifact(
+        &mut self,
+        request: StoreSpecArtifactRequest,
+    ) -> Result<SpecArtifactRecord> {
+        validate_spec(&request.artifact).map_err(|error| {
+            SymphonyError::StorageError(format!("refusing invalid spec artifact: {error}"))
+        })?;
+        let now = Self::now();
+        let now_s = ts(now);
+        let tx = self.conn.transaction().map_err(storage_error)?;
+        let stage = select_stage_run(&tx, &request.stage_run_id)?;
+        if stage.stage != SPEC_STAGE_NAME || stage.status != StageStatus::Running {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is not a running spec attempt",
+                request.stage_run_id
+            )));
+        }
+        let version = tx
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) + 1 FROM spec_artifacts WHERE run_id = ?1",
+                params![stage.run_id],
+                |row| row.get::<_, u32>(0),
+            )
+            .map_err(storage_error)?;
+        let artifact_id = new_id();
+        tx.execute(
+            "INSERT INTO spec_artifacts (
+                artifact_id, run_id, stage_run_id, issue_revision, configuration_revision,
+                version, schema_version, artifact_json, review_cycles,
+                unresolved_findings_json, received_at, bytes_len
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                artifact_id,
+                stage.run_id,
+                request.stage_run_id,
+                request.issue_revision,
+                request.configuration_revision,
+                version,
+                request.artifact.schema_version,
+                bounded_json(&request.artifact)?,
+                request.review_cycles,
+                bounded_json(&request.unresolved_blocking_findings)?,
+                now_s,
+                request.bytes_len,
+            ],
+        )
+        .map_err(storage_error)?;
+        tx.execute(
+            "UPDATE stage_runs SET status = ?1, completed_at = ?2,
+                input_tokens = ?3, output_tokens = ?4, total_tokens = ?5, updated_at = ?6
+             WHERE stage_run_id = ?7",
+            params![
+                StageStatus::Completed.as_str(),
+                now_s,
+                request.usage.input_tokens,
+                request.usage.output_tokens,
+                request.usage.total_tokens,
+                now_s,
+                request.stage_run_id,
+            ],
+        )
+        .map_err(storage_error)?;
+        tx.execute(
+            "INSERT INTO spec_run_state (run_id, decision, updated_at)
+             VALUES (?1, 'awaiting_decision', ?2)
+             ON CONFLICT(run_id) DO UPDATE SET
+                pending_approval_version = NULL,
+                decision = 'awaiting_decision', updated_at = excluded.updated_at",
+            params![stage.run_id, now_s],
+        )
+        .map_err(storage_error)?;
+        tx.execute(
+            "UPDATE factory_runs SET status = ?1, current_stage = ?2, updated_at = ?3 WHERE run_id = ?4",
+            params![FactoryRunStatus::Waiting.as_str(), SPEC_STAGE_NAME, now_s, stage.run_id],
+        )
+        .map_err(storage_error)?;
+        let record = select_spec_artifact(&tx, &artifact_id)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(record)
+    }
+
+    pub fn get_spec_artifact(&self, artifact_id: &str) -> Result<Option<SpecArtifactRecord>> {
+        self.conn
+            .query_row(
+                SPEC_ARTIFACT_SELECT,
+                params![artifact_id],
+                spec_artifact_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_spec_artifacts(&self, run_id: &str) -> Result<Vec<SpecArtifactRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT artifact_id, run_id, stage_run_id, issue_revision,
+                    configuration_revision, version, artifact_json, review_cycles,
+                    unresolved_findings_json, received_at, bytes_len
+                 FROM spec_artifacts WHERE run_id = ?1 ORDER BY version DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], spec_artifact_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn get_spec_state(&self, run_id: &str) -> Result<Option<SpecRunState>> {
+        self.conn
+            .query_row(
+                "SELECT run_id, revision_requests_used, pending_approval_version,
+                    approved_version, approved_artifact_id, decision, updated_at
+                 FROM spec_run_state WHERE run_id = ?1",
+                params![run_id],
+                spec_state_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn increment_spec_revision_requests(&mut self, run_id: &str, max: u32) -> Result<u32> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE spec_run_state SET revision_requests_used = revision_requests_used + 1,
+                decision = 'revision_requested', updated_at = ?1
+             WHERE run_id = ?2 AND revision_requests_used < ?3",
+                params![now_s, run_id, max],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "spec revision request budget exhausted for run {run_id}"
+            )));
+        }
+        Ok(self
+            .get_spec_state(run_id)?
+            .expect("state exists")
+            .revision_requests_used)
+    }
+
+    pub fn set_pending_spec_approval(&mut self, run_id: &str, version: u32) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE spec_run_state SET pending_approval_version = ?1,
+                decision = 'pending_approval', updated_at = ?2 WHERE run_id = ?3",
+                params![version, ts(Self::now()), run_id],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "spec state for run {run_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn pin_spec_approval(&mut self, run_id: &str, artifact_id: &str) -> Result<()> {
+        let artifact = self.get_spec_artifact(artifact_id)?.ok_or_else(|| {
+            SymphonyError::StorageError(format!("spec artifact {artifact_id} not found"))
+        })?;
+        if artifact.run_id != run_id {
+            return Err(SymphonyError::StorageError(
+                "approved artifact does not belong to factory run".to_string(),
+            ));
+        }
+        self.conn.execute(
+            "UPDATE spec_run_state SET approved_version = ?1,
+                approved_artifact_id = ?2, decision = 'pending_approval', updated_at = ?3 WHERE run_id = ?4",
+            params![artifact.version, artifact_id, ts(Self::now()), run_id],
+        ).map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn finalize_spec_approval(
+        &mut self,
+        run_id: &str,
+        intent_id: &str,
+        completed_step: &str,
+    ) -> Result<()> {
+        let now = ts(Self::now());
+        let intent = self
+            .get_spec_publication_intent(intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "spec publication intent {intent_id} not found"
+                ))
+            })?;
+        let mut steps = intent.completed_steps;
+        if !steps.iter().any(|step| step == completed_step) {
+            steps.push(completed_step.to_string());
+        }
+        let tx = self.conn.transaction().map_err(storage_error)?;
+        let changed = tx
+            .execute(
+                "UPDATE spec_run_state SET pending_approval_version = NULL,
+                    decision = 'approved', updated_at = ?1
+                 WHERE run_id = ?2 AND approved_version IS NOT NULL",
+                params![now, run_id],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "cannot finalize spec approval for run {run_id} without a pinned version"
+            )));
+        }
+        tx.execute(
+            "UPDATE factory_runs SET status = 'completed', current_stage = ?1, updated_at = ?2
+             WHERE run_id = ?3",
+            params![SPEC_STAGE_NAME, now, run_id],
+        )
+        .map_err(storage_error)?;
+        tx.execute(
+            "UPDATE spec_publication_intents SET status = 'applied',
+                completed_steps_json = ?1, last_error_json = NULL, updated_at = ?2
+             WHERE intent_id = ?3 AND run_id = ?4",
+            params![bounded_json(&steps)?, now, intent_id, run_id],
+        )
+        .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn create_spec_publication_intent(
+        &mut self,
+        run_id: &str,
+        artifact_id: Option<&str>,
+        kind: SpecPublicationKind,
+        desired_effects: &serde_json::Value,
+    ) -> Result<SpecPublicationIntent> {
+        let intent_id = new_id();
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO spec_publication_intents (
+                intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+                desired_effects_json, observed_baseline_json, expected_projection_json,
+                created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 'pending', '[]', ?5, '{}', '{}', ?6, ?7)",
+                params![
+                    intent_id,
+                    run_id,
+                    artifact_id,
+                    kind.as_str(),
+                    bounded_json(desired_effects)?,
+                    now_s,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        self.get_spec_publication_intent(&intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(
+                    "created spec publication intent is missing".to_string(),
+                )
+            })
+    }
+
+    pub fn get_spec_publication_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<SpecPublicationIntent>> {
+        self.conn
+            .query_row(
+                SPEC_PUBLICATION_SELECT,
+                params![intent_id],
+                spec_publication_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn get_latest_spec_publication(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<SpecPublicationIntent>> {
+        self.conn
+            .query_row(
+                "SELECT intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+                retry_count, last_error_json, comment_id, publisher_login,
+                desired_effects_json, observed_baseline_json, expected_projection_json,
+                created_at, updated_at
+             FROM spec_publication_intents WHERE run_id = ?1 ORDER BY created_at DESC LIMIT 1",
+                params![run_id],
+                spec_publication_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_pending_spec_publications(&self) -> Result<Vec<SpecPublicationIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+                retry_count, last_error_json, comment_id, publisher_login,
+                desired_effects_json, observed_baseline_json, expected_projection_json,
+                created_at, updated_at
+             FROM spec_publication_intents WHERE status = 'pending' ORDER BY created_at ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], spec_publication_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn set_spec_publication_comment(
+        &mut self,
+        intent_id: &str,
+        comment_id: &str,
+        publisher_login: &str,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE spec_publication_intents SET comment_id = ?1, publisher_login = ?2,
+                updated_at = ?3 WHERE intent_id = ?4",
+                params![comment_id, publisher_login, ts(Self::now()), intent_id],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn complete_spec_publication(&mut self, intent_id: &str, step: &str) -> Result<()> {
+        let intent = self
+            .get_spec_publication_intent(intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "spec publication intent {intent_id} not found"
+                ))
+            })?;
+        let mut steps = intent.completed_steps;
+        if !steps.iter().any(|existing| existing == step) {
+            steps.push(step.to_string());
+        }
+        self.conn
+            .execute(
+                "UPDATE spec_publication_intents SET status = 'applied', completed_steps_json = ?1,
+                last_error_json = NULL, updated_at = ?2 WHERE intent_id = ?3",
+                params![bounded_json(&steps)?, ts(Self::now()), intent_id],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn spec_metrics(&self) -> Result<TriageMetricsAggregate> {
+        use crate::triage::domain::{TriageMetricsDuration, TriageMetricsTokenTotals};
+        use std::collections::BTreeMap;
+
+        let mut aggregate = TriageMetricsAggregate::default();
+        let (total, completed, failed): (u64, u64, u64) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN status IN ('failed', 'interrupted') THEN 1 ELSE 0 END), 0)
+             FROM stage_runs WHERE stage = ?1",
+                params![SPEC_STAGE_NAME],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(storage_error)?;
+        aggregate.total_attempts = total;
+        aggregate.completed_attempts = completed;
+        aggregate.failed_attempts = failed;
+        aggregate.ineligible_issues = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM factory_events WHERE event_type = 'spec_ineligible'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+
+        let mut durations = Vec::new();
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT started_at, completed_at FROM stage_runs
+             WHERE stage = ?1 AND started_at IS NOT NULL AND completed_at IS NOT NULL",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![SPEC_STAGE_NAME], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_error)?;
+        for row in rows {
+            let (start, end) = row.map_err(storage_error)?;
+            durations.push(
+                (parse_ts(&end).map_err(SymphonyError::StorageError)?
+                    - parse_ts(&start).map_err(SymphonyError::StorageError)?)
+                .num_milliseconds()
+                .max(0) as f64,
+            );
+        }
+        durations.sort_by(f64::total_cmp);
+        aggregate.duration = if durations.is_empty() {
+            TriageMetricsDuration {
+                average_ms: None,
+                p50_ms: None,
+                p95_ms: None,
+            }
+        } else {
+            TriageMetricsDuration {
+                average_ms: Some(durations.iter().sum::<f64>() / durations.len() as f64),
+                p50_ms: Some(percentile(&durations, 0.50)),
+                p95_ms: Some(percentile(&durations, 0.95)),
+            }
+        };
+
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT harness, model, COALESCE(SUM(input_tokens), 0),
+                COALESCE(SUM(output_tokens), 0), COALESCE(SUM(total_tokens), 0)
+             FROM spec_turns GROUP BY harness, model",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            })
+            .map_err(storage_error)?;
+        let mut tokens = BTreeMap::new();
+        for row in rows {
+            let (harness, model, input, output, total) = row.map_err(storage_error)?;
+            aggregate.input_tokens = aggregate.input_tokens.saturating_add(input);
+            aggregate.output_tokens = aggregate.output_tokens.saturating_add(output);
+            aggregate.total_tokens = aggregate.total_tokens.saturating_add(total);
+            tokens.insert(
+                format!("{}/{}", harness, model.as_deref().unwrap_or("unknown")),
+                TriageMetricsTokenTotals {
+                    input_tokens: input,
+                    output_tokens: output,
+                    total_tokens: total,
+                },
+            );
+        }
+        aggregate.tokens_by_harness_model = tokens;
+        Ok(aggregate)
+    }
+}
+
+const SPEC_ARTIFACT_SELECT: &str =
+    "SELECT artifact_id, run_id, stage_run_id, issue_revision, configuration_revision,
+        version, artifact_json, review_cycles, unresolved_findings_json, received_at, bytes_len
+     FROM spec_artifacts WHERE artifact_id = ?1";
+
+const SPEC_PUBLICATION_SELECT: &str =
+    "SELECT intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+        retry_count, last_error_json, comment_id, publisher_login,
+        desired_effects_json, observed_baseline_json, expected_projection_json,
+        created_at, updated_at
+     FROM spec_publication_intents WHERE intent_id = ?1";
+
 fn percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {
         return 0.0;
@@ -1478,6 +2160,93 @@ fn select_stage_run(conn: &Connection, stage_run_id: &str) -> Result<StageRunRec
         stage_run_from_row,
     )
     .map_err(storage_error)
+}
+
+fn select_spec_artifact(conn: &Connection, artifact_id: &str) -> Result<SpecArtifactRecord> {
+    conn.query_row(
+        SPEC_ARTIFACT_SELECT,
+        params![artifact_id],
+        spec_artifact_from_row,
+    )
+    .map_err(storage_error)
+}
+
+fn spec_turn_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SpecTurnRecord> {
+    let kind: String = row.get(3)?;
+    let status: String = row.get(4)?;
+    let output: Option<String> = row.get(10)?;
+    Ok(SpecTurnRecord {
+        turn_id: row.get(0)?,
+        stage_run_id: row.get(1)?,
+        ordinal: row.get(2)?,
+        kind: parse_spec_turn_kind(&kind).map_err(row_error)?,
+        status: parse_spec_turn_status(&status).map_err(row_error)?,
+        harness: row.get(5)?,
+        model: row.get(6)?,
+        usage: StageUsage {
+            input_tokens: row.get(7)?,
+            output_tokens: row.get(8)?,
+            total_tokens: row.get(9)?,
+        },
+        output_json: output
+            .map(|json| serde_json::from_str(&json).map_err(row_error))
+            .transpose()?,
+        error: optional_from_json(row.get::<_, Option<String>>(11)?)?,
+        started_at: parse_ts_row(row.get::<_, String>(12)?)?,
+        completed_at: parse_optional_ts_row(row.get::<_, Option<String>>(13)?)?,
+    })
+}
+
+fn spec_artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SpecArtifactRecord> {
+    Ok(SpecArtifactRecord {
+        artifact_id: row.get(0)?,
+        run_id: row.get(1)?,
+        stage_run_id: row.get(2)?,
+        issue_revision: row.get(3)?,
+        configuration_revision: row.get(4)?,
+        version: row.get(5)?,
+        artifact: serde_json::from_str(&row.get::<_, String>(6)?).map_err(row_error)?,
+        review_cycles: row.get(7)?,
+        unresolved_blocking_findings: serde_json::from_str(&row.get::<_, String>(8)?)
+            .map_err(row_error)?,
+        received_at: parse_ts_row(row.get::<_, String>(9)?)?,
+        bytes_len: row.get(10)?,
+    })
+}
+
+fn spec_state_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SpecRunState> {
+    let decision: String = row.get(5)?;
+    Ok(SpecRunState {
+        run_id: row.get(0)?,
+        revision_requests_used: row.get(1)?,
+        pending_approval_version: row.get(2)?,
+        approved_version: row.get(3)?,
+        approved_artifact_id: row.get(4)?,
+        decision: parse_spec_decision(&decision).map_err(row_error)?,
+        updated_at: parse_ts_row(row.get::<_, String>(6)?)?,
+    })
+}
+
+fn spec_publication_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SpecPublicationIntent> {
+    let kind: String = row.get(3)?;
+    let status: String = row.get(4)?;
+    Ok(SpecPublicationIntent {
+        intent_id: row.get(0)?,
+        run_id: row.get(1)?,
+        artifact_id: row.get(2)?,
+        kind: parse_spec_publication_kind(&kind).map_err(row_error)?,
+        status: parse_publication_status(&status).map_err(row_error)?,
+        completed_steps: serde_json::from_str(&row.get::<_, String>(5)?).map_err(row_error)?,
+        retry_count: row.get(6)?,
+        last_error: optional_from_json(row.get::<_, Option<String>>(7)?)?,
+        comment_id: row.get(8)?,
+        publisher_login: row.get(9)?,
+        desired_effects: serde_json::from_str(&row.get::<_, String>(10)?).map_err(row_error)?,
+        observed_baseline: serde_json::from_str(&row.get::<_, String>(11)?).map_err(row_error)?,
+        expected_projection: serde_json::from_str(&row.get::<_, String>(12)?).map_err(row_error)?,
+        created_at: parse_ts_row(row.get::<_, String>(13)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(14)?)?,
+    })
 }
 
 fn select_artifact(conn: &Connection, artifact_id: &str) -> Result<ArtifactRecord> {
@@ -1674,6 +2443,45 @@ fn parse_stage_status(value: &str) -> std::result::Result<StageStatus, String> {
     }
 }
 
+fn parse_spec_turn_kind(value: &str) -> std::result::Result<SpecTurnKind, String> {
+    match value {
+        "draft" => Ok(SpecTurnKind::Draft),
+        "review" => Ok(SpecTurnKind::Review),
+        "revise" => Ok(SpecTurnKind::Revise),
+        _ => Err(format!("unknown spec turn kind {value}")),
+    }
+}
+
+fn parse_spec_turn_status(value: &str) -> std::result::Result<SpecTurnStatus, String> {
+    match value {
+        "running" => Ok(SpecTurnStatus::Running),
+        "completed" => Ok(SpecTurnStatus::Completed),
+        "failed" => Ok(SpecTurnStatus::Failed),
+        _ => Err(format!("unknown spec turn status {value}")),
+    }
+}
+
+fn parse_spec_publication_kind(value: &str) -> std::result::Result<SpecPublicationKind, String> {
+    match value {
+        "preview" => Ok(SpecPublicationKind::Preview),
+        "approval" => Ok(SpecPublicationKind::Approval),
+        "diagnostic" => Ok(SpecPublicationKind::Diagnostic),
+        _ => Err(format!("unknown spec publication kind {value}")),
+    }
+}
+
+fn parse_spec_decision(value: &str) -> std::result::Result<SpecDecision, String> {
+    match value {
+        "awaiting_decision" => Ok(SpecDecision::AwaitingDecision),
+        "revision_requested" => Ok(SpecDecision::RevisionRequested),
+        "pending_approval" => Ok(SpecDecision::PendingApproval),
+        "approved" => Ok(SpecDecision::Approved),
+        "blocked" => Ok(SpecDecision::Blocked),
+        "conflict" => Ok(SpecDecision::Conflict),
+        _ => Err(format!("unknown spec decision {value}")),
+    }
+}
+
 fn parse_publication_status(value: &str) -> std::result::Result<PublicationStatus, String> {
     match value {
         "none" => Ok(PublicationStatus::None),
@@ -1779,6 +2587,78 @@ mod tests {
         assert!(store
             .claim_attempt(claim_request("issue-rev", "config-rev"))
             .is_err());
+    }
+
+    #[test]
+    fn spec_attempts_are_stage_scoped_and_publish_monotonic_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let _triage = store
+            .claim_attempt(claim_request("issue-rev", "config-rev"))
+            .unwrap();
+        let spec = store
+            .claim_stage_attempt(SPEC_STAGE_NAME, claim_request("issue-rev", "config-rev"))
+            .unwrap();
+        assert_eq!(spec.stage, SPEC_STAGE_NAME);
+
+        store
+            .store_spec_turn(StoreSpecTurnRequest {
+                turn_id: "turn-1".to_string(),
+                stage_run_id: spec.stage_run_id.clone(),
+                ordinal: 1,
+                kind: SpecTurnKind::Draft,
+                status: SpecTurnStatus::Completed,
+                harness: "pi".to_string(),
+                model: None,
+                usage: StageUsage::default(),
+                output_json: Some(serde_json::json!({"schema_version":1})),
+                error: None,
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+            })
+            .unwrap();
+        let first = store
+            .store_spec_artifact(StoreSpecArtifactRequest {
+                stage_run_id: spec.stage_run_id,
+                issue_revision: "issue-rev".to_string(),
+                configuration_revision: "config-rev".to_string(),
+                artifact: SpecArtifact {
+                    schema_version: 1,
+                    product_behavior: "behavior".to_string(),
+                    technical_approach: "approach".to_string(),
+                    acceptance_criteria: vec!["observable".to_string()],
+                    open_decisions: vec![],
+                },
+                review_cycles: 1,
+                unresolved_blocking_findings: vec![],
+                bytes_len: 100,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+        assert_eq!(first.version, 1);
+        assert_eq!(store.list_spec_turns(&first.stage_run_id).unwrap().len(), 1);
+
+        let second_stage = store
+            .claim_stage_attempt(SPEC_STAGE_NAME, claim_request("issue-rev-2", "config-rev"))
+            .unwrap();
+        let second = store
+            .store_spec_artifact(StoreSpecArtifactRequest {
+                stage_run_id: second_stage.stage_run_id,
+                issue_revision: "issue-rev-2".to_string(),
+                configuration_revision: "config-rev".to_string(),
+                artifact: first.artifact.clone(),
+                review_cycles: 1,
+                unresolved_blocking_findings: vec![],
+                bytes_len: 100,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+        assert_eq!(second.version, 2);
+        assert_eq!(
+            store.get_spec_artifact(&first.artifact_id).unwrap(),
+            Some(first)
+        );
     }
 
     #[test]

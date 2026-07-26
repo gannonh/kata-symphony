@@ -1412,6 +1412,7 @@ fn sample_factory_run() -> symphony::http_server::FactoryRunHttpResponse {
         updated_at: completed,
         attempts: vec![symphony::http_server::FactoryRunAttemptHttp {
             stage_run_id: "stage-1".to_string(),
+            stage: "triage".to_string(),
             attempt: 1,
             status: "completed".to_string(),
             configuration_revision: "cfg".to_string(),
@@ -1426,6 +1427,7 @@ fn sample_factory_run() -> symphony::http_server::FactoryRunHttpResponse {
                 total_tokens: 1250,
             },
             error: None,
+            turns: vec![],
         }],
         artifact: Some(symphony::http_server::FactoryRunArtifactHttp {
             artifact_id: "art-1".to_string(),
@@ -1453,6 +1455,7 @@ fn sample_factory_run() -> symphony::http_server::FactoryRunHttpResponse {
             retry_count: 0,
             error: None,
         }),
+        spec: None,
     }
 }
 
@@ -1631,7 +1634,7 @@ async fn test_factory_run_metrics_stage_validation() {
         .clone()
         .oneshot(
             Request::builder()
-                .uri("/api/v1/factory-runs/metrics?stage=spec")
+                .uri("/api/v1/factory-runs/metrics?stage=review")
                 .body(Body::empty())
                 .expect("request"),
         )

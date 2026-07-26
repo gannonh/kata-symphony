@@ -67,6 +67,16 @@ pub trait FactoryRunQuery: Send + Sync {
         issue_identifier: &str,
     ) -> Result<Option<FactoryRunHttpResponse>, String>;
     fn triage_metrics(&self) -> Result<FactoryRunMetricsHttpResponse, String>;
+    fn spec_metrics(&self) -> Result<FactoryRunMetricsHttpResponse, String> {
+        Err("spec metrics are not available".to_string())
+    }
+    fn get_artifact(
+        &self,
+        _run_id: &str,
+        _artifact_id: &str,
+    ) -> Result<Option<FactoryArtifactHttpResponse>, String> {
+        Ok(None)
+    }
 }
 
 // ── Trait implementations for orchestrator types ───────────────────────
@@ -444,6 +454,8 @@ pub struct FactoryRunHttpResponse {
     pub artifact: Option<FactoryRunArtifactHttp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<FactoryRunPublicationHttp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<FactoryRunSpecHttp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -457,6 +469,8 @@ pub struct FactoryRunIssueHttp {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FactoryRunAttemptHttp {
     pub stage_run_id: String,
+    #[serde(default = "default_triage_stage")]
+    pub stage: String,
     pub attempt: u32,
     pub status: String,
     pub configuration_revision: String,
@@ -472,6 +486,78 @@ pub struct FactoryRunAttemptHttp {
     pub usage: crate::triage::domain::StageUsage,
     #[serde(default)]
     pub error: Option<crate::triage::domain::FactoryError>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub turns: Vec<FactoryRunSpecTurnHttp>,
+}
+
+fn default_triage_stage() -> String {
+    crate::triage::domain::TRIAGE_STAGE_NAME.to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunSpecTurnHttp {
+    pub turn_id: String,
+    pub ordinal: u32,
+    pub kind: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub started_at: chrono::DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<chrono::DateTime<Utc>>,
+    pub usage: crate::triage::domain::StageUsage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::triage::domain::FactoryError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunSpecVersionHttp {
+    pub artifact_id: String,
+    pub version: u32,
+    pub attempt: u32,
+    pub review_cycles: u32,
+    pub unresolved_blocking_findings: usize,
+    pub published: bool,
+    pub received_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunSpecHttp {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_approval_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approved_version: Option<u32>,
+    pub versions: Vec<FactoryRunSpecVersionHttp>,
+    pub revision_requests_used: u32,
+    pub decision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<FactoryRunSpecPublicationHttp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunSpecPublicationHttp {
+    pub intent_id: String,
+    pub kind: String,
+    pub status: String,
+    pub completed_steps: Vec<String>,
+    pub retry_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::triage::domain::FactoryError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactoryArtifactHttpResponse {
+    pub artifact_id: String,
+    pub run_id: String,
+    pub stage_run_id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<u32>,
+    pub attempt: u32,
+    pub received_at: chrono::DateTime<Utc>,
+    pub artifact: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -550,6 +636,7 @@ pub fn factory_run_http_response(
                 };
                 FactoryRunAttemptHttp {
                     stage_run_id: attempt.stage_run_id.clone(),
+                    stage: attempt.stage.clone(),
                     attempt: attempt.attempt,
                     status: attempt.status.as_str().to_string(),
                     configuration_revision: attempt.configuration_revision.clone(),
@@ -560,6 +647,7 @@ pub fn factory_run_http_response(
                     duration_ms,
                     usage: attempt.usage.clone(),
                     error: attempt.error.clone(),
+                    turns: Vec::new(),
                 }
             })
             .collect(),
@@ -585,7 +673,78 @@ pub fn factory_run_http_response(
             retry_count: intent.retry_count,
             error: intent.last_error.clone(),
         }),
+        spec: None,
     }
+}
+
+pub fn attach_spec_http_response(
+    response: &mut FactoryRunHttpResponse,
+    artifacts: &[crate::spec::domain::SpecArtifactRecord],
+    state: Option<&crate::spec::domain::SpecRunState>,
+    publication: Option<&crate::spec::domain::SpecPublicationIntent>,
+    turns: &std::collections::HashMap<String, Vec<crate::spec::domain::SpecTurnRecord>>,
+) {
+    if artifacts.is_empty() && state.is_none() && publication.is_none() && turns.is_empty() {
+        return;
+    }
+    for attempt in &mut response.attempts {
+        if let Some(records) = turns.get(&attempt.stage_run_id) {
+            attempt.turns = records
+                .iter()
+                .map(|turn| FactoryRunSpecTurnHttp {
+                    turn_id: turn.turn_id.clone(),
+                    ordinal: turn.ordinal,
+                    kind: turn.kind.as_str().to_string(),
+                    status: turn.status.as_str().to_string(),
+                    model: turn.model.clone(),
+                    started_at: turn.started_at,
+                    completed_at: turn.completed_at,
+                    usage: turn.usage.clone(),
+                    error: turn.error.clone(),
+                })
+                .collect();
+        }
+    }
+    let attempt_by_stage: std::collections::HashMap<&str, u32> = response
+        .attempts
+        .iter()
+        .map(|attempt| (attempt.stage_run_id.as_str(), attempt.attempt))
+        .collect();
+    let current_version = artifacts.iter().map(|artifact| artifact.version).max();
+    response.spec = Some(FactoryRunSpecHttp {
+        current_version,
+        pending_approval_version: state.and_then(|state| state.pending_approval_version),
+        approved_version: state.and_then(|state| state.approved_version),
+        versions: artifacts
+            .iter()
+            .map(|artifact| FactoryRunSpecVersionHttp {
+                artifact_id: artifact.artifact_id.clone(),
+                version: artifact.version,
+                attempt: attempt_by_stage
+                    .get(artifact.stage_run_id.as_str())
+                    .copied()
+                    .unwrap_or_default(),
+                review_cycles: artifact.review_cycles,
+                unresolved_blocking_findings: artifact.unresolved_blocking_findings.len(),
+                published: true,
+                received_at: artifact.received_at,
+            })
+            .collect(),
+        revision_requests_used: state
+            .map(|state| state.revision_requests_used)
+            .unwrap_or_default(),
+        decision: state
+            .map(|state| state.decision.as_str().to_string())
+            .unwrap_or_else(|| "awaiting_decision".to_string()),
+        publication: publication.map(|intent| FactoryRunSpecPublicationHttp {
+            intent_id: intent.intent_id.clone(),
+            kind: intent.kind.as_str().to_string(),
+            status: intent.status.as_str().to_string(),
+            completed_steps: intent.completed_steps.clone(),
+            retry_count: intent.retry_count,
+            error: intent.last_error.clone(),
+        }),
+    });
 }
 
 pub fn factory_run_metrics_http_response(
@@ -693,6 +852,10 @@ pub fn build_router(state: HttpServerState) -> Router {
         )
         .route("/api/v1/steer", post(post_steer))
         .route("/api/v1/factory-runs/metrics", get(get_factory_run_metrics))
+        .route(
+            "/api/v1/factory-runs/{run_id}/artifacts/{artifact_id}",
+            get(get_factory_artifact),
+        )
         .route("/api/v1/factory-runs/{run_id}", get(get_factory_run_by_id))
         .route("/api/v1/factory-runs", get(get_factory_runs))
         .route("/api/v1/{issue_identifier}", get(get_issue))
@@ -2229,6 +2392,31 @@ async fn get_factory_run_by_id(
     }
 }
 
+async fn get_factory_artifact(
+    State(state): State<HttpServerState>,
+    Path((run_id, artifact_id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let Some(query) = state.factory_run_query.as_ref() else {
+        return factory_store_unavailable().into_response();
+    };
+    match query.get_artifact(run_id.trim(), artifact_id.trim()) {
+        Ok(Some(artifact)) => Json(artifact).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorEnvelope {
+                error: ApiError {
+                    code: "factory_artifact_not_found",
+                    message: format!("Factory artifact '{artifact_id}' was not found"),
+                    status: StatusCode::NOT_FOUND.as_u16(),
+                    details: None,
+                },
+            }),
+        )
+            .into_response(),
+        Err(message) => factory_query_failed(&message).into_response(),
+    }
+}
+
 async fn get_factory_runs(
     State(state): State<HttpServerState>,
     Query(params): Query<FactoryRunsListQuery>,
@@ -2287,25 +2475,29 @@ async fn get_factory_run_metrics(
     };
 
     let stage = params.stage.as_deref().map(str::trim).unwrap_or("");
-    if stage != crate::triage::domain::TRIAGE_STAGE_NAME {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiErrorEnvelope {
-                error: ApiError {
-                    code: "invalid_query",
-                    message: "Query parameter 'stage' must be 'triage'".to_string(),
-                    status: StatusCode::BAD_REQUEST.as_u16(),
-                    details: Some(serde_json::json!({
-                        "field": "stage",
-                        "value": params.stage,
-                    })),
-                },
-            }),
-        )
-            .into_response();
-    }
+    let result = match stage {
+        crate::triage::domain::TRIAGE_STAGE_NAME => query.triage_metrics(),
+        crate::spec::domain::SPEC_STAGE_NAME => query.spec_metrics(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiErrorEnvelope {
+                    error: ApiError {
+                        code: "invalid_query",
+                        message: "Query parameter 'stage' must be 'triage' or 'spec'".to_string(),
+                        status: StatusCode::BAD_REQUEST.as_u16(),
+                        details: Some(serde_json::json!({
+                            "field": "stage",
+                            "value": params.stage,
+                        })),
+                    },
+                }),
+            )
+                .into_response();
+        }
+    };
 
-    match query.triage_metrics() {
+    match result {
         Ok(metrics) => Json(metrics).into_response(),
         Err(message) => factory_query_failed(&message).into_response(),
     }

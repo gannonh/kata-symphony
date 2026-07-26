@@ -227,6 +227,8 @@ A new GitHub or Linear issue triggers a triage stage. Symphony creates the minim
 
 A spec-routed issue produces versioned product behavior, technical approach, acceptance criteria, and open decisions. A human can approve or request revision from the tracker or Pi.
 
+**Progress:** Implemented for the narrowed GitHub tracker workflow in [A2 Spec Stage](/specs/2026-07-18-a2-spec-stage-design.md): isolated draft/review/revise turns, durable immutable versions, GitHub feedback/decision labels, approved-version pinning, implement label/state handoff, HTTP artifacts/metrics, events, doctor checks, and starter assets. Tracker approval is delivered; Pi approval and separate product/technical artifacts remain deferred as documented A2 narrowings. Live GitHub UAT evidence is pending.
+
 **Demo:** Apply or receive the spec route, review both artifacts, request one change, approve the revision, and see the run become implementation-ready.
 
 **Measure:** approval cycles, time awaiting human input, implementation rework attributed to spec gaps.

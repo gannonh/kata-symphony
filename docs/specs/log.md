@@ -1,5 +1,8 @@
 # Specs Update Log
 
+## 2026-07-26
+* **A2 implementation**: [A2 Spec Stage](/specs/2026-07-18-a2-spec-stage-design.md) is active with the GitHub tracker workflow implemented end to end: durable isolated review pipeline, versioned publication, human revision/approval, approved artifact pin, and implementation route handoff. Automated gates pass; live UAT evidence is pending.
+
 ## 2026-07-25
 * **A1 PR3 review remediation**: [PR #599](https://github.com/gannonh/kata-symphony/pull/599) has all review threads resolved and required CI checks passing after Codex process isolation, recovery-state retention, cleanup authorization, and latest-per-run randomized correction candidate fixes. Updated the [build report](/specs/2026-07-25-a1-pr3-build-report.md), [re-verify report](/specs/2026-07-25-a1-pr3-reverify-report.md), A1 design, PRD, and roadmap. Live acceptance remains blocked.
 * **A1 PR3 Verify rejected**: Live GitHub UAT passed retry records, preview/automatic publication, correction events, metrics, and dedupe, but restart recovery left a post-`exec` orphan alive because the executable identity changed from the recorded launcher. See [Verify report](/specs/2026-07-25-a1-pr3-verify-report.md).

@@ -11,6 +11,8 @@ use tokio::time::{timeout, Instant};
 
 use crate::domain::{CodexConfig, Issue};
 use crate::error::{Result, SymphonyError};
+use crate::spec::artifact as spec_artifact;
+use crate::spec::pipeline::{SpecTurnOutcome, SpecTurnOutput, SpecTurnRequest};
 use crate::triage::artifact::{self, ArtifactValidationError};
 use crate::triage::domain::{StageUsage, TriageArtifact};
 use crate::triage::integrity::{self, RepoBaseline};
@@ -154,6 +156,7 @@ struct AttemptLayout {
     attempt_root: PathBuf,
     workspace_path: PathBuf,
     output_path: PathBuf,
+    stage_input_path: PathBuf,
     home_dir: PathBuf,
 }
 
@@ -195,6 +198,162 @@ impl TriageRunner {
     }
 }
 
+#[derive(Clone)]
+pub struct IsolatedSpecRunnerConfig {
+    pub workspace_root: PathBuf,
+    pub repo_path: PathBuf,
+    pub command: Vec<String>,
+    pub harness: TriageHarness,
+    pub issue: TriageIssueIdentity,
+    pub codex: Option<CodexConfig>,
+    pub spawned: Option<TriageSpawnSink>,
+}
+
+/// Run one A2 turn through A1's isolated process profile. Each call receives a
+/// turn-unique ID, which creates a fresh clone, home, stage input directory,
+/// and output path. No prior-turn files are copied into the workspace.
+pub async fn run_isolated_spec_turn(
+    config: &IsolatedSpecRunnerConfig,
+    turn: SpecTurnRequest,
+) -> Result<SpecTurnOutcome> {
+    let started_at = chrono::Utc::now();
+    let base_request = TriageRunnerRequest {
+        attempt_id: turn.turn_id.clone(),
+        workspace_root: config.workspace_root.clone(),
+        repo_path: config.repo_path.clone(),
+        command: config.command.clone(),
+        prompt: turn.prompt.clone(),
+        turn_timeout_ms: turn.turn_timeout_ms,
+        model: turn.model.clone(),
+        harness: config.harness,
+        issue: config.issue.clone(),
+        codex: config.codex.clone(),
+        progress: None,
+        spawned: config.spawned.clone(),
+    };
+    if let Err(message) = validate_request(&base_request) {
+        return Err(SymphonyError::TriageError(format!(
+            "spec {} turn setup failed: {message}",
+            turn.kind.as_str()
+        )));
+    }
+    let layout = prepare_attempt(&base_request).map_err(|outcome| {
+        SymphonyError::TriageError(format!(
+            "spec {} turn setup failed: {}",
+            turn.kind.as_str(),
+            runner_outcome_message(&outcome)
+        ))
+    })?;
+    if let Err(error) = write_spec_turn_inputs(&layout.stage_input_path, &turn) {
+        let _ = fs::remove_dir_all(&layout.attempt_root);
+        return Err(error);
+    }
+    let prompt = format!(
+        "{}\n\nSymphony stage contract: read only the allowlisted inputs in `{}`. Write the required JSON object to the exact path in {OUTPUT_ENV}. Do not modify the repository.",
+        turn.prompt,
+        layout.stage_input_path.display()
+    );
+    let request = TriageRunnerRequest {
+        prompt,
+        ..base_request
+    };
+    let baseline = integrity::capture_baseline(&layout.workspace_path).map_err(|error| {
+        SymphonyError::TriageError(format!(
+            "spec {} baseline failed: {error}",
+            turn.kind.as_str()
+        ))
+    })?;
+    let usage = match request.harness {
+        TriageHarness::Pi => run_pi_turn(&request, &layout).await,
+        TriageHarness::Codex => run_codex_turn(&request, &layout).await,
+    }
+    .map_err(|outcome| {
+        let message = runner_outcome_message(&outcome);
+        let _ = fs::remove_dir_all(&layout.attempt_root);
+        SymphonyError::TriageError(format!(
+            "spec {} turn execution failed: {message}",
+            turn.kind.as_str()
+        ))
+    })?;
+    let bytes = fs::read(&layout.output_path).map_err(|error| {
+        SymphonyError::TriageError(format!(
+            "spec {} turn missing output at {}: {error}",
+            turn.kind.as_str(),
+            layout.output_path.display()
+        ))
+    })?;
+    let output = match turn.kind {
+        crate::spec::domain::SpecTurnKind::Review => {
+            SpecTurnOutput::Findings(spec_artifact::parse_findings(&bytes).map_err(|error| {
+                SymphonyError::TriageError(format!("spec review turn invalid output: {error}"))
+            })?)
+        }
+        crate::spec::domain::SpecTurnKind::Draft | crate::spec::domain::SpecTurnKind::Revise => {
+            SpecTurnOutput::Spec(spec_artifact::parse_spec(&bytes).map_err(|error| {
+                SymphonyError::TriageError(format!(
+                    "spec {} turn invalid output: {error}",
+                    turn.kind.as_str()
+                ))
+            })?)
+        }
+    };
+    integrity::check_repository_integrity(&layout.workspace_path, &baseline).map_err(|error| {
+        SymphonyError::TriageError(format!(
+            "spec {} turn repository integrity failed: {error}",
+            turn.kind.as_str()
+        ))
+    })?;
+    scrub_isolated_home(&layout.home_dir).map_err(|error| {
+        SymphonyError::TriageError(format!("failed to scrub isolated spec home: {error}"))
+    })?;
+    Ok(SpecTurnOutcome {
+        output,
+        usage,
+        started_at,
+        completed_at: chrono::Utc::now(),
+        workspace_identity: layout.workspace_path.to_string_lossy().to_string(),
+    })
+}
+
+fn write_spec_turn_inputs(path: &Path, turn: &SpecTurnRequest) -> Result<()> {
+    write_json_file(path.join("issue.json"), &turn.inputs.issue_context)?;
+    if let Some(spec) = &turn.inputs.current_spec {
+        write_json_file(path.join("current-spec.json"), spec)?;
+    }
+    if let Some(findings) = &turn.inputs.blocking_findings {
+        write_json_file(path.join("blocking-findings.json"), findings)?;
+    }
+    if let Some(version) = turn.inputs.prior_version {
+        write_json_file(
+            path.join("prior-version.json"),
+            &serde_json::json!({"version": version}),
+        )?;
+    }
+    if let Some(feedback) = &turn.inputs.human_feedback {
+        write_json_file(path.join("human-feedback.json"), feedback)?;
+    }
+    Ok(())
+}
+
+fn write_json_file(path: PathBuf, value: &impl serde::Serialize) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| {
+        SymphonyError::TriageError(format!("could not encode spec input: {error}"))
+    })?;
+    fs::write(&path, bytes).map_err(|error| {
+        SymphonyError::TriageError(format!(
+            "could not write spec input {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn runner_outcome_message(outcome: &TriageRunnerOutcome) -> String {
+    match outcome {
+        TriageRunnerOutcome::Failure(failure) => failure.message.clone(),
+        TriageRunnerOutcome::Success(_) => "unexpected runner success".to_string(),
+    }
+}
+
 fn validate_request(request: &TriageRunnerRequest) -> std::result::Result<(), String> {
     if request.command.is_empty() {
         return Err("triage command cannot be empty".to_string());
@@ -225,6 +384,7 @@ fn prepare_attempt(
     let layout = AttemptLayout {
         workspace_path: attempt_root.join("workspace"),
         output_path: attempt_root.join("stage-output").join("result.json"),
+        stage_input_path: attempt_root.join("stage-input"),
         home_dir: attempt_root.join("home"),
         attempt_root,
     };
@@ -234,6 +394,9 @@ fn prepare_attempt(
         layout.output_path.parent().expect("output dir"),
         &layout.home_dir,
     ) {
+        return Err(failure(TriageRunnerFailureKind::Setup, err.to_string()));
+    }
+    if let Err(err) = fs::create_dir_all(&layout.stage_input_path) {
         return Err(failure(TriageRunnerFailureKind::Setup, err.to_string()));
     }
 
@@ -1208,6 +1371,101 @@ mod tests {
             "workspace path must locate the disposable clone"
         );
         assert!(info.output_path.ends_with("result.json"));
+    }
+
+    #[tokio::test]
+    async fn isolated_spec_turns_use_fresh_workspaces_and_allowlisted_inputs() {
+        use crate::spec::pipeline::{SpecTurnInputs, SpecTurnRequest};
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+        let workspace_root = temp.path().join("workspaces");
+        let script = temp.path().join("fake-spec-pi.sh");
+        write_script(
+            &script,
+            r##"#!/bin/sh
+input="$(dirname "$(dirname "$SYMPHONY_STAGE_OUTPUT")")/stage-input"
+if printf '%s' "$*" | grep -q 'review prompt'; then
+  test -f "$input/issue.json" && test -f "$input/current-spec.json"
+  test ! -e "$input/blocking-findings.json" && test ! -e "$input/human-feedback.json"
+  printf '%s' '{"schema_version":1,"verdict":"pass","findings":[]}' > "$SYMPHONY_STAGE_OUTPUT"
+else
+  test -f "$input/issue.json" && test ! -e "$input/current-spec.json"
+  printf '%s' '{"schema_version":1,"product_behavior":"behavior","technical_approach":"approach","acceptance_criteria":["observable"],"open_decisions":[]}' > "$SYMPHONY_STAGE_OUTPUT"
+fi
+"##,
+        );
+        let runner = IsolatedSpecRunnerConfig {
+            workspace_root,
+            repo_path: repo,
+            command: vec![script.display().to_string()],
+            harness: TriageHarness::Pi,
+            issue: TriageIssueIdentity {
+                id: "1".to_string(),
+                identifier: "#1".to_string(),
+                title: "Spec".to_string(),
+            },
+            codex: None,
+            spawned: None,
+        };
+        let issue_context = serde_json::json!({"title":"Spec"});
+        let draft = run_isolated_spec_turn(
+            &runner,
+            SpecTurnRequest {
+                turn_id: "draft-turn".to_string(),
+                stage_run_id: "stage".to_string(),
+                ordinal: 1,
+                kind: crate::spec::domain::SpecTurnKind::Draft,
+                prompt: "draft prompt".to_string(),
+                model: None,
+                turn_timeout_ms: 5_000,
+                inputs: SpecTurnInputs {
+                    issue_context: issue_context.clone(),
+                    current_spec: None,
+                    blocking_findings: None,
+                    prior_version: None,
+                    human_feedback: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        fs::write(
+            Path::new(&draft.workspace_identity).join("planted.txt"),
+            "secret",
+        )
+        .unwrap();
+        let spec = match draft.output {
+            SpecTurnOutput::Spec(spec) => spec,
+            _ => panic!("draft must produce spec"),
+        };
+        let review = run_isolated_spec_turn(
+            &runner,
+            SpecTurnRequest {
+                turn_id: "review-turn".to_string(),
+                stage_run_id: "stage".to_string(),
+                ordinal: 2,
+                kind: crate::spec::domain::SpecTurnKind::Review,
+                prompt: "review prompt".to_string(),
+                model: None,
+                turn_timeout_ms: 5_000,
+                inputs: SpecTurnInputs {
+                    issue_context,
+                    current_spec: Some(spec),
+                    blocking_findings: None,
+                    prior_version: None,
+                    human_feedback: None,
+                },
+            },
+        )
+        .await
+        .unwrap();
+        assert_ne!(draft.workspace_identity, review.workspace_identity);
+        assert!(!Path::new(&review.workspace_identity)
+            .join("planted.txt")
+            .exists());
+        assert!(matches!(review.output, SpecTurnOutput::Findings(_)));
     }
 
     #[test]
