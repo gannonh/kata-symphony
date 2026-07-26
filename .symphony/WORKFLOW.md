@@ -2,7 +2,7 @@
 tracker:
   kind: github
   repo_owner: gannonh
-  repo_name: kata
+  repo_name: kata-symphony
   github_project_owner_type: user
   github_project_number: 17
   active_states:
@@ -19,17 +19,17 @@ polling:
   interval_ms: 3000
 workspace:
   root: /Volumes/EVO/symphony-workspaces
-  repo: /Volumes/EVO/kata/kata-mono
+  repo: /Volumes/EVO/dev/kata-symphony
   git_strategy: worktree
   isolation: local
   cleanup_on_done: true
-  branch_prefix: kata-mono
+  branch_prefix: kata-symphony
   clone_branch: main
   base_branch: main
 hooks:
   timeout_ms: 1200000
   # Run after workspace directory is created (after git bootstrap).
-  after_create: ../scripts/bootstrap-symphony-worktree.sh /Volumes/EVO/kata/kata-mono
+  after_create: ../scripts/bootstrap-symphony-worktree.sh /Volumes/EVO/dev/kata-symphony
 agent:
   name: pi
   command: pi --mode rpc

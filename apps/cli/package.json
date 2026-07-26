@@ -6,7 +6,7 @@
   "private": false,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/gannonh/kata.git",
+    "url": "git+https://github.com/gannonh/kata-symphony.git",
     "directory": "apps/cli"
   },
   "type": "module",
