@@ -1,7 +1,7 @@
 ---
 type: Spec
 title: A2 Spec Stage
-status: Draft
+status: Completed
 description: Design for a durable spec stage that turns spec-routed GitHub issues into reviewed, human-approved specification artifacts and implementation-ready runs.
 tags: [symphony, software-factory, spec-stage, github]
 timestamp: 2026-07-18T17:24:00Z
@@ -11,7 +11,7 @@ timestamp: 2026-07-18T17:24:00Z
 
 ## Status
 
-Draft
+Completed — GitHub tracker workflow implemented and live UAT accepted ([verify report](/specs/2026-07-26-a2-uat-verify-report.md); [ADR-0003](/adrs/0003-a2-spec-stage-artifacts-and-gates.md)).
 
 ## Goal
 
@@ -26,6 +26,8 @@ A2 reuses A1's durable factory-run store, isolated one-turn runner, publisher-ow
 ## Source of truth
 
 - [Symphony Software Factory Platform PRD, A2](/specs/symphony-software-factory-platform-prd.md)
+- [A2 UAT Verify Report](/specs/2026-07-26-a2-uat-verify-report.md)
+- [ADR-0003 A2 spec-stage artifacts and human gates](/adrs/0003-a2-spec-stage-artifacts-and-gates.md)
 - [A1 GitHub Issue Triage](/specs/2026-07-16-a1-github-issue-triage-design.md)
 - [ADR-0001 A1 triage durability and isolation](/adrs/0001-a1-triage-durability-and-isolation.md)
 - [Warp spec-driven development article](https://www.warp.dev/blog/how-to-build-a-cloud-software-factory-add-spec-driven-development-skills)

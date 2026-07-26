@@ -90,6 +90,27 @@ server:
 #       label: wait-to-implement
 #     human_owned:
 #       label: ready-for-human
+# Reviewed, versioned GitHub specification stage (A2).
+# spec:
+#   enabled: false
+#   intake_label: ready-to-spec
+#   prompts:
+#     draft: prompts/spec-draft.md
+#     review: prompts/spec-review.md
+#     revise: prompts/spec-revise.md
+#   # model: provider/model-name         # Pi only
+#   # review_model: provider/model-name  # defaults to resolved draft model
+#   turn_timeout_ms: 1800000
+#   max_intake_pages: 100
+#   max_review_cycles: 3
+#   max_attempts: 3
+#   max_revision_requests: 3
+#   labels:
+#     approved: spec-approved
+#     revise: spec-revise
+#   approval_route:
+#     label: ready-for-agent
+#     state: Todo
 # notifications:
 #   slack:
 #     webhook_url: $SLACK_WEBHOOK_URL

@@ -122,6 +122,7 @@ fn test_service_config_defaults_match_spec() {
         supervisor: SupervisorConfig::default(),
         storage: symphony::triage::domain::StorageConfig::default(),
         triage: symphony::triage::domain::TriageConfig::default(),
+        spec: symphony::spec::domain::SpecConfig::default(),
     };
 
     // Polling §5.3.2

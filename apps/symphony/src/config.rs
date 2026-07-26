@@ -21,6 +21,7 @@ use crate::error::{Result, SymphonyError};
 use crate::github::auth::{github_token_missing_message, resolve_github_token};
 use crate::notifications;
 use crate::repo_url::repo_is_remote;
+use crate::spec::domain::{SpecApprovalRoute, SpecConfig, SpecDecisionLabels, SpecPromptsConfig};
 use crate::triage::domain::{
     RouteMapping, StorageConfig, TriageConfig, TriageMode, TriageRoutesConfig,
 };
@@ -397,6 +398,38 @@ struct RawTriageConfig {
     routes: Option<RawTriageRoutes>,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawSpecPrompts {
+    draft: Option<String>,
+    review: Option<String>,
+    revise: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawSpecLabels {
+    approved: Option<String>,
+    revise: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawSpecConfig {
+    enabled: Option<bool>,
+    intake_label: Option<String>,
+    prompts: Option<RawSpecPrompts>,
+    model: Option<String>,
+    review_model: Option<String>,
+    turn_timeout_ms: Option<u64>,
+    max_intake_pages: Option<u32>,
+    max_review_cycles: Option<u32>,
+    max_attempts: Option<u32>,
+    max_revision_requests: Option<u32>,
+    labels: Option<RawSpecLabels>,
+    approval_route: Option<RawRouteMapping>,
+}
+
 // ── Section extraction helper ─────────────────────────────────────────────────
 
 fn extract_section<T>(normalized: &Value, section: &str) -> Result<T>
@@ -653,6 +686,7 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
     let raw_supervisor: RawSupervisorConfig = extract_section(&normalized, "supervisor")?;
     let raw_storage: RawStorageConfig = extract_section(&normalized, "storage")?;
     let raw_triage: RawTriageConfig = extract_section(&normalized, "triage")?;
+    let raw_spec: RawSpecConfig = extract_section(&normalized, "spec")?;
 
     let defaults = ServiceConfig::default();
     let has_kata_agent_section = normalized.get("kata_agent").is_some();
@@ -1336,6 +1370,62 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
         routes: build_triage_routes(raw_triage.routes, defaults.triage.routes.clone()),
     };
 
+    // ── SpecConfig ────────────────────────────────────────────────────────
+    let spec_prompts_raw = raw_spec.prompts.unwrap_or_default();
+    let spec_labels_raw = raw_spec.labels.unwrap_or_default();
+    let spec_approval_route = build_route_mapping(
+        raw_spec.approval_route,
+        RouteMapping {
+            label: defaults.spec.approval_route.label.clone(),
+            state: defaults.spec.approval_route.state.clone(),
+        },
+    );
+    let config_string = |value: Option<String>, default: &str| {
+        value
+            .map(|value| resolve_env(&value))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| default.to_string())
+    };
+    let config_model = |value: Option<String>| {
+        value
+            .map(|value| resolve_env(&value))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+    let spec = SpecConfig {
+        enabled: raw_spec.enabled.unwrap_or(defaults.spec.enabled),
+        intake_label: config_string(raw_spec.intake_label, &defaults.spec.intake_label),
+        prompts: SpecPromptsConfig {
+            draft: config_string(spec_prompts_raw.draft, &defaults.spec.prompts.draft),
+            review: config_string(spec_prompts_raw.review, &defaults.spec.prompts.review),
+            revise: config_string(spec_prompts_raw.revise, &defaults.spec.prompts.revise),
+        },
+        model: config_model(raw_spec.model),
+        review_model: config_model(raw_spec.review_model),
+        turn_timeout_ms: raw_spec
+            .turn_timeout_ms
+            .unwrap_or(defaults.spec.turn_timeout_ms),
+        max_intake_pages: raw_spec
+            .max_intake_pages
+            .unwrap_or(defaults.spec.max_intake_pages),
+        max_review_cycles: raw_spec
+            .max_review_cycles
+            .unwrap_or(defaults.spec.max_review_cycles),
+        max_attempts: raw_spec.max_attempts.unwrap_or(defaults.spec.max_attempts),
+        max_revision_requests: raw_spec
+            .max_revision_requests
+            .unwrap_or(defaults.spec.max_revision_requests),
+        labels: SpecDecisionLabels {
+            approved: config_string(spec_labels_raw.approved, &defaults.spec.labels.approved),
+            revise: config_string(spec_labels_raw.revise, &defaults.spec.labels.revise),
+        },
+        approval_route: SpecApprovalRoute {
+            label: spec_approval_route.label,
+            state: spec_approval_route.state,
+        },
+    };
+
     Ok(ServiceConfig {
         tracker,
         polling,
@@ -1353,6 +1443,7 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
         supervisor,
         storage,
         triage,
+        spec,
     })
 }
 
@@ -1618,6 +1709,137 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
                 )));
             }
             seen.push(normalized);
+        }
+    }
+
+    if config.spec.enabled {
+        if tracker_kind != "github" {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "spec.enabled requires tracker.kind to be 'github' (GitHub Projects v2 only for A2)"
+                    .to_string(),
+            ));
+        }
+
+        for (field, value) in [
+            ("spec.intake_label", config.spec.intake_label.as_str()),
+            ("spec.prompts.draft", config.spec.prompts.draft.as_str()),
+            ("spec.prompts.review", config.spec.prompts.review.as_str()),
+            ("spec.prompts.revise", config.spec.prompts.revise.as_str()),
+            ("spec.labels.approved", config.spec.labels.approved.as_str()),
+            ("spec.labels.revise", config.spec.labels.revise.as_str()),
+            (
+                "spec.approval_route.label",
+                config.spec.approval_route.label.as_str(),
+            ),
+        ] {
+            if value.trim().is_empty() {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "{field} must be non-empty when spec is enabled"
+                )));
+            }
+        }
+
+        for (field, value) in [
+            ("spec.turn_timeout_ms", config.spec.turn_timeout_ms),
+            ("spec.max_intake_pages", config.spec.max_intake_pages as u64),
+            (
+                "spec.max_review_cycles",
+                config.spec.max_review_cycles as u64,
+            ),
+            ("spec.max_attempts", config.spec.max_attempts as u64),
+            (
+                "spec.max_revision_requests",
+                config.spec.max_revision_requests as u64,
+            ),
+        ] {
+            if value == 0 {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "{field} must be greater than 0"
+                )));
+            }
+        }
+
+        if config.agent_backend == AgentBackend::Codex
+            && (config.spec.model.is_some() || config.spec.review_model.is_some())
+        {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "spec.model and spec.review_model are not supported when agent.name is 'codex'"
+                    .to_string(),
+            ));
+        }
+
+        let spec_managed: [(&str, &str); 4] = [
+            ("spec.intake_label", config.spec.intake_label.as_str()),
+            ("spec.labels.approved", config.spec.labels.approved.as_str()),
+            ("spec.labels.revise", config.spec.labels.revise.as_str()),
+            (
+                "spec.approval_route.label",
+                config.spec.approval_route.label.as_str(),
+            ),
+        ];
+        for left in 0..spec_managed.len() {
+            for right in left + 1..spec_managed.len() {
+                if spec_managed[left]
+                    .1
+                    .trim()
+                    .eq_ignore_ascii_case(spec_managed[right].1.trim())
+                {
+                    return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                        "{} and {} must use distinct labels (duplicate '{}')",
+                        spec_managed[left].0,
+                        spec_managed[right].0,
+                        spec_managed[left].1.trim()
+                    )));
+                }
+            }
+        }
+
+        if config.triage.enabled {
+            if !config
+                .triage
+                .routes
+                .spec
+                .label
+                .eq_ignore_ascii_case(&config.spec.intake_label)
+            {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "triage.routes.spec.label ('{}') must equal spec.intake_label ('{}') when both stages are enabled",
+                    config.triage.routes.spec.label, config.spec.intake_label
+                )));
+            }
+            let triage_managed = [
+                ("triage.intake_label", config.triage.intake_label.as_str()),
+                (
+                    "triage.routes.implement.label",
+                    config.triage.routes.implement.label.as_str(),
+                ),
+                (
+                    "triage.routes.needs_information.label",
+                    config.triage.routes.needs_information.label.as_str(),
+                ),
+                (
+                    "triage.routes.park.label",
+                    config.triage.routes.park.label.as_str(),
+                ),
+                (
+                    "triage.routes.human_owned.label",
+                    config.triage.routes.human_owned.label.as_str(),
+                ),
+            ];
+            for (decision_field, decision_label) in [
+                ("spec.labels.approved", config.spec.labels.approved.as_str()),
+                ("spec.labels.revise", config.spec.labels.revise.as_str()),
+            ] {
+                if let Some((triage_field, _)) = triage_managed
+                    .iter()
+                    .find(|(_, label)| decision_label.trim().eq_ignore_ascii_case(label.trim()))
+                {
+                    return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                        "{decision_field} and {triage_field} must use distinct labels (duplicate '{}')",
+                        decision_label.trim()
+                    )));
+                }
+            }
         }
     }
 

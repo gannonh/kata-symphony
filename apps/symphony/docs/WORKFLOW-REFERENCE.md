@@ -552,6 +552,41 @@ server:
 #     human_owned:
 #       label: ready-for-human
 
+# ─── Specification stage (A2) ─────────────────────────────────────────────────
+# GitHub Projects v2 only. An open project issue carrying `intake_label` runs
+# isolated draft → adversarial review → revise turns. Every completed attempt
+# publishes one immutable, monotonically versioned artifact in one owned issue
+# comment. Apply `spec-revise` after adding feedback to produce the next version,
+# or `spec-approved` to pin the current version and apply the implementation route.
+# Decision labels, intake, and approval labels must be distinct. When triage is
+# enabled, `triage.routes.spec.label` must equal `spec.intake_label`.
+#
+# HTTP additions:
+#   GET /api/v1/factory-runs/{run_id} # includes spec versions and per-turn data
+#   GET /api/v1/factory-runs/{run_id}/artifacts/{artifact_id}
+#   GET /api/v1/factory-runs/metrics?stage=spec
+#
+# spec:
+#   enabled: false
+#   intake_label: ready-to-spec
+#   prompts:
+#     draft: prompts/spec-draft.md
+#     review: prompts/spec-review.md
+#     revise: prompts/spec-revise.md
+#   # model: provider/model-name
+#   # review_model: provider/model-name
+#   turn_timeout_ms: 1800000
+#   max_intake_pages: 100
+#   max_review_cycles: 3
+#   max_attempts: 3
+#   max_revision_requests: 3
+#   labels:
+#     approved: spec-approved
+#     revise: spec-revise
+#   approval_route:
+#     label: ready-for-agent
+#     state: Todo
+
 # ─── Prompts (per-state prompt injection) ─────────────────────────────────────
 # Optional. When configured, the orchestrator selects a prompt template based on
 # the issue's tracker state at dispatch time instead of using the markdown body

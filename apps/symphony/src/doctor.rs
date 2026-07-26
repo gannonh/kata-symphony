@@ -1268,10 +1268,61 @@ pub fn check_triage(config: &ServiceConfig, workflow_path: &Path) -> Vec<DoctorC
     results
 }
 
+pub fn check_spec(config: &ServiceConfig, workflow_path: &Path) -> Vec<DoctorCheckResult> {
+    if !config.spec.enabled {
+        return vec![DoctorCheckResult::skipped(
+            "Spec",
+            "spec.enabled is false — spec checks skipped",
+        )];
+    }
+    let workflow_dir = workflow_path.parent().unwrap_or(Path::new("."));
+    let mut results = Vec::new();
+    for (kind, configured) in [
+        ("Draft", config.spec.prompts.draft.as_str()),
+        ("Review", config.spec.prompts.review.as_str()),
+        ("Revise", config.spec.prompts.revise.as_str()),
+    ] {
+        let path = resolve_prompt_path(workflow_dir, configured);
+        if path.is_file() {
+            results.push(DoctorCheckResult::pass(
+                format!("Spec {kind} Prompt"),
+                format!("Resolved {}", path.display()),
+            ));
+        } else {
+            results.push(DoctorCheckResult::error(
+                format!("Spec {kind} Prompt"),
+                format!("Missing spec prompt {}", path.display()),
+            ));
+        }
+    }
+    if config.triage.enabled
+        && !config
+            .triage
+            .routes
+            .spec
+            .label
+            .eq_ignore_ascii_case(&config.spec.intake_label)
+    {
+        results.push(DoctorCheckResult::error(
+            "Spec Route Consistency",
+            format!(
+                "triage.routes.spec.label '{}' does not match spec.intake_label '{}'",
+                config.triage.routes.spec.label, config.spec.intake_label
+            ),
+        ));
+    } else {
+        results.push(DoctorCheckResult::pass(
+            "Spec Route Consistency",
+            "Spec intake composes with the triage spec route",
+        ));
+    }
+    results
+}
+
 pub async fn check_triage_github(config: &ServiceConfig) -> Vec<DoctorCheckResult> {
     let mut results = Vec::new();
 
-    if !config.triage.enabled {
+    if !config.triage.enabled && !config.spec.enabled {
         return results;
     }
 
@@ -1344,8 +1395,14 @@ pub async fn check_triage_github(config: &ServiceConfig) -> Vec<DoctorCheckResul
     );
 
     let expected_labels: Vec<String> = {
-        let mut labels = vec![config.triage.intake_label.trim().to_string()];
-        labels.extend(config.triage.routes.managed_labels());
+        let mut labels = Vec::new();
+        if config.triage.enabled {
+            labels.push(config.triage.intake_label.trim().to_string());
+            labels.extend(config.triage.routes.managed_labels());
+        }
+        if config.spec.enabled {
+            labels.extend(config.spec.managed_labels());
+        }
         labels
             .into_iter()
             .filter(|label| !label.trim().is_empty())
@@ -1387,19 +1444,26 @@ pub async fn check_triage_github(config: &ServiceConfig) -> Vec<DoctorCheckResul
         )),
     }
 
-    let configured_states: Vec<String> = [
-        config.triage.routes.implement.state.as_deref(),
-        config.triage.routes.spec.state.as_deref(),
-        config.triage.routes.needs_information.state.as_deref(),
-        config.triage.routes.park.state.as_deref(),
-        config.triage.routes.human_owned.state.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(str::trim)
-    .filter(|value| !value.is_empty())
-    .map(str::to_string)
-    .collect();
+    let mut state_candidates: Vec<Option<&str>> = Vec::new();
+    if config.triage.enabled {
+        state_candidates.extend([
+            config.triage.routes.implement.state.as_deref(),
+            config.triage.routes.spec.state.as_deref(),
+            config.triage.routes.needs_information.state.as_deref(),
+            config.triage.routes.park.state.as_deref(),
+            config.triage.routes.human_owned.state.as_deref(),
+        ]);
+    }
+    if config.spec.enabled {
+        state_candidates.push(config.spec.approval_route.state.as_deref());
+    }
+    let configured_states: Vec<String> = state_candidates
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect();
 
     if configured_states.is_empty() {
         results.push(DoctorCheckResult::skipped(
@@ -1441,10 +1505,22 @@ pub async fn check_triage_github(config: &ServiceConfig) -> Vec<DoctorCheckResul
                 ));
             } else {
                 for state in missing {
+                    let source = if config.spec.enabled
+                        && config
+                            .spec
+                            .approval_route
+                            .state
+                            .as_deref()
+                            .is_some_and(|configured| configured.trim() == state)
+                    {
+                        "triage.routes.*.state or spec.approval_route.state"
+                    } else {
+                        "triage.routes.*.state"
+                    };
                     results.push(DoctorCheckResult::error(
                         "Triage Project States",
                         format!(
-                            "Projects v2 Status option '{state}' is missing — add it to the project or update triage.routes.*.state"
+                            "Projects v2 Status option '{state}' is missing — add it to the project or update {source}"
                         ),
                     ));
                 }

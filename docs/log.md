@@ -1,5 +1,9 @@
 # Docs Update Log
 
+## 2026-07-26
+* **A2 completed**: Live GitHub UAT accepted for the durable GitHub spec stage ([verify report](/specs/2026-07-26-a2-uat-verify-report.md)). Nine product defects and two measure gaps found during UAT were fixed (`4fda65a1`, `17999528`). Roadmap, [A2 design](/specs/2026-07-18-a2-spec-stage-design.md), and [factory PRD](/specs/symphony-software-factory-platform-prd.md) mark A2 complete under the documented tracker-only narrowings.
+* **A2 implementation**: Added the durable GitHub spec stage with isolated draft/review/revise turns, immutable versioned artifacts, tracker revision and approval decisions, pinned implement handoff, HTTP/metrics/events, doctor checks, starter prompts, and [ADR-0003](/adrs/0003-a2-spec-stage-artifacts-and-gates.md).
+
 ## 2026-07-25
 * **A1 PR3 review threads resolved and CI passed**: [PR #599](https://github.com/gannonh/kata-symphony/pull/599) now isolates Codex process groups, retains unresolved orphan records, authorizes recursive cleanup against `workspace.root` and stage identity, and measures only latest publications using randomized bounded correction batches. All review threads and required CI checks pass; the [re-verify report](/specs/2026-07-25-a1-pr3-reverify-report.md) remains Incomplete pending credential rotation, UAT cleanup PR #18, and live verification.
 * **A1 PR3 remediation automated gates passed; live re-verify blocked**: Stable PID/group/start-token recovery now permits launcher `exec`, UAT evidence records sanitized coordinates, cleanup validates all targets before provider work, and ten repeated library suites plus full validation pass. Added [ADR-0002](/adrs/0002-triage-process-recovery-identity.md) and an [incomplete re-verify report](/specs/2026-07-25-a1-pr3-reverify-report.md). Live UAT awaits provider credential rotation and merge of `gannonh/uat-symphony` cleanup PR #18.

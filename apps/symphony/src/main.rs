@@ -822,6 +822,7 @@ fn run_doctor(workflow_path: &Path) -> Result<i32, String> {
                     results.extend(doctor::check_backend(&service_config));
                     results.extend(doctor::check_workspace(&service_config.workspace));
                     results.extend(doctor::check_triage(&service_config, workflow_path));
+                    results.extend(doctor::check_spec(&service_config, workflow_path));
                     let triage_github = tokio::task::block_in_place(|| {
                         runtime.block_on(doctor::check_triage_github(&service_config))
                     });
@@ -863,6 +864,7 @@ fn run_doctor(workflow_path: &Path) -> Result<i32, String> {
                     results.extend(doctor::check_backend(&service_config));
                     results.extend(doctor::check_workspace(&service_config.workspace));
                     results.extend(doctor::check_triage(&service_config, workflow_path));
+                    results.extend(doctor::check_spec(&service_config, workflow_path));
 
                     let adapter =
                         LinearAdapter::new(LinearClient::new(service_config.tracker.clone()));

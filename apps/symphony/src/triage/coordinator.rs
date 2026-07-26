@@ -812,6 +812,7 @@ where
                 return Ok(IssuePollOutcome::Skipped);
             }
             let attempts = self.store.list_stage_attempts_for_revision(
+                crate::triage::domain::TRIAGE_STAGE_NAME,
                 &run.run_id,
                 &issue_rev,
                 configuration_revision,
@@ -934,6 +935,7 @@ where
                 self.store
                     .fail_attempt(&stage.stage_run_id, error.clone())?;
                 let attempts = self.store.list_stage_attempts_for_revision(
+                    crate::triage::domain::TRIAGE_STAGE_NAME,
                     &stage.run_id,
                     &issue_rev,
                     configuration_revision,
