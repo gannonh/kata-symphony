@@ -3,7 +3,10 @@ use crate::spec::domain::{ReviewFinding, SpecArtifact, SPEC_COMMENT_MARKER_PREFI
 #[derive(Debug, Clone)]
 pub enum SpecCommentState<'a> {
     Preview,
-    AwaitingDecision,
+    AwaitingDecision {
+        approved_label: &'a str,
+        revise_label: &'a str,
+    },
     Diagnostic(&'a str),
     ApprovalPending,
     Approved {
@@ -69,9 +72,12 @@ pub fn render_spec_comment(
         SpecCommentState::Preview => out.push_str(
             "**Preview:** Symphony does not act on decision labels yet. Review this specification and leave feedback.\n",
         ),
-        SpecCommentState::AwaitingDecision => out.push_str(
-            "Apply `spec-approved` to approve, or add a feedback comment and apply `spec-revise` to request changes.\n",
-        ),
+        SpecCommentState::AwaitingDecision {
+            approved_label,
+            revise_label,
+        } => out.push_str(&format!(
+            "Apply `{approved_label}` to approve, or add a feedback comment and apply `{revise_label}` to request changes.\n",
+        )),
         SpecCommentState::Diagnostic(message) => {
             out.push_str("**Action required:** ");
             out.push_str(message.trim());
@@ -127,7 +133,16 @@ mod tests {
 
     #[test]
     fn renders_awaiting_decision_and_approval_states() {
-        assert!(render(SpecCommentState::AwaitingDecision).contains("`spec-approved`"));
+        assert!(render(SpecCommentState::AwaitingDecision {
+            approved_label: "custom-approved",
+            revise_label: "custom-revise",
+        })
+        .contains("`custom-approved`"));
+        assert!(render(SpecCommentState::AwaitingDecision {
+            approved_label: "custom-approved",
+            revise_label: "custom-revise",
+        })
+        .contains("`custom-revise`"));
         assert!(render(SpecCommentState::ApprovalPending).contains("Approval pending"));
         assert!(render(SpecCommentState::Diagnostic("Add feedback."))
             .contains("**Action required:** Add feedback."));
@@ -166,7 +181,10 @@ mod tests {
                 summary: "Not observable".to_string(),
                 recommendation: "Name the signal".to_string(),
             }],
-            SpecCommentState::AwaitingDecision,
+            SpecCommentState::AwaitingDecision {
+                approved_label: "spec-approved",
+                revise_label: "spec-revise",
+            },
         );
         assert!(body.contains("_None._"));
         assert!(body.contains("Unresolved blocking review findings"));

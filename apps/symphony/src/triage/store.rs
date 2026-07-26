@@ -225,6 +225,7 @@ pub trait FactoryRunStore {
     fn list_verified_comment_identities(&self, run_id: &str) -> Result<Vec<StoredCommentIdentity>>;
     fn list_stage_attempts_for_revision(
         &self,
+        stage: &str,
         run_id: &str,
         issue_revision: &str,
         configuration_revision: &str,
@@ -960,6 +961,7 @@ impl FactoryRunStore for SqliteFactoryStore {
 
     fn list_stage_attempts_for_revision(
         &self,
+        stage: &str,
         run_id: &str,
         issue_revision: &str,
         configuration_revision: &str,
@@ -981,12 +983,7 @@ impl FactoryRunStore for SqliteFactoryStore {
             .map_err(storage_error)?;
         let rows = stmt
             .query_map(
-                params![
-                    run_id,
-                    issue_revision,
-                    configuration_revision,
-                    TRIAGE_STAGE_NAME
-                ],
+                params![run_id, issue_revision, configuration_revision, stage],
                 stage_run_from_row,
             )
             .map_err(storage_error)?;
@@ -1732,6 +1729,8 @@ impl SqliteFactoryStore {
              VALUES (?1, 'awaiting_decision', ?2)
              ON CONFLICT(run_id) DO UPDATE SET
                 pending_approval_version = NULL,
+                approved_version = NULL,
+                approved_artifact_id = NULL,
                 decision = 'awaiting_decision', updated_at = excluded.updated_at",
             params![stage.run_id, now_s],
         )
@@ -1835,11 +1834,19 @@ impl SqliteFactoryStore {
                 "approved artifact does not belong to factory run".to_string(),
             ));
         }
-        self.conn.execute(
-            "UPDATE spec_run_state SET approved_version = ?1,
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE spec_run_state SET approved_version = ?1,
                 approved_artifact_id = ?2, decision = 'pending_approval', updated_at = ?3 WHERE run_id = ?4",
-            params![artifact.version, artifact_id, ts(Self::now()), run_id],
-        ).map_err(storage_error)?;
+                params![artifact.version, artifact_id, ts(Self::now()), run_id],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "spec state for run {run_id} not found"
+            )));
+        }
         Ok(())
     }
 
@@ -2082,6 +2089,47 @@ impl SqliteFactoryStore {
         Ok(())
     }
 
+    /// Persist a spec publication failure (or intermediate status) and bump
+    /// `retry_count` when an error is recorded, mirroring `update_publication_step`.
+    pub fn update_spec_publication_step(
+        &mut self,
+        intent_id: &str,
+        completed_step: &str,
+        status: PublicationStatus,
+        error: Option<FactoryError>,
+    ) -> Result<()> {
+        let intent = self
+            .get_spec_publication_intent(intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "spec publication intent {intent_id} not found"
+                ))
+            })?;
+        let mut steps = intent.completed_steps;
+        if !completed_step.trim().is_empty()
+            && !steps.iter().any(|step| step == completed_step.trim())
+        {
+            steps.push(completed_step.trim().to_string());
+        }
+        self.conn
+            .execute(
+                "UPDATE spec_publication_intents
+                 SET completed_steps_json = ?1, status = ?2, last_error_json = ?3,
+                     retry_count = retry_count + CASE WHEN ?3 IS NULL THEN 0 ELSE 1 END,
+                     updated_at = ?4
+                 WHERE intent_id = ?5",
+                params![
+                    bounded_json(&steps)?,
+                    status.as_str(),
+                    optional_json(&error)?,
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
     pub fn spec_metrics(&self) -> Result<crate::spec::domain::SpecMetricsAggregate> {
         use crate::spec::domain::{SpecMetricsAggregate, SpecReviewCycleMetrics};
         use crate::triage::domain::{TriageMetricsDuration, TriageMetricsTokenTotals};
@@ -2240,7 +2288,10 @@ impl SqliteFactoryStore {
                 "SELECT preview.updated_at, approval.created_at
              FROM spec_publication_intents approval
              JOIN spec_publication_intents preview
-               ON preview.run_id = approval.run_id AND preview.artifact_id = approval.artifact_id
+               ON preview.run_id = approval.run_id
+              AND preview.artifact_id = approval.artifact_id
+              AND preview.kind = 'preview'
+              AND preview.intent_id != approval.intent_id
              WHERE approval.kind = 'approval'",
             )
             .map_err(storage_error)?;
@@ -2834,10 +2885,19 @@ mod tests {
         assert_eq!(found.intent_id, created.intent_id);
 
         // A preview intent on the same run must not be mistaken for the diagnostic.
-        assert!(store
-            .find_spec_publication_by_kind(&run.run_id, SpecPublicationKind::Approval)
+        store
+            .create_spec_publication_intent(
+                &run.run_id,
+                None,
+                SpecPublicationKind::Preview,
+                &serde_json::json!({"issue_number": 123}),
+            )
+            .unwrap();
+        let found_after_preview = store
+            .find_spec_publication_by_kind(&run.run_id, SpecPublicationKind::Diagnostic)
             .unwrap()
-            .is_none());
+            .expect("diagnostic lookup must ignore a sibling preview intent");
+        assert_eq!(found_after_preview.intent_id, created.intent_id);
     }
 
     /// The `spec-revise` feedback cutoff is the last time the spec was published.
@@ -3009,10 +3069,15 @@ mod tests {
         assert_eq!(metrics.converged_attempts, 1);
         assert!((metrics.convergence_rate - 0.5).abs() < f64::EPSILON);
         assert_eq!(metrics.revision_requests, 1);
-        assert!(
-            metrics.approval_latency.average_ms.is_some(),
-            "an approval intent joined to its preview must produce a latency"
-        );
+        let average_ms = metrics
+            .approval_latency
+            .average_ms
+            .expect("an approval intent joined to its preview must produce a latency");
+        // Preview and approval are created back-to-back in this test, so latency is
+        // near zero but must come from the preview→approval pair only (not a
+        // self-join of the approval row).
+        assert!(average_ms >= 0.0);
+        assert!(average_ms < 60_000.0);
         let tokens = metrics
             .base
             .tokens_by_harness_model

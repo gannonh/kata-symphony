@@ -155,6 +155,18 @@ impl SharedFactoryStore {
         self.with_store_mut(|store| store.complete_spec_publication(intent_id, step))
     }
 
+    pub fn update_spec_publication_step(
+        &self,
+        intent_id: &str,
+        completed_step: &str,
+        status: crate::triage::domain::PublicationStatus,
+        error: Option<crate::triage::domain::FactoryError>,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.update_spec_publication_step(intent_id, completed_step, status, error)
+        })
+    }
+
     pub fn update_spec_diagnostic_message(
         &self,
         intent_id: &str,
@@ -342,12 +354,18 @@ impl FactoryRunStore for SharedFactoryStore {
 
     fn list_stage_attempts_for_revision(
         &self,
+        stage: &str,
         run_id: &str,
         issue_revision: &str,
         configuration_revision: &str,
     ) -> Result<Vec<StageRunRecord>> {
         self.with_store(|store| {
-            store.list_stage_attempts_for_revision(run_id, issue_revision, configuration_revision)
+            store.list_stage_attempts_for_revision(
+                stage,
+                run_id,
+                issue_revision,
+                configuration_revision,
+            )
         })
     }
 
@@ -609,7 +627,7 @@ impl TriageRuntime {
 
         if !matches!(config.tracker.kind.as_deref(), Some("github")) {
             return Err(SymphonyError::TriageError(
-                "triage requires tracker.kind=github".to_string(),
+                "factory stages require tracker.kind=github".to_string(),
             ));
         }
 
@@ -621,7 +639,7 @@ impl TriageRuntime {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 SymphonyError::InvalidWorkflowConfig(
-                    "tracker.repo_owner is required for triage".to_string(),
+                    "tracker.repo_owner is required for factory stages".to_string(),
                 )
             })?;
         let repo = config
@@ -632,12 +650,12 @@ impl TriageRuntime {
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 SymphonyError::InvalidWorkflowConfig(
-                    "tracker.repo_name is required for triage".to_string(),
+                    "tracker.repo_name is required for factory stages".to_string(),
                 )
             })?;
         let project_number = config.tracker.github_project_number.ok_or_else(|| {
             SymphonyError::InvalidWorkflowConfig(
-                "tracker.github_project_number is required for triage".to_string(),
+                "tracker.github_project_number is required for factory stages".to_string(),
             )
         })?;
 
@@ -649,11 +667,11 @@ impl TriageRuntime {
         let repository = format!("{owner}/{repo}");
         let storage_path = resolve_storage_path(&config.storage, &forge_host, owner, repo);
         tracing::info!(
-            event = "triage_storage_resolved",
+            event = "factory_storage_resolved",
             path = %storage_path_for_log(&storage_path),
-            mode = %config.triage.mode,
-            enabled = config.triage.enabled,
-            "resolved triage SQLite storage path"
+            triage_enabled = config.triage.enabled,
+            spec_enabled = config.spec.enabled,
+            "resolved factory SQLite storage path"
         );
 
         let store = SharedFactoryStore::open(&storage_path, config.storage.busy_timeout_ms)?;

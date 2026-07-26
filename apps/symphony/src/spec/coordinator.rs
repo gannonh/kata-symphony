@@ -18,7 +18,9 @@ use crate::spec::pipeline::{
     SpecPipelineRequest, SpecTurnExecutor, SpecTurnOutcome, SpecTurnOutput, SpecTurnRequest,
 };
 use crate::triage::coordinator::EventEmitter;
-use crate::triage::domain::{FactoryError, FactoryEventRecord, FactoryRunStatus};
+use crate::triage::domain::{
+    FactoryError, FactoryEventRecord, FactoryRunStatus, PublicationStatus,
+};
 use crate::triage::intake::{TriageIntakeIssue, TriageIntakePort};
 use crate::triage::publisher::{TriageCommentPort, TriageRoutingPort};
 use crate::triage::runner::{
@@ -29,6 +31,10 @@ use crate::triage::store::{
     ClaimAttemptRequest, FactoryRunStore, RecordAttemptProcessRequest, StoreSpecArtifactRequest,
     StoreSpecTurnRequest, UpsertFactoryRunRequest,
 };
+
+/// After this many consecutive reconcile failures, a spec publication intent is
+/// marked blocked so one poison intent cannot stall the whole stage forever.
+const SPEC_PUBLICATION_MAX_RETRIES: u32 = 5;
 
 #[derive(Debug, Clone)]
 pub struct SpecCoordinatorConfig {
@@ -93,6 +99,10 @@ where
             spec_enabled: service.spec.enabled,
             ..Default::default()
         };
+        // Spec-only deployments never construct TriageCoordinator, which is otherwise
+        // the sole caller of interrupt_stale_attempts. Without this, a restart mid-turn
+        // leaves the stage row `running` and the uniqueness index blocks every retry.
+        self.store.interrupt_stale_attempts()?;
         self.reconcile_pending_publications(service).await?;
         if !service.spec.enabled {
             return Ok(summary);
@@ -199,6 +209,7 @@ where
                                 run.run_id.as_str(),
                                 latest,
                                 "Both `spec-approved` and `spec-revise` are present. Remove one label.",
+                                service.spec.max_intake_pages,
                             )
                             .await?;
                             summary.skipped += 1;
@@ -213,18 +224,31 @@ where
                             let prior_attempts = self
                                 .store
                                 .list_stage_attempts_for_revision(
+                                    SPEC_STAGE_NAME,
                                     &run.run_id,
                                     &issue_revision,
                                     &configuration_revision,
                                 )?
-                                .iter()
-                                .filter(|attempt| attempt.stage == SPEC_STAGE_NAME)
-                                .count();
+                                .len();
                             if prior_attempts == 0 {
-                                self.store.increment_spec_revision_requests(
+                                if let Err(error) = self.store.increment_spec_revision_requests(
                                     &run.run_id,
                                     service.spec.max_revision_requests,
-                                )?;
+                                ) {
+                                    self.publish_diagnostic(
+                                        &issue,
+                                        &run.run_id,
+                                        latest,
+                                        &format!(
+                                            "Revision request budget exhausted ({error}). Remove `{revise}` or raise `spec.max_revision_requests`.",
+                                            revise = service.spec.labels.revise
+                                        ),
+                                        service.spec.max_intake_pages,
+                                    )
+                                    .await?;
+                                    summary.skipped += 1;
+                                    continue;
+                                }
                             }
                             seed = Some(SeededRevision {
                                 prior_version: latest.version,
@@ -248,6 +272,7 @@ where
                                 &run.run_id,
                                 latest,
                                 "Add a feedback comment, then leave `spec-revise` applied.",
+                                service.spec.max_intake_pages,
                             )
                             .await?;
                             summary.skipped += 1;
@@ -265,6 +290,7 @@ where
                                 &run.run_id,
                                 latest,
                                 "Approval is stale because the issue or spec configuration changed. Remove `spec-approved`, review a new version, and approve again.",
+                                service.spec.max_intake_pages,
                             )
                             .await?;
                             self.record_event(
@@ -280,6 +306,37 @@ where
                             if latest.issue_revision == issue_revision
                                 && latest.configuration_revision == configuration_revision =>
                         {
+                            // Recover when store_spec_artifact committed but the
+                            // subsequent preview-intent create/publish crashed.
+                            let preview = self.store.latest_spec_publication_of_kind(
+                                &run.run_id,
+                                SpecPublicationKind::Preview,
+                            )?;
+                            let preview_covers_latest = preview.as_ref().is_some_and(|intent| {
+                                intent.artifact_id.as_deref() == Some(latest.artifact_id.as_str())
+                            });
+                            if !preview_covers_latest {
+                                let stage = self
+                                    .store
+                                    .get_stage_run(&latest.stage_run_id)?
+                                    .ok_or_else(|| {
+                                        SymphonyError::StorageError(format!(
+                                            "spec stage run {} missing for orphaned artifact {}",
+                                            latest.stage_run_id, latest.artifact_id
+                                        ))
+                                    })?;
+                                self.publish_artifact(
+                                    &issue,
+                                    &stage,
+                                    latest,
+                                    &service.spec.labels.approved,
+                                    &service.spec.labels.revise,
+                                    service.spec.max_intake_pages,
+                                )
+                                .await?;
+                                summary.published += 1;
+                                continue;
+                            }
                             summary.skipped += 1;
                             continue;
                         }
@@ -315,162 +372,130 @@ where
 
     async fn reconcile_pending_publications(&self, service: &ServiceConfig) -> Result<()> {
         for intent in self.store.list_pending_spec_publications()? {
-            let issue_number = intent
-                .desired_effects
-                .get("issue_number")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| {
+            if let Err(error) = self.reconcile_one_publication(service, &intent).await {
+                let next_retries = intent.retry_count.saturating_add(1);
+                let status = if next_retries >= SPEC_PUBLICATION_MAX_RETRIES {
+                    PublicationStatus::Blocked
+                } else {
+                    PublicationStatus::Pending
+                };
+                let factory_error = FactoryError::new(
+                    "spec_publication_failed",
+                    "spec_coordinator",
+                    error.to_string(),
+                    status == PublicationStatus::Pending,
+                    None,
+                );
+                if let Err(persist_error) = self.store.update_spec_publication_step(
+                    &intent.intent_id,
+                    "",
+                    status,
+                    Some(factory_error),
+                ) {
+                    tracing::warn!(
+                        intent_id = %intent.intent_id,
+                        error = %persist_error,
+                        "failed to persist spec publication failure"
+                    );
+                }
+                tracing::warn!(
+                    intent_id = %intent.intent_id,
+                    error = %error,
+                    retry_count = next_retries,
+                    status = status.as_str(),
+                    "spec publication reconcile failed; continuing with remaining intents"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    async fn reconcile_one_publication(
+        &self,
+        service: &ServiceConfig,
+        intent: &SpecPublicationIntent,
+    ) -> Result<()> {
+        let issue_number = intent
+            .desired_effects
+            .get("issue_number")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "spec intent {} is missing issue_number",
+                    intent.intent_id
+                ))
+            })?;
+        let artifact = intent
+            .artifact_id
+            .as_deref()
+            .map(|id| self.store.get_spec_artifact(id))
+            .transpose()?
+            .flatten();
+        match intent.kind {
+            SpecPublicationKind::Preview => {
+                let artifact = artifact.ok_or_else(|| {
                     SymphonyError::StorageError(format!(
-                        "spec intent {} is missing issue_number",
+                        "spec preview intent {} has no artifact",
                         intent.intent_id
                     ))
                 })?;
-            let artifact = intent
-                .artifact_id
-                .as_deref()
-                .map(|id| self.store.get_spec_artifact(id))
-                .transpose()?
-                .flatten();
-            match intent.kind {
-                SpecPublicationKind::Preview => {
-                    let artifact = artifact.ok_or_else(|| {
-                        SymphonyError::StorageError(format!(
-                            "spec preview intent {} has no artifact",
-                            intent.intent_id
-                        ))
-                    })?;
-                    let stage = {
-                        let store = self.store.clone();
-                        store
-                            .get_stage_run(&artifact.stage_run_id)?
-                            .ok_or_else(|| {
-                                SymphonyError::StorageError("spec stage run is missing".to_string())
-                            })?
-                    };
-                    let body = render_spec_comment(
-                        &intent.intent_id,
-                        &intent.run_id,
-                        &artifact.stage_run_id,
-                        stage.attempt,
-                        artifact.version,
-                        &artifact.artifact,
-                        &artifact.unresolved_blocking_findings,
-                        SpecCommentState::AwaitingDecision,
-                    );
-                    self.upsert_owned_comment(
-                        issue_number,
-                        &intent,
-                        &body,
-                        service.spec.max_intake_pages,
-                    )
-                    .await?;
-                    if let Some(revise_label) = intent
-                        .desired_effects
-                        .get("revise_label")
-                        .and_then(serde_json::Value::as_str)
-                    {
-                        self.remove_label_if_present(issue_number, revise_label)
-                            .await?;
-                    }
-                    self.store
-                        .complete_spec_publication(&intent.intent_id, "spec_comment")?;
-                }
-                SpecPublicationKind::Diagnostic => {
-                    // Diagnostics with an artifact can be reconstructed exactly.
-                    if let Some(artifact) = artifact {
-                        let message = intent
-                            .desired_effects
-                            .get("message")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("Review the issue labels and feedback, then retry.");
-                        let body = render_spec_comment(
-                            &intent.intent_id,
-                            &intent.run_id,
-                            &artifact.stage_run_id,
-                            0,
-                            artifact.version,
-                            &artifact.artifact,
-                            &artifact.unresolved_blocking_findings,
-                            SpecCommentState::Diagnostic(message),
-                        );
-                        self.upsert_owned_comment(
-                            issue_number,
-                            &intent,
-                            &body,
-                            service.spec.max_intake_pages,
-                        )
-                        .await?;
-                        self.store
-                            .complete_spec_publication(&intent.intent_id, "diagnostic_comment")?;
-                    } else {
-                        let intake_label = intent
-                            .desired_effects
-                            .get("intake_label")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("ready-to-spec");
-                        let body = format!(
-                            "<!-- symphony:spec:{} -->\n## Symphony specification\n\nThis issue is not a member of the configured GitHub Project. Add it to the project and leave `{intake_label}` applied.",
-                            intent.intent_id
-                        );
-                        self.upsert_owned_comment(
-                            issue_number,
-                            &intent,
-                            &body,
-                            service.spec.max_intake_pages,
-                        )
-                        .await?;
-                        self.store
-                            .complete_spec_publication(&intent.intent_id, "diagnostic_comment")?;
-                    }
-                }
-                SpecPublicationKind::Approval => {
-                    let artifact = artifact.ok_or_else(|| {
-                        SymphonyError::StorageError(format!(
-                            "spec approval intent {} has no artifact",
-                            intent.intent_id
-                        ))
-                    })?;
-                    let intake_label = intent
-                        .desired_effects
-                        .get("intake_label")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("ready-to-spec");
-                    let route_label = intent
-                        .desired_effects
-                        .get("route_label")
-                        .and_then(serde_json::Value::as_str)
+                let stage = {
+                    let store = self.store.clone();
+                    store
+                        .get_stage_run(&artifact.stage_run_id)?
                         .ok_or_else(|| {
-                            SymphonyError::StorageError(
-                                "spec approval intent is missing route_label".to_string(),
-                            )
-                        })?;
-                    let approved_label = intent
-                        .desired_effects
-                        .get("approved_label")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("spec-approved");
-                    let revise_label = intent
-                        .desired_effects
-                        .get("revise_label")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("spec-revise");
-                    for label in [intake_label, approved_label, revise_label] {
-                        self.remove_label_if_present(issue_number, label).await?;
-                    }
-                    self.routing
-                        .add_issue_label(issue_number, route_label)
+                            SymphonyError::StorageError("spec stage run is missing".to_string())
+                        })?
+                };
+                let approved_label = intent
+                    .desired_effects
+                    .get("approved_label")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("spec-approved");
+                let revise_label = intent
+                    .desired_effects
+                    .get("revise_label")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("spec-revise");
+                let body = render_spec_comment(
+                    &intent.intent_id,
+                    &intent.run_id,
+                    &artifact.stage_run_id,
+                    stage.attempt,
+                    artifact.version,
+                    &artifact.artifact,
+                    &artifact.unresolved_blocking_findings,
+                    SpecCommentState::AwaitingDecision {
+                        approved_label,
+                        revise_label,
+                    },
+                );
+                self.upsert_owned_comment(
+                    issue_number,
+                    intent,
+                    &body,
+                    service.spec.max_intake_pages,
+                )
+                .await?;
+                if let Some(revise_label) = intent
+                    .desired_effects
+                    .get("revise_label")
+                    .and_then(serde_json::Value::as_str)
+                {
+                    self.remove_label_if_present(issue_number, revise_label)
                         .await?;
-                    let project_state = intent
+                }
+                self.store
+                    .complete_spec_publication(&intent.intent_id, "spec_comment")?;
+            }
+            SpecPublicationKind::Diagnostic => {
+                // Diagnostics with an artifact can be reconstructed exactly.
+                if let Some(artifact) = artifact {
+                    let message = intent
                         .desired_effects
-                        .get("project_state")
-                        .and_then(serde_json::Value::as_str);
-                    if let Some(state) = project_state {
-                        self.routing
-                            .set_issue_project_state(issue_number, state)
-                            .await?;
-                    }
-                    self.store
-                        .pin_spec_approval(&intent.run_id, &artifact.artifact_id)?;
+                        .get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("Review the issue labels and feedback, then retry.");
                     let body = render_spec_comment(
                         &intent.intent_id,
                         &intent.run_id,
@@ -479,39 +504,126 @@ where
                         artifact.version,
                         &artifact.artifact,
                         &artifact.unresolved_blocking_findings,
-                        SpecCommentState::Approved {
-                            route_label,
-                            project_state,
-                        },
+                        SpecCommentState::Diagnostic(message),
                     );
                     self.upsert_owned_comment(
                         issue_number,
-                        &intent,
+                        intent,
                         &body,
                         service.spec.max_intake_pages,
                     )
                     .await?;
-                    self.store.finalize_spec_approval(
-                        &intent.run_id,
-                        &intent.intent_id,
-                        "comment_final",
-                    )?;
-                    // A crash between the decision and the final step resumes here, so
-                    // the approval events must be emitted on this path too. Without
-                    // them a recovered approval is invisible to event consumers.
-                    self.record_event(
-                        Some(&intent.run_id),
-                        None,
-                        "spec_route_applied",
-                        serde_json::json!({"intent_id":intent.intent_id,"version":artifact.version,"status":"applied"}),
-                    )?;
-                    self.record_event(
-                        Some(&intent.run_id),
-                        None,
-                        "spec_approved",
-                        serde_json::json!({"intent_id":intent.intent_id,"artifact_id":artifact.artifact_id,"version":artifact.version,"status":"approved"}),
-                    )?;
+                    self.store
+                        .complete_spec_publication(&intent.intent_id, "diagnostic_comment")?;
+                } else {
+                    let intake_label = intent
+                        .desired_effects
+                        .get("intake_label")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("ready-to-spec");
+                    let body = format!(
+                        "<!-- symphony:spec:{} -->\n## Symphony specification\n\nThis issue is not a member of the configured GitHub Project. Add it to the project and leave `{intake_label}` applied.",
+                        intent.intent_id
+                    );
+                    self.upsert_owned_comment(
+                        issue_number,
+                        intent,
+                        &body,
+                        service.spec.max_intake_pages,
+                    )
+                    .await?;
+                    self.store
+                        .complete_spec_publication(&intent.intent_id, "diagnostic_comment")?;
                 }
+            }
+            SpecPublicationKind::Approval => {
+                let artifact = artifact.ok_or_else(|| {
+                    SymphonyError::StorageError(format!(
+                        "spec approval intent {} has no artifact",
+                        intent.intent_id
+                    ))
+                })?;
+                let intake_label = intent
+                    .desired_effects
+                    .get("intake_label")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("ready-to-spec");
+                let route_label = intent
+                    .desired_effects
+                    .get("route_label")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        SymphonyError::StorageError(
+                            "spec approval intent is missing route_label".to_string(),
+                        )
+                    })?;
+                let approved_label = intent
+                    .desired_effects
+                    .get("approved_label")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("spec-approved");
+                let revise_label = intent
+                    .desired_effects
+                    .get("revise_label")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("spec-revise");
+                for label in [intake_label, approved_label, revise_label] {
+                    self.remove_label_if_present(issue_number, label).await?;
+                }
+                self.routing
+                    .add_issue_label(issue_number, route_label)
+                    .await?;
+                let project_state = intent
+                    .desired_effects
+                    .get("project_state")
+                    .and_then(serde_json::Value::as_str);
+                if let Some(state) = project_state {
+                    self.routing
+                        .set_issue_project_state(issue_number, state)
+                        .await?;
+                }
+                self.store
+                    .pin_spec_approval(&intent.run_id, &artifact.artifact_id)?;
+                let body = render_spec_comment(
+                    &intent.intent_id,
+                    &intent.run_id,
+                    &artifact.stage_run_id,
+                    0,
+                    artifact.version,
+                    &artifact.artifact,
+                    &artifact.unresolved_blocking_findings,
+                    SpecCommentState::Approved {
+                        route_label,
+                        project_state,
+                    },
+                );
+                self.upsert_owned_comment(
+                    issue_number,
+                    intent,
+                    &body,
+                    service.spec.max_intake_pages,
+                )
+                .await?;
+                self.store.finalize_spec_approval(
+                    &intent.run_id,
+                    &intent.intent_id,
+                    "comment_final",
+                )?;
+                // A crash between the decision and the final step resumes here, so
+                // the approval events must be emitted on this path too. Without
+                // them a recovered approval is invisible to event consumers.
+                self.record_event(
+                    Some(&intent.run_id),
+                    None,
+                    "spec_route_applied",
+                    serde_json::json!({"intent_id":intent.intent_id,"version":artifact.version,"status":"applied"}),
+                )?;
+                self.record_event(
+                    Some(&intent.run_id),
+                    None,
+                    "spec_approved",
+                    serde_json::json!({"intent_id":intent.intent_id,"artifact_id":artifact.artifact_id,"version":artifact.version,"status":"approved"}),
+                )?;
             }
         }
         Ok(())
@@ -555,14 +667,12 @@ where
             &issue.issue_id,
         )? {
             let attempts = store.list_stage_attempts_for_revision(
+                SPEC_STAGE_NAME,
                 &run.run_id,
                 issue_revision,
                 configuration_revision,
             )?;
-            let spec_attempts = attempts
-                .iter()
-                .filter(|attempt| attempt.stage == SPEC_STAGE_NAME)
-                .count() as u32;
+            let spec_attempts = attempts.len() as u32;
             if spec_attempts >= service.spec.max_attempts {
                 return Err(SymphonyError::TriageError(format!(
                     "spec.max_attempts exhausted for {}",
@@ -739,8 +849,15 @@ where
             "spec_completed",
             serde_json::json!({"artifact_id":artifact.artifact_id,"version":artifact.version,"status":"completed"}),
         )?;
-        self.publish_artifact(issue, stage, &artifact, &service.spec.labels.revise)
-            .await
+        self.publish_artifact(
+            issue,
+            stage,
+            &artifact,
+            &service.spec.labels.approved,
+            &service.spec.labels.revise,
+            service.spec.max_intake_pages,
+        )
+        .await
     }
 
     async fn publish_artifact(
@@ -748,7 +865,9 @@ where
         issue: &TriageIntakeIssue,
         stage: &crate::triage::domain::StageRunRecord,
         artifact: &SpecArtifactRecord,
+        approved_label: &str,
         revise_label: &str,
+        max_pages: u32,
     ) -> Result<()> {
         let intent = self.store.create_spec_publication_intent(
             &stage.run_id,
@@ -757,6 +876,7 @@ where
             &serde_json::json!({
                 "issue_number":issue.issue_number,
                 "version":artifact.version,
+                "approved_label":approved_label,
                 "revise_label":revise_label,
             }),
         )?;
@@ -768,9 +888,12 @@ where
             artifact.version,
             &artifact.artifact,
             &artifact.unresolved_blocking_findings,
-            SpecCommentState::AwaitingDecision,
+            SpecCommentState::AwaitingDecision {
+                approved_label,
+                revise_label,
+            },
         );
-        self.upsert_owned_comment(issue.issue_number, &intent, &body, 100)
+        self.upsert_owned_comment(issue.issue_number, &intent, &body, max_pages)
             .await?;
         if has_label(&issue.labels, revise_label) {
             self.routing
@@ -905,6 +1028,7 @@ where
         run_id: &str,
         artifact: &SpecArtifactRecord,
         message: &str,
+        max_pages: u32,
     ) -> Result<()> {
         // Reuse the run's diagnostic intent so a human who leaves the triggering
         // condition in place does not accumulate one intent per poll.
@@ -944,7 +1068,7 @@ where
             &artifact.unresolved_blocking_findings,
             SpecCommentState::Diagnostic(message),
         );
-        self.upsert_owned_comment(issue.issue_number, &intent, &body, 100)
+        self.upsert_owned_comment(issue.issue_number, &intent, &body, max_pages)
             .await?;
         self.store
             .complete_spec_publication(&intent.intent_id, "diagnostic_comment")

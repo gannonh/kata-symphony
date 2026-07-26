@@ -257,6 +257,22 @@ pub async fn run_isolated_spec_turn(
         prompt,
         ..base_request
     };
+    let outcome = run_spec_turn_body(&request, &turn, &layout, started_at).await;
+    if outcome.is_err() {
+        // Reclaim the disposable attempt tree (including credential-seeded HOME)
+        // on every post-setup failure path. Success leaves the tree for the
+        // durable executor's cleanup.
+        let _ = fs::remove_dir_all(&layout.attempt_root);
+    }
+    outcome
+}
+
+async fn run_spec_turn_body(
+    request: &TriageRunnerRequest,
+    turn: &SpecTurnRequest,
+    layout: &AttemptLayout,
+    started_at: chrono::DateTime<chrono::Utc>,
+) -> Result<SpecTurnOutcome> {
     let baseline = integrity::capture_baseline(&layout.workspace_path).map_err(|error| {
         SymphonyError::TriageError(format!(
             "spec {} baseline failed: {error}",
@@ -264,12 +280,11 @@ pub async fn run_isolated_spec_turn(
         ))
     })?;
     let usage = match request.harness {
-        TriageHarness::Pi => run_pi_turn(&request, &layout).await,
-        TriageHarness::Codex => run_codex_turn(&request, &layout).await,
+        TriageHarness::Pi => run_pi_turn(request, layout).await,
+        TriageHarness::Codex => run_codex_turn(request, layout).await,
     }
     .map_err(|outcome| {
         let message = runner_outcome_message(&outcome);
-        let _ = fs::remove_dir_all(&layout.attempt_root);
         SymphonyError::TriageError(format!(
             "spec {} turn execution failed: {message}",
             turn.kind.as_str()
@@ -1424,6 +1439,7 @@ mod tests {
         write_script(
             &script,
             r##"#!/bin/sh
+set -eu
 input="$(dirname "$(dirname "$SYMPHONY_STAGE_OUTPUT")")/stage-input"
 if printf '%s' "$*" | grep -q 'review prompt'; then
   test -f "$input/issue.json" && test -f "$input/current-spec.json"

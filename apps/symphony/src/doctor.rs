@@ -1444,20 +1444,26 @@ pub async fn check_triage_github(config: &ServiceConfig) -> Vec<DoctorCheckResul
         )),
     }
 
-    let configured_states: Vec<String> = [
-        config.triage.routes.implement.state.as_deref(),
-        config.triage.routes.spec.state.as_deref(),
-        config.triage.routes.needs_information.state.as_deref(),
-        config.triage.routes.park.state.as_deref(),
-        config.triage.routes.human_owned.state.as_deref(),
-        config.spec.approval_route.state.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(str::trim)
-    .filter(|value| !value.is_empty())
-    .map(str::to_string)
-    .collect();
+    let mut state_candidates: Vec<Option<&str>> = Vec::new();
+    if config.triage.enabled {
+        state_candidates.extend([
+            config.triage.routes.implement.state.as_deref(),
+            config.triage.routes.spec.state.as_deref(),
+            config.triage.routes.needs_information.state.as_deref(),
+            config.triage.routes.park.state.as_deref(),
+            config.triage.routes.human_owned.state.as_deref(),
+        ]);
+    }
+    if config.spec.enabled {
+        state_candidates.push(config.spec.approval_route.state.as_deref());
+    }
+    let configured_states: Vec<String> = state_candidates
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect();
 
     if configured_states.is_empty() {
         results.push(DoctorCheckResult::skipped(
@@ -1499,10 +1505,22 @@ pub async fn check_triage_github(config: &ServiceConfig) -> Vec<DoctorCheckResul
                 ));
             } else {
                 for state in missing {
+                    let source = if config.spec.enabled
+                        && config
+                            .spec
+                            .approval_route
+                            .state
+                            .as_deref()
+                            .is_some_and(|configured| configured.trim() == state)
+                    {
+                        "triage.routes.*.state or spec.approval_route.state"
+                    } else {
+                        "triage.routes.*.state"
+                    };
                     results.push(DoctorCheckResult::error(
                         "Triage Project States",
                         format!(
-                            "Projects v2 Status option '{state}' is missing — add it to the project or update triage.routes.*.state"
+                            "Projects v2 Status option '{state}' is missing — add it to the project or update {source}"
                         ),
                     ));
                 }

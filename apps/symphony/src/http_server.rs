@@ -705,28 +705,37 @@ pub fn attach_spec_http_response(
                 .collect();
         }
     }
-    let attempt_by_stage: std::collections::HashMap<&str, u32> = response
+    // Keyed by stage_run_id (not stage name); artifact stage runs in this
+    // response come from the same factory run, so a missing lookup yields 0.
+    let attempt_by_stage_run: std::collections::HashMap<&str, u32> = response
         .attempts
         .iter()
         .map(|attempt| (attempt.stage_run_id.as_str(), attempt.attempt))
         .collect();
     let current_version = artifacts.iter().map(|artifact| artifact.version).max();
+    let publication_artifact_id = publication.and_then(|intent| intent.artifact_id.as_deref());
+    let approved_version = state.and_then(|state| state.approved_version);
     response.spec = Some(FactoryRunSpecHttp {
         current_version,
         pending_approval_version: state.and_then(|state| state.pending_approval_version),
-        approved_version: state.and_then(|state| state.approved_version),
+        approved_version,
         versions: artifacts
             .iter()
             .map(|artifact| FactoryRunSpecVersionHttp {
                 artifact_id: artifact.artifact_id.clone(),
                 version: artifact.version,
-                attempt: attempt_by_stage
+                attempt: attempt_by_stage_run
                     .get(artifact.stage_run_id.as_str())
                     .copied()
                     .unwrap_or_default(),
                 review_cycles: artifact.review_cycles,
                 unresolved_blocking_findings: artifact.unresolved_blocking_findings.len(),
-                published: true,
+                // Superseded versions were published (a newer version exists). The
+                // current version is published when a publication intent or approval
+                // pin references it.
+                published: current_version.is_some_and(|version| artifact.version < version)
+                    || approved_version == Some(artifact.version)
+                    || publication_artifact_id == Some(artifact.artifact_id.as_str()),
                 received_at: artifact.received_at,
             })
             .collect(),
