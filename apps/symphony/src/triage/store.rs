@@ -1927,6 +1927,27 @@ impl SqliteFactoryStore {
             })
     }
 
+    /// Re-open an applied diagnostic intent with a new message so the owned comment
+    /// is updated in place rather than accumulating a new intent per poll.
+    pub fn update_spec_diagnostic_message(
+        &mut self,
+        intent_id: &str,
+        desired_effects: &serde_json::Value,
+    ) -> Result<SpecPublicationIntent> {
+        self.conn
+            .execute(
+                "UPDATE spec_publication_intents
+                 SET desired_effects_json = ?1, status = 'pending', completed_steps_json = '[]',
+                     updated_at = ?2
+                 WHERE intent_id = ?3",
+                params![bounded_json(desired_effects)?, ts(Self::now()), intent_id],
+            )
+            .map_err(storage_error)?;
+        self.get_spec_publication_intent(intent_id)?.ok_or_else(|| {
+            SymphonyError::StorageError(format!("spec publication intent {intent_id} not found"))
+        })
+    }
+
     pub fn get_spec_publication_intent(
         &self,
         intent_id: &str,
@@ -1953,6 +1974,52 @@ impl SqliteFactoryStore {
                 created_at, updated_at
              FROM spec_publication_intents WHERE run_id = ?1 ORDER BY created_at DESC LIMIT 1",
                 params![run_id],
+                spec_publication_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    /// Return the run's most recent spec intent of `kind`. Used for the feedback
+    /// cutoff, which must key on the last spec publication rather than any later
+    /// diagnostic republish of the same comment.
+    pub fn latest_spec_publication_of_kind(
+        &self,
+        run_id: &str,
+        kind: SpecPublicationKind,
+    ) -> Result<Option<SpecPublicationIntent>> {
+        self.conn
+            .query_row(
+                "SELECT intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+                retry_count, last_error_json, comment_id, publisher_login,
+                desired_effects_json, observed_baseline_json, expected_projection_json,
+                created_at, updated_at
+             FROM spec_publication_intents WHERE run_id = ?1 AND kind = ?2
+             ORDER BY created_at DESC LIMIT 1",
+                params![run_id, kind.as_str()],
+                spec_publication_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    /// Return the run's existing spec intent of `kind`, oldest first. Diagnostic
+    /// intents are reused across polls so a persistently ineligible issue does not
+    /// accumulate one intent per poll.
+    pub fn find_spec_publication_by_kind(
+        &self,
+        run_id: &str,
+        kind: SpecPublicationKind,
+    ) -> Result<Option<SpecPublicationIntent>> {
+        self.conn
+            .query_row(
+                "SELECT intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+                retry_count, last_error_json, comment_id, publisher_login,
+                desired_effects_json, observed_baseline_json, expected_projection_json,
+                created_at, updated_at
+             FROM spec_publication_intents WHERE run_id = ?1 AND kind = ?2
+             ORDER BY created_at ASC LIMIT 1",
+                params![run_id, kind.as_str()],
                 spec_publication_from_row,
             )
             .optional()
@@ -2587,6 +2654,152 @@ mod tests {
         assert!(store
             .claim_attempt(claim_request("issue-rev", "config-rev"))
             .is_err());
+    }
+
+    /// A spec attempt that dies before completing must be terminated, otherwise the
+    /// stage-scoped nonterminal index permanently blocks retries for that revision
+    /// pair and the issue can never be specified. This encodes the retry budget in
+    /// `spec.max_attempts` being reachable at all.
+    #[test]
+    fn failed_spec_attempt_frees_the_revision_pair_for_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let first = store
+            .claim_stage_attempt(SPEC_STAGE_NAME, claim_request("issue-rev", "config-rev"))
+            .unwrap();
+
+        // While the first attempt is nonterminal the same pair is locked out.
+        assert!(store
+            .claim_stage_attempt(SPEC_STAGE_NAME, claim_request("issue-rev", "config-rev"))
+            .is_err());
+
+        store
+            .fail_attempt(
+                &first.stage_run_id,
+                FactoryError::new(
+                    "spec_attempt_failed",
+                    "spec_coordinator",
+                    "runner could not start".to_string(),
+                    true,
+                    None,
+                ),
+            )
+            .unwrap();
+
+        let retry = store
+            .claim_stage_attempt(SPEC_STAGE_NAME, claim_request("issue-rev", "config-rev"))
+            .expect("a terminal failure must release the revision pair for a retry");
+        assert_eq!(retry.attempt, 2);
+        assert_ne!(retry.stage_run_id, first.stage_run_id);
+    }
+
+    /// An off-project issue keeps its intake label, so it is re-read on every poll.
+    /// The coordinator must find and reuse the existing diagnostic intent; without
+    /// this lookup it creates one intent per poll forever and re-emits
+    /// `spec_ineligible` each time, breaking the "one idempotent diagnostic" contract.
+    #[test]
+    fn diagnostic_spec_intent_is_found_for_reuse_across_polls() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let run = store
+            .upsert_factory_run(UpsertFactoryRunRequest {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                issue_id: "123".to_string(),
+                issue_identifier: "#123".to_string(),
+                issue_revision: None,
+                status: FactoryRunStatus::Ineligible,
+                current_stage: Some(SPEC_STAGE_NAME.to_string()),
+            })
+            .unwrap();
+
+        assert!(store
+            .find_spec_publication_by_kind(&run.run_id, SpecPublicationKind::Diagnostic)
+            .unwrap()
+            .is_none());
+
+        let created = store
+            .create_spec_publication_intent(
+                &run.run_id,
+                None,
+                SpecPublicationKind::Diagnostic,
+                &serde_json::json!({"issue_number": 123, "kind": "off_project"}),
+            )
+            .unwrap();
+
+        let found = store
+            .find_spec_publication_by_kind(&run.run_id, SpecPublicationKind::Diagnostic)
+            .unwrap()
+            .expect("the existing diagnostic intent must be reused, not duplicated");
+        assert_eq!(found.intent_id, created.intent_id);
+
+        // A preview intent on the same run must not be mistaken for the diagnostic.
+        assert!(store
+            .find_spec_publication_by_kind(&run.run_id, SpecPublicationKind::Approval)
+            .unwrap()
+            .is_none());
+    }
+
+    /// The `spec-revise` feedback cutoff is the last time the spec was published.
+    /// Diagnostics update the same owned comment afterwards, so the cutoff lookup
+    /// must be kind-scoped. If it returned the newest intent of any kind, each
+    /// diagnostic republish would push the cutoff past the human's feedback comment
+    /// and the revision request would never be detected.
+    #[test]
+    fn feedback_cutoff_reads_the_spec_publication_not_a_later_diagnostic() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let run = store
+            .upsert_factory_run(UpsertFactoryRunRequest {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                issue_id: "123".to_string(),
+                issue_identifier: "#123".to_string(),
+                issue_revision: None,
+                status: FactoryRunStatus::Active,
+                current_stage: Some(SPEC_STAGE_NAME.to_string()),
+            })
+            .unwrap();
+
+        let preview = store
+            .create_spec_publication_intent(
+                &run.run_id,
+                None,
+                SpecPublicationKind::Preview,
+                &serde_json::json!({"issue_number": 123}),
+            )
+            .unwrap();
+        let diagnostic = store
+            .create_spec_publication_intent(
+                &run.run_id,
+                None,
+                SpecPublicationKind::Diagnostic,
+                &serde_json::json!({"issue_number": 123, "message": "add feedback"}),
+            )
+            .unwrap();
+
+        // The diagnostic is the newest intent overall.
+        assert_eq!(
+            store
+                .get_latest_spec_publication(&run.run_id)
+                .unwrap()
+                .unwrap()
+                .intent_id,
+            diagnostic.intent_id
+        );
+
+        // The cutoff must still resolve to the spec publication.
+        assert_eq!(
+            store
+                .latest_spec_publication_of_kind(&run.run_id, SpecPublicationKind::Preview)
+                .unwrap()
+                .expect("the spec publication is the feedback cutoff")
+                .intent_id,
+            preview.intent_id
+        );
     }
 
     #[test]

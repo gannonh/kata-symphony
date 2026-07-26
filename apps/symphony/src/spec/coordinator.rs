@@ -109,16 +109,43 @@ where
 
         for issue in issues {
             if has_label(&issue.labels, &service.triage.intake_label) && service.triage.enabled {
-                self.record_event(
-                    None,
-                    None,
-                    "spec_ineligible",
-                    serde_json::json!({
-                        "issue": issue.identifier,
-                        "status": "ineligible",
-                        "error_code": "intake_label_conflict"
-                    }),
-                )?;
+                // Triage owns this issue's comment surface, so the only record is the
+                // durable event. Emit exactly one per (issue, issue_revision) instead of
+                // one per poll, which would otherwise grow without bound while a human
+                // leaves both intake labels applied.
+                let issue_revision = spec_issue_revision(&issue, service, &publisher_login);
+                let mut store = self.store.clone();
+                let already_recorded = store
+                    .get_run_by_issue(
+                        &self.config.forge_host,
+                        &self.config.repository,
+                        &issue.issue_id,
+                    )?
+                    .is_some_and(|run| {
+                        run.status == FactoryRunStatus::Ineligible
+                            && run.issue_revision.as_deref() == Some(issue_revision.as_str())
+                    });
+                if !already_recorded {
+                    let run = store.upsert_factory_run(UpsertFactoryRunRequest {
+                        forge_host: self.config.forge_host.clone(),
+                        repository: self.config.repository.clone(),
+                        issue_id: issue.issue_id.clone(),
+                        issue_identifier: issue.identifier.clone(),
+                        issue_revision: Some(issue_revision),
+                        status: FactoryRunStatus::Ineligible,
+                        current_stage: Some(SPEC_STAGE_NAME.to_string()),
+                    })?;
+                    self.record_event(
+                        Some(&run.run_id),
+                        None,
+                        "spec_ineligible",
+                        serde_json::json!({
+                            "issue": issue.identifier,
+                            "status": "ineligible",
+                            "error_code": "intake_label_conflict"
+                        }),
+                    )?;
+                }
                 summary.skipped += 1;
                 continue;
             }
@@ -141,7 +168,15 @@ where
             if let Some(run) = existing_run.as_ref() {
                 let artifacts = self.store.list_spec_artifacts(&run.run_id)?;
                 if let Some(latest) = artifacts.first() {
-                    let publication = self.store.get_latest_spec_publication(&run.run_id)?;
+                    // The feedback cutoff is the last time the spec itself was
+                    // published. Diagnostics republish the same owned comment, so
+                    // using the newest intent of any kind would advance the cutoff
+                    // past the human's feedback on every poll and the revision
+                    // request would never be detected.
+                    let publication = self.store.latest_spec_publication_of_kind(
+                        &run.run_id,
+                        SpecPublicationKind::Preview,
+                    )?;
                     let published_at = publication
                         .as_ref()
                         .map(|intent| intent.updated_at)
@@ -170,10 +205,27 @@ where
                             continue;
                         }
                         DecisionAction::Revise { feedback } => {
-                            self.store.increment_spec_revision_requests(
-                                &run.run_id,
-                                service.spec.max_revision_requests,
-                            )?;
+                            // `max_revision_requests` bounds human revision requests,
+                            // while `max_attempts` bounds agent-failure retries for a
+                            // revision pair. Count the request only when this pair is
+                            // new, otherwise a few failed turns silently exhaust the
+                            // human's revision budget for the whole run.
+                            let prior_attempts = self
+                                .store
+                                .list_stage_attempts_for_revision(
+                                    &run.run_id,
+                                    &issue_revision,
+                                    &configuration_revision,
+                                )?
+                                .iter()
+                                .filter(|attempt| attempt.stage == SPEC_STAGE_NAME)
+                                .count();
+                            if prior_attempts == 0 {
+                                self.store.increment_spec_revision_requests(
+                                    &run.run_id,
+                                    service.spec.max_revision_requests,
+                                )?;
+                            }
                             seed = Some(SeededRevision {
                                 prior_version: latest.version,
                                 prior_spec: latest.artifact.clone(),
@@ -317,8 +369,7 @@ where
                         .get("revise_label")
                         .and_then(serde_json::Value::as_str)
                     {
-                        self.routing
-                            .remove_issue_label(issue_number, revise_label)
+                        self.remove_label_if_present(issue_number, revise_label)
                             .await?;
                     }
                     self.store
@@ -404,7 +455,7 @@ where
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("spec-revise");
                     for label in [intake_label, approved_label, revise_label] {
-                        self.routing.remove_issue_label(issue_number, label).await?;
+                        self.remove_label_if_present(issue_number, label).await?;
                     }
                     self.routing
                         .add_issue_label(issue_number, route_label)
@@ -445,6 +496,21 @@ where
                         &intent.intent_id,
                         "comment_final",
                     )?;
+                    // A crash between the decision and the final step resumes here, so
+                    // the approval events must be emitted on this path too. Without
+                    // them a recovered approval is invisible to event consumers.
+                    self.record_event(
+                        Some(&intent.run_id),
+                        None,
+                        "spec_route_applied",
+                        serde_json::json!({"intent_id":intent.intent_id,"version":artifact.version,"status":"applied"}),
+                    )?;
+                    self.record_event(
+                        Some(&intent.run_id),
+                        None,
+                        "spec_approved",
+                        serde_json::json!({"intent_id":intent.intent_id,"artifact_id":artifact.artifact_id,"version":artifact.version,"status":"approved"}),
+                    )?;
                 }
             }
         }
@@ -469,6 +535,19 @@ where
             service.spec.review_model.as_deref(),
             service.pi_agent.model.as_deref(),
         );
+        // Resolve every fallible input before claiming the attempt. A failure after
+        // the claim would leave a nonterminal attempt that blocks the stage-scoped
+        // uniqueness index on every later poll.
+        let workspace_root = resolve_path(&service.workspace.root, "workspace.root")?;
+        let repo_path = resolve_path(
+            service.workspace.repo.as_deref().ok_or_else(|| {
+                SymphonyError::InvalidWorkflowConfig(
+                    "workspace.repo is required for the spec stage".to_string(),
+                )
+            })?,
+            "workspace.repo",
+        )?;
+        let command = agent_command(service)?;
         let store = self.store.clone();
         if let Some(run) = store.get_run_by_issue(
             &self.config.forge_host,
@@ -515,17 +594,66 @@ where
             serde_json::json!({"status":"running","attempt":stage.attempt}),
         )?;
 
+        // Every failure after the claim must terminate the attempt, otherwise the
+        // nonterminal row blocks this revision pair on every later poll.
+        let outcome = self
+            .execute_claimed_attempt(
+                issue,
+                service,
+                prompts,
+                configuration_revision,
+                issue_revision,
+                seed,
+                &stage,
+                harness,
+                draft_model,
+                review_model,
+                workspace_root,
+                repo_path,
+                command,
+            )
+            .await;
+        if let Err(error) = &outcome {
+            let factory_error = FactoryError::new(
+                "spec_attempt_failed",
+                "spec_coordinator",
+                error.to_string(),
+                true,
+                None,
+            );
+            let mut store = self.store.clone();
+            store.fail_attempt(&stage.stage_run_id, factory_error)?;
+            self.record_event(
+                Some(&stage.run_id),
+                Some(&stage.stage_run_id),
+                "spec_failed",
+                serde_json::json!({"status":"failed","error_code":"spec_attempt_failed"}),
+            )?;
+        }
+        outcome
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_claimed_attempt(
+        &mut self,
+        issue: &TriageIntakeIssue,
+        service: &ServiceConfig,
+        prompts: &LoadedPrompts,
+        configuration_revision: &str,
+        issue_revision: &str,
+        seed: Option<SeededRevision>,
+        stage: &crate::triage::domain::StageRunRecord,
+        harness: TriageHarness,
+        draft_model: Option<String>,
+        review_model: Option<String>,
+        workspace_root: PathBuf,
+        repo_path: PathBuf,
+        command: Vec<String>,
+    ) -> Result<()> {
         let runner = IsolatedSpecRunnerConfig {
-            workspace_root: resolve_path(&service.workspace.root, "workspace.root")?,
-            repo_path: resolve_path(
-                service.workspace.repo.as_deref().ok_or_else(|| {
-                    SymphonyError::InvalidWorkflowConfig(
-                        "workspace.repo is required for the spec stage".to_string(),
-                    )
-                })?,
-                "workspace.repo",
-            )?,
-            command: agent_command(service)?,
+            workspace_root,
+            repo_path,
+            command,
             harness,
             issue: TriageIssueIdentity {
                 id: issue.issue_id.clone(),
@@ -583,28 +711,7 @@ where
                 },
             },
         )
-        .await;
-        let pipeline = match pipeline {
-            Ok(outcome) => outcome,
-            Err(error) => {
-                let factory_error = FactoryError::new(
-                    "spec_turn_failed",
-                    "spec_runner",
-                    error.to_string(),
-                    true,
-                    None,
-                );
-                let mut store = self.store.clone();
-                store.fail_attempt(&stage.stage_run_id, factory_error)?;
-                self.record_event(
-                    Some(&stage.run_id),
-                    Some(&stage.stage_run_id),
-                    "spec_failed",
-                    serde_json::json!({"status":"failed","error_code":"spec_turn_failed"}),
-                )?;
-                return Err(error);
-            }
-        };
+        .await?;
         for turn in &pipeline.turns {
             self.record_event(
                 Some(&stage.run_id),
@@ -632,7 +739,7 @@ where
             "spec_completed",
             serde_json::json!({"artifact_id":artifact.artifact_id,"version":artifact.version,"status":"completed"}),
         )?;
-        self.publish_artifact(issue, &stage, &artifact, &service.spec.labels.revise)
+        self.publish_artifact(issue, stage, &artifact, &service.spec.labels.revise)
             .await
     }
 
@@ -720,15 +827,16 @@ where
             service.spec.max_intake_pages,
         )
         .await?;
-        // Ordered, idempotent tracker effects. Removing an absent label and
-        // adding an existing label are safe through the GitHub adapter.
+        // Ordered, idempotent tracker effects. GitHub returns 404 when removing a
+        // label the issue does not carry, so read current labels first and remove
+        // only what is present. Removing unconditionally aborts the approval
+        // mid-flight and leaves the run pinned at `pending_approval`.
         for label in [
             service.spec.intake_label.as_str(),
             service.spec.labels.approved.as_str(),
             service.spec.labels.revise.as_str(),
         ] {
-            self.routing
-                .remove_issue_label(issue.issue_number, label)
+            self.remove_label_if_present(issue.issue_number, label)
                 .await?;
         }
         self.routing
@@ -777,6 +885,20 @@ where
         )
     }
 
+    /// GitHub returns 404 when removing a label the issue does not carry, so an
+    /// unconditional removal aborts a partially applied publication on retry.
+    /// Reading current labels first keeps every label step idempotent.
+    async fn remove_label_if_present(&self, issue_number: u64, label: &str) -> Result<()> {
+        let current = self.routing.list_issue_labels(issue_number).await?;
+        if current
+            .iter()
+            .any(|present| present.eq_ignore_ascii_case(label))
+        {
+            self.routing.remove_issue_label(issue_number, label).await?;
+        }
+        Ok(())
+    }
+
     async fn publish_diagnostic(
         &self,
         issue: &TriageIntakeIssue,
@@ -784,12 +906,34 @@ where
         artifact: &SpecArtifactRecord,
         message: &str,
     ) -> Result<()> {
-        let intent = self.store.create_spec_publication_intent(
-            run_id,
-            Some(&artifact.artifact_id),
-            SpecPublicationKind::Diagnostic,
-            &serde_json::json!({"issue_number":issue.issue_number,"message":message}),
-        )?;
+        // Reuse the run's diagnostic intent so a human who leaves the triggering
+        // condition in place does not accumulate one intent per poll.
+        let existing = self
+            .store
+            .find_spec_publication_by_kind(run_id, SpecPublicationKind::Diagnostic)?;
+        let unchanged = existing.as_ref().is_some_and(|intent| {
+            intent.status == crate::triage::domain::PublicationStatus::Applied
+                && intent
+                    .desired_effects
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(message)
+        });
+        if unchanged {
+            return Ok(());
+        }
+        let intent = match existing {
+            Some(intent) => self.store.update_spec_diagnostic_message(
+                &intent.intent_id,
+                &serde_json::json!({"issue_number":issue.issue_number,"message":message}),
+            )?,
+            None => self.store.create_spec_publication_intent(
+                run_id,
+                Some(&artifact.artifact_id),
+                SpecPublicationKind::Diagnostic,
+                &serde_json::json!({"issue_number":issue.issue_number,"message":message}),
+            )?,
+        };
         let body = render_spec_comment(
             &intent.intent_id,
             run_id,
@@ -821,16 +965,31 @@ where
             status: FactoryRunStatus::Ineligible,
             current_stage: Some(SPEC_STAGE_NAME.to_string()),
         })?;
-        let intent = self.store.create_spec_publication_intent(
-            &run.run_id,
-            None,
-            SpecPublicationKind::Diagnostic,
-            &serde_json::json!({
-                "issue_number":issue.issue_number,
-                "kind":"off_project",
-                "intake_label":service.spec.intake_label,
-            }),
-        )?;
+        // Reuse the run's existing diagnostic intent. Creating a new one each poll
+        // would grow the intent table and re-emit `spec_ineligible` forever while an
+        // issue stays off-project, against the "one idempotent diagnostic" contract.
+        let existing = self
+            .store
+            .find_spec_publication_by_kind(&run.run_id, SpecPublicationKind::Diagnostic)?;
+        let already_applied = existing.as_ref().is_some_and(|intent| {
+            intent.status == crate::triage::domain::PublicationStatus::Applied
+        });
+        let intent = match existing {
+            Some(intent) => intent,
+            None => self.store.create_spec_publication_intent(
+                &run.run_id,
+                None,
+                SpecPublicationKind::Diagnostic,
+                &serde_json::json!({
+                    "issue_number":issue.issue_number,
+                    "kind":"off_project",
+                    "intake_label":service.spec.intake_label,
+                }),
+            )?,
+        };
+        if already_applied {
+            return Ok(());
+        }
         let body = format!(
             "<!-- symphony:spec:{} -->\n## Symphony specification\n\nThis issue is not a member of the configured GitHub Project. Add it to the project and leave `{}` applied.",
             intent.intent_id, service.spec.intake_label
@@ -1076,10 +1235,14 @@ fn spec_issue_revision(
             "id":comment.id,"body":comment.body,"created_at":comment.created_at,"updated_at":comment.updated_at
         }))
         .collect();
+    // Issue-level `updated_at` is deliberately excluded, matching A1's canonical
+    // fingerprint: GitHub bumps it when Symphony publishes its own spec comment,
+    // so including it would make every publication look like new human content and
+    // trigger an endless attempt/version loop.
     hash_json(&serde_json::json!({
         "title":issue.title,"body":issue.body,"labels":labels,"assignees":issue.assignees,
         "milestone":issue.milestone.as_ref().map(|m| (&m.number,&m.title)),
-        "comments":comments,"updated_at":issue.updated_at,
+        "comments":comments,
     }))
 }
 
@@ -1123,14 +1286,20 @@ fn agent_command(service: &ServiceConfig) -> Result<Vec<String>> {
     Ok(command.clone())
 }
 
+/// Resolve a configured workspace path the same way the triage stage does:
+/// relative values expand against the process working directory.
 fn resolve_path(value: &str, field: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(value);
-    if !path.is_absolute() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         return Err(SymphonyError::InvalidWorkflowConfig(format!(
-            "{field} must be an absolute local path for the spec stage"
+            "{field} cannot be empty for the spec stage"
         )));
     }
-    Ok(path)
+    crate::path_safety::canonicalize(Path::new(trimmed)).map_err(|error| {
+        SymphonyError::InvalidWorkflowConfig(format!(
+            "failed to resolve {field} '{trimmed}' for the spec stage: {error}"
+        ))
+    })
 }
 
 fn comment_author(comment: &crate::github::client::GithubIssueComment) -> &str {
@@ -1139,4 +1308,100 @@ fn comment_author(comment: &crate::github::client::GithubIssueComment) -> &str {
         .as_ref()
         .map(|user| user.login.as_str())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_path, spec_issue_revision};
+    use crate::domain::ServiceConfig;
+    use crate::triage::intake::{IntakeComment, TriageIntakeIssue};
+    use chrono::{TimeZone, Utc};
+
+    fn issue() -> TriageIntakeIssue {
+        TriageIntakeIssue {
+            issue_id: "1".to_string(),
+            issue_number: 1,
+            identifier: "#1".to_string(),
+            title: "Add a section".to_string(),
+            body: "Body".to_string(),
+            labels: vec!["ready-to-spec".to_string()],
+            non_managed_labels: Vec::new(),
+            assignees: Vec::new(),
+            milestone: None,
+            comments: Vec::new(),
+            created_at: Utc.with_ymd_and_hms(2026, 7, 26, 0, 0, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 7, 26, 0, 0, 0).unwrap(),
+            forge_host: "github.com".to_string(),
+            repository: "owner/repo".to_string(),
+            in_project: true,
+        }
+    }
+
+    /// Publishing the spec comment bumps the GitHub issue's `updated_at` and adds a
+    /// publisher-owned comment. Neither is human content, so the revision must be
+    /// unchanged. If it changed, the next poll would treat its own publication as
+    /// new input and publish an unbounded series of versions with no human decision.
+    #[test]
+    fn publishing_the_spec_comment_does_not_change_the_issue_revision() {
+        let service = ServiceConfig::default();
+        let before = spec_issue_revision(&issue(), &service, "symphony-bot");
+
+        let mut after_publication = issue();
+        after_publication.updated_at = Utc.with_ymd_and_hms(2026, 7, 26, 1, 0, 0).unwrap();
+        after_publication.comments.push(IntakeComment {
+            id: 10,
+            author_login: "symphony-bot".to_string(),
+            body: "<!-- symphony:spec:abc -->\n## Symphony specification".to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 7, 26, 1, 0, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 7, 26, 1, 0, 0).unwrap(),
+        });
+
+        assert_eq!(
+            before,
+            spec_issue_revision(&after_publication, &service, "symphony-bot"),
+            "Symphony's own publication must not create a new revision pair"
+        );
+    }
+
+    /// Human feedback is what a `spec-revise` request keys on, so it must still
+    /// produce a new revision pair.
+    #[test]
+    fn human_feedback_comment_changes_the_issue_revision() {
+        let service = ServiceConfig::default();
+        let before = spec_issue_revision(&issue(), &service, "symphony-bot");
+
+        let mut with_feedback = issue();
+        with_feedback.comments.push(IntakeComment {
+            id: 11,
+            author_login: "maintainer".to_string(),
+            body: "Please cover the error path too.".to_string(),
+            created_at: Utc.with_ymd_and_hms(2026, 7, 26, 2, 0, 0).unwrap(),
+            updated_at: Utc.with_ymd_and_hms(2026, 7, 26, 2, 0, 0).unwrap(),
+        });
+
+        assert_ne!(
+            before,
+            spec_issue_revision(&with_feedback, &service, "symphony-bot")
+        );
+    }
+
+    /// `workspace.root` and `workspace.repo` are documented as relative to the
+    /// process working directory and every shipped starter workflow uses relative
+    /// values. Rejecting them would make the spec stage unusable on a default
+    /// `symphony init` workspace, so spec must resolve them like triage does.
+    #[test]
+    fn relative_workspace_paths_resolve_instead_of_failing() {
+        let resolved = resolve_path(".symphony/workspaces", "workspace.root")
+            .expect("relative workspace roots are the documented default");
+
+        assert!(resolved.is_absolute());
+        assert!(resolved.ends_with(std::path::Path::new(".symphony/workspaces")));
+    }
+
+    #[test]
+    fn empty_workspace_path_is_rejected_with_the_field_name() {
+        let error = resolve_path("   ", "workspace.repo").expect_err("empty paths are invalid");
+
+        assert!(error.to_string().contains("workspace.repo"));
+    }
 }

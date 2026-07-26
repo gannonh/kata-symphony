@@ -24,6 +24,15 @@ pub struct DecisionInput<'a> {
     pub config: &'a SpecConfig,
 }
 
+/// A comment is Symphony's own only when it is authored by the publisher *and*
+/// carries a Symphony marker. Symphony commonly authenticates with a maintainer's
+/// own token (`gh auth token`), so matching on author alone would discard that
+/// maintainer's feedback and make `spec-revise` undetectable for them.
+fn is_publisher_owned(comment: &IntakeComment, publisher_login: &str) -> bool {
+    comment.author_login.eq_ignore_ascii_case(publisher_login)
+        && comment.body.contains("<!-- symphony:")
+}
+
 /// Evaluate exactly one branch of A2's ordered human-decision table.
 pub fn detect_decision(input: DecisionInput<'_>) -> DecisionAction {
     let has = |wanted: &str| {
@@ -43,9 +52,7 @@ pub fn detect_decision(input: DecisionInput<'_>) -> DecisionAction {
             .comments
             .iter()
             .filter(|comment| {
-                !comment
-                    .author_login
-                    .eq_ignore_ascii_case(input.publisher_login)
+                !is_publisher_owned(comment, input.publisher_login)
                     && (comment.created_at > input.published_at
                         || comment.updated_at > input.published_at)
             })
@@ -102,6 +109,43 @@ mod tests {
             }),
             DecisionAction::Conflict
         );
+    }
+
+    /// Symphony often runs with a maintainer's own GitHub token, so the publisher
+    /// login equals the human's login. Feedback must be distinguished by the
+    /// Symphony comment marker, not by author, or that maintainer can never request
+    /// a revision on their own repository.
+    #[test]
+    fn maintainer_feedback_counts_even_when_publisher_shares_their_login() {
+        let now = Utc::now();
+        let config = SpecConfig::default();
+        let mut own_spec_comment = comment(now - Duration::minutes(5), now - Duration::minutes(5));
+        own_spec_comment.id = 1;
+        own_spec_comment.author_login = "gannonh".to_string();
+        own_spec_comment.body = "<!-- symphony:spec:abc -->\n## Symphony specification".to_string();
+
+        let mut feedback = comment(now + Duration::minutes(1), now + Duration::minutes(1));
+        feedback.id = 2;
+        feedback.author_login = "gannonh".to_string();
+        feedback.body = "Please cover the failure path.".to_string();
+
+        let action = detect_decision(DecisionInput {
+            labels: std::slice::from_ref(&config.labels.revise),
+            comments: &[own_spec_comment, feedback],
+            publisher_login: "gannonh",
+            published_at: now,
+            revision_is_current: true,
+            intake_revision_changed: false,
+            config: &config,
+        });
+
+        match action {
+            DecisionAction::Revise { feedback } => {
+                assert_eq!(feedback.len(), 1, "only the unmarked comment is feedback");
+                assert_eq!(feedback[0].id, 2);
+            }
+            other => panic!("expected a revision request, got {other:?}"),
+        }
     }
 
     #[test]

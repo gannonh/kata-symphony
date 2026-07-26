@@ -118,6 +118,22 @@ impl SharedFactoryStore {
         self.with_store(|store| store.get_latest_spec_publication(run_id))
     }
 
+    pub fn find_spec_publication_by_kind(
+        &self,
+        run_id: &str,
+        kind: crate::spec::domain::SpecPublicationKind,
+    ) -> Result<Option<crate::spec::domain::SpecPublicationIntent>> {
+        self.with_store(|store| store.find_spec_publication_by_kind(run_id, kind))
+    }
+
+    pub fn latest_spec_publication_of_kind(
+        &self,
+        run_id: &str,
+        kind: crate::spec::domain::SpecPublicationKind,
+    ) -> Result<Option<crate::spec::domain::SpecPublicationIntent>> {
+        self.with_store(|store| store.latest_spec_publication_of_kind(run_id, kind))
+    }
+
     pub fn list_pending_spec_publications(
         &self,
     ) -> Result<Vec<crate::spec::domain::SpecPublicationIntent>> {
@@ -137,6 +153,16 @@ impl SharedFactoryStore {
 
     pub fn complete_spec_publication(&self, intent_id: &str, step: &str) -> Result<()> {
         self.with_store_mut(|store| store.complete_spec_publication(intent_id, step))
+    }
+
+    pub fn update_spec_diagnostic_message(
+        &self,
+        intent_id: &str,
+        desired_effects: &serde_json::Value,
+    ) -> Result<crate::spec::domain::SpecPublicationIntent> {
+        self.with_store_mut(|store| {
+            store.update_spec_diagnostic_message(intent_id, desired_effects)
+        })
     }
 
     pub fn increment_spec_revision_requests(&self, run_id: &str, max: u32) -> Result<u32> {
@@ -759,20 +785,33 @@ impl TriageRuntime {
             TriagePollSummary::default()
         };
         if let Some(coordinator) = self.spec_coordinator.as_mut() {
-            let summary = coordinator.poll_once(config).await?;
-            if summary.spec_enabled || summary.issues_seen > 0 {
-                tracing::info!(
-                    event = "spec_poll_completed",
-                    enabled = summary.spec_enabled,
-                    issues_seen = summary.issues_seen,
-                    attempts_started = summary.attempts_started,
-                    attempts_completed = summary.attempts_completed,
-                    attempts_failed = summary.attempts_failed,
-                    published = summary.published,
-                    approved = summary.approved,
-                    revisions_requested = summary.revisions_requested,
-                    "spec poll completed"
-                );
+            // A spec-stage failure must not discard the triage summary or surface as
+            // `triage_poll_failed`. Report it under its own event so the failing stage
+            // is identifiable and the other stage keeps making progress.
+            match coordinator.poll_once(config).await {
+                Ok(summary) => {
+                    if summary.spec_enabled || summary.issues_seen > 0 {
+                        tracing::info!(
+                            event = "spec_poll_completed",
+                            enabled = summary.spec_enabled,
+                            issues_seen = summary.issues_seen,
+                            attempts_started = summary.attempts_started,
+                            attempts_completed = summary.attempts_completed,
+                            attempts_failed = summary.attempts_failed,
+                            published = summary.published,
+                            approved = summary.approved,
+                            revisions_requested = summary.revisions_requested,
+                            "spec poll completed"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "spec_poll_failed",
+                        error = %error,
+                        "spec poll failed; continuing orchestrator loop"
+                    );
+                }
             }
         }
         Ok(triage)
