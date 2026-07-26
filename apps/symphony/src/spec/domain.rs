@@ -317,6 +317,31 @@ pub struct SpecRunState {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Review-cycle aggregates across published spec versions.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct SpecReviewCycleMetrics {
+    pub average: Option<f64>,
+    pub max: Option<u64>,
+}
+
+/// A2 metric aggregates. `stage`, attempt counts, ineligible count, duration,
+/// and per-harness/model tokens reuse the triage shape; the remaining fields
+/// are spec-specific and absent from `?stage=triage` responses.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SpecMetricsAggregate {
+    #[serde(flatten)]
+    pub base: crate::triage::domain::TriageMetricsAggregate,
+    pub review_cycles: SpecReviewCycleMetrics,
+    /// Completed attempts that published with zero unresolved blocking findings.
+    pub converged_attempts: u64,
+    /// `converged_attempts / published versions`.
+    pub convergence_rate: f64,
+    /// Human revision requests consumed across all runs.
+    pub revision_requests: u64,
+    /// Publication-to-decision latency across approved runs.
+    pub approval_latency: crate::triage::domain::TriageMetricsDuration,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

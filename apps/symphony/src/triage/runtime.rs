@@ -10,8 +10,8 @@ use crate::github::client::GithubClient;
 use crate::github::projects_v2::ProjectsV2Client;
 use crate::http_server::{
     attach_spec_http_response, factory_run_http_response, factory_run_metrics_http_response,
-    FactoryArtifactHttpResponse, FactoryRunHttpResponse, FactoryRunMetricsHttpResponse,
-    FactoryRunQuery,
+    spec_run_metrics_http_response, FactoryArtifactHttpResponse, FactoryRunHttpResponse,
+    FactoryRunMetricsHttpResponse, FactoryRunQuery, SpecRunMetricsHttpResponse,
 };
 use crate::spec::coordinator::{SpecCoordinator, SpecCoordinatorConfig};
 use crate::triage::coordinator::{
@@ -467,13 +467,9 @@ impl FactoryRunQuery for SharedFactoryStore {
             .map_err(|err| err.to_string())
     }
 
-    fn spec_metrics(&self) -> std::result::Result<FactoryRunMetricsHttpResponse, String> {
+    fn spec_metrics(&self) -> std::result::Result<SpecRunMetricsHttpResponse, String> {
         self.with_store(|store| store.spec_metrics())
-            .map(|metrics| {
-                let mut response = factory_run_metrics_http_response(metrics);
-                response.stage = crate::spec::domain::SPEC_STAGE_NAME.to_string();
-                response
-            })
+            .map(spec_run_metrics_http_response)
             .map_err(|err| err.to_string())
     }
 

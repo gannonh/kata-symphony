@@ -1362,6 +1362,7 @@ struct FakeFactoryRunQuery {
     by_id: BTreeMap<String, symphony::http_server::FactoryRunHttpResponse>,
     by_issue: BTreeMap<String, symphony::http_server::FactoryRunHttpResponse>,
     metrics: Option<symphony::http_server::FactoryRunMetricsHttpResponse>,
+    spec_metrics: Option<symphony::http_server::SpecRunMetricsHttpResponse>,
 }
 
 impl symphony::http_server::FactoryRunQuery for FakeFactoryRunQuery {
@@ -1385,6 +1386,12 @@ impl symphony::http_server::FactoryRunQuery for FakeFactoryRunQuery {
         self.metrics
             .clone()
             .ok_or_else(|| "metrics unavailable".to_string())
+    }
+
+    fn spec_metrics(&self) -> Result<symphony::http_server::SpecRunMetricsHttpResponse, String> {
+        self.spec_metrics
+            .clone()
+            .ok_or_else(|| "spec metrics unavailable".to_string())
     }
 }
 
@@ -1626,7 +1633,7 @@ async fn test_factory_run_metrics_stage_validation() {
         )]),
     };
     let app = router_with_factory_query(FakeFactoryRunQuery {
-        metrics: Some(metrics),
+        metrics: Some(metrics.clone()),
         ..Default::default()
     });
 
@@ -1655,6 +1662,7 @@ async fn test_factory_run_metrics_stage_validation() {
     assert_eq!(missing_stage.status(), StatusCode::BAD_REQUEST);
 
     let ok = app
+        .clone()
         .oneshot(
             Request::builder()
                 .uri("/api/v1/factory-runs/metrics?stage=triage")
@@ -1668,4 +1676,70 @@ async fn test_factory_run_metrics_stage_validation() {
     assert_eq!(payload["stage"], "triage");
     assert_eq!(payload["total_attempts"], 2);
     assert_eq!(payload["route_counts"]["implement"], 1);
+
+    // Criterion 11 requires the A2-specific aggregates on stage=spec. Without them
+    // operators cannot measure review-loop quality or approval latency.
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        metrics: Some(metrics),
+        spec_metrics: Some(symphony::http_server::SpecRunMetricsHttpResponse {
+            base: symphony::http_server::FactoryRunMetricsHttpResponse {
+                stage: "spec".to_string(),
+                total_attempts: 4,
+                completed_attempts: 3,
+                failed_attempts: 1,
+                ineligible_issues: 2,
+                route_counts: BTreeMap::new(),
+                correction_count: 0,
+                correction_rate: 0.0,
+                duration: symphony::triage::domain::TriageMetricsDuration {
+                    average_ms: Some(5000.0),
+                    p50_ms: Some(4000.0),
+                    p95_ms: Some(9000.0),
+                },
+                tokens_by_harness_model: BTreeMap::from([(
+                    "pi/model-a".to_string(),
+                    symphony::triage::domain::TriageMetricsTokenTotals {
+                        input_tokens: 1000,
+                        output_tokens: 100,
+                        total_tokens: 1100,
+                    },
+                )]),
+            },
+            review_cycles: symphony::spec::domain::SpecReviewCycleMetrics {
+                average: Some(1.5),
+                max: Some(3),
+            },
+            converged_attempts: 2,
+            convergence_rate: 0.666,
+            revision_requests: 1,
+            approval_latency: symphony::triage::domain::TriageMetricsDuration {
+                average_ms: Some(120000.0),
+                p50_ms: Some(120000.0),
+                p95_ms: Some(120000.0),
+            },
+        }),
+        ..Default::default()
+    });
+    let spec = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs/metrics?stage=spec")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(spec.status(), StatusCode::OK);
+    let payload = body_json(spec).await;
+    assert_eq!(payload["stage"], "spec");
+    assert_eq!(payload["total_attempts"], 4);
+    assert_eq!(payload["review_cycles"]["average"], 1.5);
+    assert_eq!(payload["review_cycles"]["max"], 3);
+    assert_eq!(payload["converged_attempts"], 2);
+    assert_eq!(payload["revision_requests"], 1);
+    assert_eq!(payload["approval_latency"]["average_ms"], 120000.0);
+    assert_eq!(
+        payload["tokens_by_harness_model"]["pi/model-a"]["total_tokens"],
+        1100
+    );
 }

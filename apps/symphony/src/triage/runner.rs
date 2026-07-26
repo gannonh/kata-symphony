@@ -554,8 +554,12 @@ async fn run_pi_turn(
     let turn_timeout = Duration::from_millis(request.turn_timeout_ms);
 
     // Stream pi --mode json events for live progress while retaining the raw
-    // stream (bounded) for diagnostics.
+    // stream (bounded) for diagnostics. Token usage is accumulated per line as it
+    // passes: the retained buffer is capped, so a long run would otherwise drop the
+    // `message_end` events that carry usage and the turn would report zero tokens.
     let progress = request.progress.clone();
+    let usage_acc = std::sync::Arc::new(std::sync::Mutex::new(StageUsage::default()));
+    let usage_sink = usage_acc.clone();
     let mut stdout_reader = BufReader::new(stdout);
     let stdout_pump = tokio::spawn(async move {
         let mut raw: Vec<u8> = Vec::new();
@@ -568,11 +572,13 @@ async fn run_pi_turn(
                     if raw.len() < CHILD_OUTPUT_TAIL * 4 {
                         raw.extend_from_slice(line.as_bytes());
                     }
+                    let trimmed = line.trim();
                     if let Some(sink) = &progress {
-                        if let Some(event) = parse_pi_json_event(line.trim()) {
+                        if let Some(event) = parse_pi_json_event(trimmed) {
                             sink(event);
                         }
                     }
+                    accumulate_pi_message_usage(trimmed, &mut usage_sink.lock().unwrap());
                 }
             }
         }
@@ -635,7 +641,40 @@ async fn run_pi_turn(
         ));
     }
 
-    Ok(StageUsage::default())
+    let usage = usage_acc.lock().unwrap().clone();
+    Ok(usage)
+}
+
+/// Accumulate token usage from one `pi --mode json` line. Pi reports usage per
+/// assistant message on `message_end` (and repeats the same usage on `turn_end`
+/// and `agent_end`), so only `message_end` counts; summing across every assistant
+/// message yields the invocation's full usage, including tool-call turns. A fake
+/// runner or older pi that emits no such events still reports zero.
+fn accumulate_pi_message_usage(line: &str, usage: &mut StageUsage) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return;
+    };
+    if value.get("type").and_then(|kind| kind.as_str()) != Some("message_end") {
+        return;
+    }
+    let Some(message) = value.get("message") else {
+        return;
+    };
+    if message.get("role").and_then(|role| role.as_str()) != Some("assistant") {
+        return;
+    }
+    let Some(reported) = message.get("usage") else {
+        return;
+    };
+    let field = |name: &str| {
+        reported
+            .get(name)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    usage.input_tokens = usage.input_tokens.saturating_add(field("input"));
+    usage.output_tokens = usage.output_tokens.saturating_add(field("output"));
+    usage.total_tokens = usage.total_tokens.saturating_add(field("totalTokens"));
 }
 
 /// Map one `pi --mode json` line to a progress event.
@@ -1522,6 +1561,52 @@ fi
             built,
             vec!["pi", "-p", "--no-session", "--mode", "json", "p"]
         );
+    }
+
+    /// Token measures per approved spec are an A2 deliverable, but Pi usage lives
+    /// in the `message_end` JSON events on stdout. If the runner does not read them,
+    /// every turn records zero tokens and the measure silently disappears.
+    #[tokio::test]
+    async fn pi_message_end_usage_is_captured_into_stage_usage() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        init_repo(&repo);
+
+        let script = temp.path().join("fake-runner.sh");
+        write_script(
+            &script,
+            &format!(
+                r#"#!/bin/sh
+set -eu
+printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
+cat <<'EVENTS'
+{{"type":"message_update","assistantMessageEvent":{{"type":"text_delta","delta":"working","partial":{{"role":"assistant","usage":{{"input":0,"output":0,"totalTokens":0}}}}}}}}
+{{"type":"message_end","message":{{"role":"assistant","usage":{{"input":1200,"output":30,"cacheRead":400,"totalTokens":1230}}}}}}
+{{"type":"turn_end","message":{{"role":"assistant","usage":{{"input":1200,"output":30,"cacheRead":400,"totalTokens":1230}}}},"toolResults":[]}}
+{{"type":"message_end","message":{{"role":"assistant","usage":{{"input":2500,"output":45,"cacheRead":0,"totalTokens":2545}}}}}}
+{{"type":"agent_end","messages":[{{"role":"assistant","usage":{{"input":2500,"output":45,"cacheRead":0,"totalTokens":2545}}}}],"willRetry":false}}
+EVENTS
+"#,
+                artifact = valid_artifact_json().replace('\'', "'\"'\"'")
+            ),
+        );
+
+        let request = pi_request(
+            &repo,
+            &temp.path().join("workspaces"),
+            vec![script.display().to_string()],
+        );
+
+        let outcome = TriageRunner::run(request).await.unwrap();
+        let TriageRunnerOutcome::Success(success) = outcome else {
+            panic!("expected success");
+        };
+
+        // Two assistant `message_end` events sum. Partial `message_update`, and the
+        // duplicated `turn_end`/`agent_end` usage, must not double-count.
+        assert_eq!(success.usage.input_tokens, 3700);
+        assert_eq!(success.usage.output_tokens, 75);
+        assert_eq!(success.usage.total_tokens, 3775);
     }
 
     #[tokio::test]

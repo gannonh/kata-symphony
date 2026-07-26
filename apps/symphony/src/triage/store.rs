@@ -2082,7 +2082,8 @@ impl SqliteFactoryStore {
         Ok(())
     }
 
-    pub fn spec_metrics(&self) -> Result<TriageMetricsAggregate> {
+    pub fn spec_metrics(&self) -> Result<crate::spec::domain::SpecMetricsAggregate> {
+        use crate::spec::domain::{SpecMetricsAggregate, SpecReviewCycleMetrics};
         use crate::triage::domain::{TriageMetricsDuration, TriageMetricsTokenTotals};
         use std::collections::BTreeMap;
 
@@ -2182,7 +2183,104 @@ impl SqliteFactoryStore {
             );
         }
         aggregate.tokens_by_harness_model = tokens;
-        Ok(aggregate)
+
+        // Review-loop measures: cycles used per published version and convergence
+        // (attempts that published with zero unresolved blocking findings).
+        let mut cycles = Vec::new();
+        let mut converged = 0u64;
+        let mut published = 0u64;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT review_cycles, unresolved_findings_json FROM spec_artifacts")
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_error)?;
+        for row in rows {
+            let (review_cycles, findings_json) = row.map_err(storage_error)?;
+            cycles.push(review_cycles as f64);
+            published = published.saturating_add(1);
+            let unresolved: Vec<serde_json::Value> =
+                serde_json::from_str(&findings_json).unwrap_or_default();
+            if unresolved.is_empty() {
+                converged = converged.saturating_add(1);
+            }
+        }
+        let review_cycle_metrics = SpecReviewCycleMetrics {
+            average: (!cycles.is_empty()).then(|| cycles.iter().sum::<f64>() / cycles.len() as f64),
+            max: cycles
+                .iter()
+                .copied()
+                .reduce(f64::max)
+                .map(|value| value as u64),
+        };
+        let convergence_rate = if published == 0 {
+            0.0
+        } else {
+            converged as f64 / published as f64
+        };
+        let revision_requests: u64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(revision_requests_used), 0) FROM spec_run_state",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+
+        // Approval latency is measured from the preview publication of the approved
+        // version to the moment the human's approval was detected (approval intent
+        // created). Joining on artifact keeps revision cycles from mixing versions.
+        let mut latencies = Vec::new();
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT preview.updated_at, approval.created_at
+             FROM spec_publication_intents approval
+             JOIN spec_publication_intents preview
+               ON preview.run_id = approval.run_id AND preview.artifact_id = approval.artifact_id
+             WHERE approval.kind = 'approval'",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_error)?;
+        for row in rows {
+            let (published_at, decided_at) = row.map_err(storage_error)?;
+            latencies.push(
+                (parse_ts(&decided_at).map_err(SymphonyError::StorageError)?
+                    - parse_ts(&published_at).map_err(SymphonyError::StorageError)?)
+                .num_milliseconds()
+                .max(0) as f64,
+            );
+        }
+        latencies.sort_by(f64::total_cmp);
+        let approval_latency = if latencies.is_empty() {
+            TriageMetricsDuration {
+                average_ms: None,
+                p50_ms: None,
+                p95_ms: None,
+            }
+        } else {
+            TriageMetricsDuration {
+                average_ms: Some(latencies.iter().sum::<f64>() / latencies.len() as f64),
+                p50_ms: Some(percentile(&latencies, 0.50)),
+                p95_ms: Some(percentile(&latencies, 0.95)),
+            }
+        };
+
+        Ok(SpecMetricsAggregate {
+            base: aggregate,
+            review_cycles: review_cycle_metrics,
+            converged_attempts: converged,
+            convergence_rate,
+            revision_requests,
+            approval_latency,
+        })
     }
 }
 
@@ -2800,6 +2898,130 @@ mod tests {
                 .intent_id,
             preview.intent_id
         );
+    }
+
+    /// Criterion 11 requires review-cycle, convergence, revision-request, and
+    /// approval-latency aggregates from durable records. Without them an operator
+    /// cannot measure review-loop quality or time awaiting human input, which are
+    /// the PRD's A2 measures.
+    #[test]
+    fn spec_metrics_report_review_loop_and_decision_aggregates() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+
+        let first_stage = store
+            .claim_stage_attempt(SPEC_STAGE_NAME, claim_request("issue-rev", "config-rev"))
+            .unwrap();
+        store
+            .store_spec_turn(StoreSpecTurnRequest {
+                turn_id: "turn-draft".to_string(),
+                stage_run_id: first_stage.stage_run_id.clone(),
+                ordinal: 1,
+                kind: SpecTurnKind::Draft,
+                status: SpecTurnStatus::Completed,
+                harness: "pi".to_string(),
+                model: Some("model-a".to_string()),
+                usage: StageUsage {
+                    input_tokens: 100,
+                    output_tokens: 10,
+                    total_tokens: 110,
+                },
+                output_json: None,
+                error: None,
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+            })
+            .unwrap();
+        let artifact_one = store
+            .store_spec_artifact(StoreSpecArtifactRequest {
+                stage_run_id: first_stage.stage_run_id.clone(),
+                issue_revision: "issue-rev".to_string(),
+                configuration_revision: "config-rev".to_string(),
+                artifact: SpecArtifact {
+                    schema_version: 1,
+                    product_behavior: "behavior".to_string(),
+                    technical_approach: "approach".to_string(),
+                    acceptance_criteria: vec!["observable".to_string()],
+                    open_decisions: vec![],
+                },
+                review_cycles: 1,
+                unresolved_blocking_findings: vec![],
+                bytes_len: 100,
+                usage: StageUsage {
+                    input_tokens: 100,
+                    output_tokens: 10,
+                    total_tokens: 110,
+                },
+            })
+            .unwrap();
+        let run_id = first_stage.run_id.clone();
+
+        let second_stage = store
+            .claim_stage_attempt(SPEC_STAGE_NAME, claim_request("issue-rev-2", "config-rev"))
+            .unwrap();
+        let finding = crate::spec::domain::ReviewFinding {
+            severity: crate::spec::domain::FindingSeverity::Blocking,
+            section: crate::spec::domain::FindingSection::General,
+            summary: "not observable".to_string(),
+            recommendation: "state the exact signal".to_string(),
+        };
+        let artifact_two = store
+            .store_spec_artifact(StoreSpecArtifactRequest {
+                stage_run_id: second_stage.stage_run_id.clone(),
+                issue_revision: "issue-rev-2".to_string(),
+                configuration_revision: "config-rev".to_string(),
+                artifact: artifact_one.artifact.clone(),
+                review_cycles: 3,
+                unresolved_blocking_findings: vec![finding],
+                bytes_len: 100,
+                usage: StageUsage {
+                    input_tokens: 200,
+                    output_tokens: 20,
+                    total_tokens: 220,
+                },
+            })
+            .unwrap();
+
+        store.increment_spec_revision_requests(&run_id, 3).unwrap();
+        let preview = store
+            .create_spec_publication_intent(
+                &run_id,
+                Some(&artifact_two.artifact_id),
+                SpecPublicationKind::Preview,
+                &serde_json::json!({"issue_number": 1}),
+            )
+            .unwrap();
+        store
+            .create_spec_publication_intent(
+                &run_id,
+                Some(&artifact_two.artifact_id),
+                SpecPublicationKind::Approval,
+                &serde_json::json!({"issue_number": 1}),
+            )
+            .unwrap();
+
+        let metrics = store.spec_metrics().unwrap();
+
+        assert_eq!(metrics.base.completed_attempts, 2);
+        assert_eq!(metrics.review_cycles.average, Some(2.0));
+        assert_eq!(metrics.review_cycles.max, Some(3));
+        assert_eq!(metrics.converged_attempts, 1);
+        assert!((metrics.convergence_rate - 0.5).abs() < f64::EPSILON);
+        assert_eq!(metrics.revision_requests, 1);
+        assert!(
+            metrics.approval_latency.average_ms.is_some(),
+            "an approval intent joined to its preview must produce a latency"
+        );
+        let tokens = metrics
+            .base
+            .tokens_by_harness_model
+            .get("pi/model-a")
+            .expect("turn tokens are grouped by harness and model");
+        assert_eq!(tokens.input_tokens, 100);
+        assert_eq!(tokens.total_tokens, 110);
+        let _ = preview;
+        let _ = artifact_one;
     }
 
     #[test]

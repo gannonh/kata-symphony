@@ -67,7 +67,7 @@ pub trait FactoryRunQuery: Send + Sync {
         issue_identifier: &str,
     ) -> Result<Option<FactoryRunHttpResponse>, String>;
     fn triage_metrics(&self) -> Result<FactoryRunMetricsHttpResponse, String>;
-    fn spec_metrics(&self) -> Result<FactoryRunMetricsHttpResponse, String> {
+    fn spec_metrics(&self) -> Result<SpecRunMetricsHttpResponse, String> {
         Err("spec metrics are not available".to_string())
     }
     fn get_artifact(
@@ -761,6 +761,34 @@ pub fn factory_run_metrics_http_response(
         correction_rate: metrics.correction_rate,
         duration: metrics.duration,
         tokens_by_harness_model: metrics.tokens_by_harness_model,
+    }
+}
+
+/// `?stage=spec` metrics: the shared attempt/duration/token fields plus the A2
+/// review-loop, convergence, revision-request, and approval-latency aggregates.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpecRunMetricsHttpResponse {
+    #[serde(flatten)]
+    pub base: FactoryRunMetricsHttpResponse,
+    pub review_cycles: crate::spec::domain::SpecReviewCycleMetrics,
+    pub converged_attempts: u64,
+    pub convergence_rate: f64,
+    pub revision_requests: u64,
+    pub approval_latency: crate::triage::domain::TriageMetricsDuration,
+}
+
+pub fn spec_run_metrics_http_response(
+    metrics: crate::spec::domain::SpecMetricsAggregate,
+) -> SpecRunMetricsHttpResponse {
+    let mut base = factory_run_metrics_http_response(metrics.base);
+    base.stage = crate::spec::domain::SPEC_STAGE_NAME.to_string();
+    SpecRunMetricsHttpResponse {
+        base,
+        review_cycles: metrics.review_cycles,
+        converged_attempts: metrics.converged_attempts,
+        convergence_rate: metrics.convergence_rate,
+        revision_requests: metrics.revision_requests,
+        approval_latency: metrics.approval_latency,
     }
 }
 
@@ -2475,31 +2503,30 @@ async fn get_factory_run_metrics(
     };
 
     let stage = params.stage.as_deref().map(str::trim).unwrap_or("");
-    let result = match stage {
-        crate::triage::domain::TRIAGE_STAGE_NAME => query.triage_metrics(),
-        crate::spec::domain::SPEC_STAGE_NAME => query.spec_metrics(),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiErrorEnvelope {
-                    error: ApiError {
-                        code: "invalid_query",
-                        message: "Query parameter 'stage' must be 'triage' or 'spec'".to_string(),
-                        status: StatusCode::BAD_REQUEST.as_u16(),
-                        details: Some(serde_json::json!({
-                            "field": "stage",
-                            "value": params.stage,
-                        })),
-                    },
-                }),
-            )
-                .into_response();
-        }
-    };
-
-    match result {
-        Ok(metrics) => Json(metrics).into_response(),
-        Err(message) => factory_query_failed(&message).into_response(),
+    match stage {
+        crate::triage::domain::TRIAGE_STAGE_NAME => match query.triage_metrics() {
+            Ok(metrics) => Json(metrics).into_response(),
+            Err(message) => factory_query_failed(&message).into_response(),
+        },
+        crate::spec::domain::SPEC_STAGE_NAME => match query.spec_metrics() {
+            Ok(metrics) => Json(metrics).into_response(),
+            Err(message) => factory_query_failed(&message).into_response(),
+        },
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorEnvelope {
+                error: ApiError {
+                    code: "invalid_query",
+                    message: "Query parameter 'stage' must be 'triage' or 'spec'".to_string(),
+                    status: StatusCode::BAD_REQUEST.as_u16(),
+                    details: Some(serde_json::json!({
+                        "field": "stage",
+                        "value": params.stage,
+                    })),
+                },
+            }),
+        )
+            .into_response(),
     }
 }
 
