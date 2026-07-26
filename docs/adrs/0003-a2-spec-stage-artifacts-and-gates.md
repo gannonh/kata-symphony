@@ -37,6 +37,7 @@ A2 turns a spec-routed GitHub issue into reviewed product and technical behavior
 ## Links
 
 - Spec: [A2 Spec Stage](/specs/2026-07-18-a2-spec-stage-design.md)
+- Verify: [A2 UAT Verify Report](/specs/2026-07-26-a2-uat-verify-report.md)
 - PRD: [Symphony Software Factory Platform](/specs/symphony-software-factory-platform-prd.md)
 - Foundation: [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md)
 - Implementation: `apps/symphony/src/spec/`, `apps/symphony/src/triage/migrations/003_spec_stage.sql`

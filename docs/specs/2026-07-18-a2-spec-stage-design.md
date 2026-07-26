@@ -1,7 +1,7 @@
 ---
 type: Spec
 title: A2 Spec Stage
-status: Active
+status: Completed
 description: Design for a durable spec stage that turns spec-routed GitHub issues into reviewed, human-approved specification artifacts and implementation-ready runs.
 tags: [symphony, software-factory, spec-stage, github]
 timestamp: 2026-07-18T17:24:00Z
@@ -11,7 +11,7 @@ timestamp: 2026-07-18T17:24:00Z
 
 ## Status
 
-Active — implementation complete; live GitHub UAT evidence pending.
+Completed — GitHub tracker workflow implemented and live UAT accepted ([verify report](/specs/2026-07-26-a2-uat-verify-report.md); [ADR-0003](/adrs/0003-a2-spec-stage-artifacts-and-gates.md)).
 
 ## Goal
 

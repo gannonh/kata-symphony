@@ -8,10 +8,10 @@ Open Knowledge Format (OKF) bundle for the Kata monorepo: Kata CLI (`apps/cli`) 
 
 # Roadmap
 
-* [Symphony Software Factory Platform PRD](specs/symphony-software-factory-platform-prd.md) - product direction and vertical-slice roadmap (Active; A1 PR1 shipped)
+* [Symphony Software Factory Platform PRD](specs/symphony-software-factory-platform-prd.md) - product direction and vertical-slice roadmap (Active; A1 PR1 shipped; A2 completed)
 * [Specs roadmap](specs/) - active, planned, and completed work (links into historical Superpowers plans/specs)
 * [A1 GitHub Issue Triage](specs/2026-07-16-a1-github-issue-triage-design.md) - PR1 shipped; PR2 Verify accepted (merge pending); PR3 implementation PR #599 has all review threads resolved and required CI passing while live acceptance remains blocked on UAT containment
-* [A2 Spec Stage](specs/2026-07-18-a2-spec-stage-design.md) - implemented durable draft/review/revise, version publication, tracker revision/approval, and pinned implementation handoff; live UAT pending
+* [A2 Spec Stage](specs/2026-07-18-a2-spec-stage-design.md) - completed; live UAT accepted ([verify](specs/2026-07-26-a2-uat-verify-report.md))
 * [ADRs](adrs/) - architecture decision records ([ADR-0001](adrs/0001-a1-triage-durability-and-isolation.md), [ADR-0002](adrs/0002-triage-process-recovery-identity.md), [ADR-0003](adrs/0003-a2-spec-stage-artifacts-and-gates.md))
 
 # Guides
