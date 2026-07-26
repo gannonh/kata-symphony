@@ -166,4 +166,71 @@ mod tests {
         });
         assert!(matches!(action, DecisionAction::Revise { .. }));
     }
+
+    #[test]
+    fn decision_table_covers_approve_stale_missing_feedback_and_cold_revision() {
+        let now = Utc::now();
+        let config = SpecConfig::default();
+
+        assert_eq!(
+            detect_decision(DecisionInput {
+                labels: std::slice::from_ref(&config.labels.approved),
+                comments: &[],
+                publisher_login: "bot",
+                published_at: now,
+                revision_is_current: true,
+                intake_revision_changed: false,
+                config: &config,
+            }),
+            DecisionAction::Approve
+        );
+        assert_eq!(
+            detect_decision(DecisionInput {
+                labels: std::slice::from_ref(&config.labels.approved),
+                comments: &[],
+                publisher_login: "bot",
+                published_at: now,
+                revision_is_current: false,
+                intake_revision_changed: true,
+                config: &config,
+            }),
+            DecisionAction::StaleApproval
+        );
+        assert_eq!(
+            detect_decision(DecisionInput {
+                labels: std::slice::from_ref(&config.labels.revise),
+                comments: &[],
+                publisher_login: "bot",
+                published_at: now,
+                revision_is_current: true,
+                intake_revision_changed: false,
+                config: &config,
+            }),
+            DecisionAction::ReviseWithoutFeedback
+        );
+        assert_eq!(
+            detect_decision(DecisionInput {
+                labels: std::slice::from_ref(&config.intake_label),
+                comments: &[],
+                publisher_login: "bot",
+                published_at: now,
+                revision_is_current: false,
+                intake_revision_changed: true,
+                config: &config,
+            }),
+            DecisionAction::ColdRevision
+        );
+        assert_eq!(
+            detect_decision(DecisionInput {
+                labels: &[],
+                comments: &[],
+                publisher_login: "bot",
+                published_at: now,
+                revision_is_current: true,
+                intake_revision_changed: false,
+                config: &config,
+            }),
+            DecisionAction::None
+        );
+    }
 }

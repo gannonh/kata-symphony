@@ -1312,10 +1312,20 @@ fn comment_author(comment: &crate::github::client::GithubIssueComment) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_path, spec_issue_revision};
+    use super::*;
     use crate::domain::ServiceConfig;
+    use crate::github::client::{GithubIssueComment, GithubUser};
+    use crate::spec::domain::{SpecArtifact, SpecTurnKind};
+    use crate::triage::domain::StageUsage;
     use crate::triage::intake::{IntakeComment, TriageIntakeIssue};
+    use crate::triage::runtime::SharedFactoryStore;
+    use crate::triage::store::{
+        ClaimAttemptRequest, StoreSpecArtifactRequest, StoreSpecTurnRequest,
+    };
     use chrono::{TimeZone, Utc};
+    use std::collections::HashMap;
+    use std::fs;
+    use std::sync::{Arc, Mutex};
 
     fn issue() -> TriageIntakeIssue {
         TriageIntakeIssue {
@@ -1403,5 +1413,445 @@ mod tests {
         let error = resolve_path("   ", "workspace.repo").expect_err("empty paths are invalid");
 
         assert!(error.to_string().contains("workspace.repo"));
+    }
+
+    #[test]
+    fn pure_helpers_cover_label_matching_and_agent_command() {
+        assert!(has_label(&["Ready-To-Spec".to_string()], "ready-to-spec"));
+        assert!(!has_label(&["other".to_string()], "ready-to-spec"));
+        assert_eq!(harness_name(TriageHarness::Pi), "pi");
+        assert_eq!(harness_name(TriageHarness::Codex), "codex");
+
+        let mut service = ServiceConfig::default();
+        service.pi_agent.command = vec!["pi".into(), "--mode".into(), "rpc".into()];
+        assert_eq!(agent_command(&service).unwrap()[0], "pi");
+        service.pi_agent.command.clear();
+        assert!(agent_command(&service).is_err());
+
+        let comment = GithubIssueComment {
+            id: 1,
+            user: Some(GithubUser {
+                login: "bot".into(),
+            }),
+            body: None,
+            html_url: None,
+            created_at: None,
+            updated_at: None,
+        };
+        assert_eq!(comment_author(&comment), "bot");
+        assert_eq!(
+            comment_author(&GithubIssueComment {
+                user: None,
+                ..comment
+            }),
+            ""
+        );
+        let _ = issue_context(&issue());
+        let _ = hash_json(&serde_json::json!({"a": 1}));
+    }
+
+    struct FakeIntake {
+        issues: Mutex<Vec<TriageIntakeIssue>>,
+    }
+
+    #[async_trait]
+    impl TriageIntakePort for Arc<FakeIntake> {
+        async fn fetch_intake_issues(
+            &self,
+            _intake_label: &str,
+            _max_pages: u32,
+        ) -> Result<Vec<TriageIntakeIssue>> {
+            Ok(self.issues.lock().unwrap().clone())
+        }
+
+        async fn list_issue_comments(
+            &self,
+            _issue_number: u64,
+            _max_pages: u32,
+        ) -> Result<Vec<IntakeComment>> {
+            Ok(Vec::new())
+        }
+
+        async fn authenticated_login(&self) -> Result<String> {
+            Ok("symphony-bot".into())
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeComments {
+        login: String,
+        comments: Mutex<HashMap<u64, GithubIssueComment>>,
+        next_id: Mutex<u64>,
+    }
+
+    impl FakeComments {
+        fn new(login: &str) -> Arc<Self> {
+            Arc::new(Self {
+                login: login.into(),
+                comments: Mutex::new(HashMap::new()),
+                next_id: Mutex::new(900),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl TriageCommentPort for Arc<FakeComments> {
+        async fn authenticated_login(&self) -> Result<String> {
+            Ok(self.login.clone())
+        }
+
+        async fn list_comments(
+            &self,
+            _issue_number: u64,
+            _max_pages: u32,
+        ) -> Result<Vec<GithubIssueComment>> {
+            let mut values: Vec<_> = self.comments.lock().unwrap().values().cloned().collect();
+            values.sort_by_key(|comment| comment.id);
+            Ok(values)
+        }
+
+        async fn get_comment(&self, comment_id: u64) -> Result<GithubIssueComment> {
+            self.comments
+                .lock()
+                .unwrap()
+                .get(&comment_id)
+                .cloned()
+                .ok_or_else(|| SymphonyError::GithubApiStatus {
+                    status: 404,
+                    message: "missing".into(),
+                })
+        }
+
+        async fn create_comment(
+            &self,
+            _issue_number: u64,
+            body: &str,
+        ) -> Result<GithubIssueComment> {
+            let mut next = self.next_id.lock().unwrap();
+            let id = *next;
+            *next += 1;
+            let comment = GithubIssueComment {
+                id,
+                user: Some(GithubUser {
+                    login: self.login.clone(),
+                }),
+                body: Some(body.to_string()),
+                html_url: None,
+                created_at: None,
+                updated_at: None,
+            };
+            self.comments.lock().unwrap().insert(id, comment.clone());
+            Ok(comment)
+        }
+
+        async fn update_comment(&self, comment_id: u64, body: &str) -> Result<GithubIssueComment> {
+            let mut comments = self.comments.lock().unwrap();
+            let comment =
+                comments
+                    .get_mut(&comment_id)
+                    .ok_or_else(|| SymphonyError::GithubApiStatus {
+                        status: 404,
+                        message: "missing".into(),
+                    })?;
+            comment.body = Some(body.to_string());
+            Ok(comment.clone())
+        }
+    }
+
+    struct FakeRouting {
+        labels: Mutex<Vec<String>>,
+        project_state: Mutex<Option<String>>,
+    }
+
+    impl FakeRouting {
+        fn new(labels: &[&str]) -> Arc<Self> {
+            Arc::new(Self {
+                labels: Mutex::new(labels.iter().map(|label| (*label).to_string()).collect()),
+                project_state: Mutex::new(None),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl TriageRoutingPort for Arc<FakeRouting> {
+        async fn list_issue_labels(&self, _issue_number: u64) -> Result<Vec<String>> {
+            Ok(self.labels.lock().unwrap().clone())
+        }
+
+        async fn issue_project_state(&self, _issue_number: u64) -> Result<Option<String>> {
+            Ok(self.project_state.lock().unwrap().clone())
+        }
+
+        async fn add_issue_label(&self, _issue_number: u64, label: &str) -> Result<()> {
+            let mut labels = self.labels.lock().unwrap();
+            if !labels
+                .iter()
+                .any(|present| present.eq_ignore_ascii_case(label))
+            {
+                labels.push(label.to_string());
+            }
+            Ok(())
+        }
+
+        async fn remove_issue_label(&self, _issue_number: u64, label: &str) -> Result<()> {
+            self.labels
+                .lock()
+                .unwrap()
+                .retain(|present| !present.eq_ignore_ascii_case(label));
+            Ok(())
+        }
+
+        async fn set_issue_project_state(&self, _issue_number: u64, state: &str) -> Result<()> {
+            *self.project_state.lock().unwrap() = Some(state.to_string());
+            Ok(())
+        }
+    }
+
+    fn write_prompts(dir: &Path) {
+        for name in ["draft.md", "review.md", "revise.md"] {
+            fs::write(dir.join(name), format!("# {name}\n")).unwrap();
+        }
+    }
+
+    fn enabled_service(workflow_dir: &Path) -> ServiceConfig {
+        let mut service = ServiceConfig::default();
+        service.spec.enabled = true;
+        service.triage.enabled = true;
+        service.triage.intake_label = "needs-triage".into();
+        service.spec.prompts.draft = "draft.md".into();
+        service.spec.prompts.review = "review.md".into();
+        service.spec.prompts.revise = "revise.md".into();
+        service.workspace.root = workflow_dir.join("workspaces").display().to_string();
+        service.workspace.repo = Some(workflow_dir.join("repo").display().to_string());
+        service.pi_agent.command = vec!["pi".into()];
+        fs::create_dir_all(workflow_dir.join("workspaces")).unwrap();
+        fs::create_dir_all(workflow_dir.join("repo")).unwrap();
+        write_prompts(workflow_dir);
+        service
+    }
+
+    fn open_store(path: &Path) -> SharedFactoryStore {
+        SharedFactoryStore::open(path, 5_000).unwrap()
+    }
+
+    fn seed_published_spec(
+        store: &SharedFactoryStore,
+        service: &ServiceConfig,
+        issue: &TriageIntakeIssue,
+    ) -> SpecArtifactRecord {
+        let workflow_dir = Path::new(&service.workspace.root).parent().unwrap();
+        let prompts = load_prompts(workflow_dir, service).unwrap();
+        let configuration_revision = spec_configuration_revision(service, &prompts);
+        let issue_revision = spec_issue_revision(issue, service, "symphony-bot");
+        let stage = store
+            .claim_spec_attempt(ClaimAttemptRequest {
+                forge_host: "github.com".into(),
+                repository: "owner/repo".into(),
+                issue_id: issue.issue_id.clone(),
+                issue_identifier: issue.identifier.clone(),
+                issue_revision: issue_revision.clone(),
+                configuration_revision: configuration_revision.clone(),
+                owner_instance: "test".into(),
+                harness: "pi".into(),
+                model: None,
+                workspace_path: None,
+                output_path: None,
+                pid: None,
+                process_group_id: None,
+                process_start_token: None,
+                executable_identity: None,
+            })
+            .unwrap();
+        store
+            .store_spec_turn(StoreSpecTurnRequest {
+                turn_id: format!("seed-turn-{}", issue.issue_id),
+                stage_run_id: stage.stage_run_id.clone(),
+                ordinal: 1,
+                kind: SpecTurnKind::Draft,
+                status: SpecTurnStatus::Completed,
+                harness: "pi".into(),
+                model: None,
+                usage: StageUsage::default(),
+                output_json: None,
+                error: None,
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+            })
+            .unwrap();
+        let artifact = store
+            .store_spec_artifact(StoreSpecArtifactRequest {
+                stage_run_id: stage.stage_run_id,
+                issue_revision,
+                configuration_revision,
+                artifact: SpecArtifact {
+                    schema_version: 1,
+                    product_behavior: "behavior".into(),
+                    technical_approach: "approach".into(),
+                    acceptance_criteria: vec!["done".into()],
+                    open_decisions: vec![],
+                },
+                review_cycles: 1,
+                unresolved_blocking_findings: vec![],
+                bytes_len: 64,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+        let intent = store
+            .create_spec_publication_intent(
+                &stage.run_id,
+                Some(&artifact.artifact_id),
+                SpecPublicationKind::Preview,
+                &serde_json::json!({"issue_number": issue.issue_number}),
+            )
+            .unwrap();
+        // Leave comment_id unset so the first poll creates the owned comment through
+        // the fake comment port. Completing the intent marks the version published.
+        store
+            .complete_spec_publication(&intent.intent_id, "spec_comment")
+            .unwrap();
+        let _ = intent;
+        artifact
+    }
+
+    #[tokio::test]
+    async fn poll_handles_disabled_dual_label_and_off_project_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = temp.path().to_path_buf();
+        let service = enabled_service(&workflow_dir);
+        let store = open_store(&temp.path().join("state.db"));
+
+        let mut dual = issue();
+        dual.issue_id = "2".into();
+        dual.issue_number = 2;
+        dual.identifier = "#2".into();
+        dual.labels = vec!["needs-triage".into(), "ready-to-spec".into()];
+
+        let mut off = issue();
+        off.issue_id = "3".into();
+        off.issue_number = 3;
+        off.identifier = "#3".into();
+        off.in_project = false;
+
+        let intake = Arc::new(FakeIntake {
+            issues: Mutex::new(vec![dual, off]),
+        });
+        let comments = FakeComments::new("symphony-bot");
+        let routing = FakeRouting::new(&["ready-to-spec"]);
+        let mut coordinator = SpecCoordinator::new(
+            store.clone(),
+            intake,
+            comments.clone(),
+            routing,
+            SpecCoordinatorConfig {
+                forge_host: "github.com".into(),
+                repository: "owner/repo".into(),
+                owner_instance: "test".into(),
+                workflow_dir: workflow_dir.clone(),
+            },
+        );
+
+        let mut disabled = service.clone();
+        disabled.spec.enabled = false;
+        let summary = coordinator.poll_once(&disabled).await.unwrap();
+        assert!(!summary.spec_enabled);
+
+        let summary = coordinator.poll_once(&service).await.unwrap();
+        assert_eq!(summary.issues_seen, 2);
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.ineligible, 1);
+        assert_eq!(comments.comments.lock().unwrap().len(), 1);
+
+        // Second poll must not grow dual-label events or off-project intents.
+        let summary = coordinator.poll_once(&service).await.unwrap();
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.ineligible, 1);
+        assert_eq!(comments.comments.lock().unwrap().len(), 1);
+        assert_eq!(
+            store.list_pending_spec_publications().unwrap().len(),
+            0,
+            "diagnostic intent is applied, not pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_approves_current_version_and_diagnoses_missing_feedback() {
+        let temp = tempfile::tempdir().unwrap();
+        let workflow_dir = temp.path().to_path_buf();
+        let service = enabled_service(&workflow_dir);
+        let store = open_store(&temp.path().join("state.db"));
+
+        // Missing-feedback path.
+        let mut revise_issue = issue();
+        revise_issue.issue_id = "10".into();
+        revise_issue.issue_number = 10;
+        revise_issue.identifier = "#10".into();
+        revise_issue.labels = vec!["ready-to-spec".into(), "spec-revise".into()];
+        seed_published_spec(&store, &service, &revise_issue);
+
+        // Approval path.
+        let mut approve_issue = issue();
+        approve_issue.issue_id = "11".into();
+        approve_issue.issue_number = 11;
+        approve_issue.identifier = "#11".into();
+        approve_issue.labels = vec!["ready-to-spec".into(), "spec-approved".into()];
+        seed_published_spec(&store, &service, &approve_issue);
+
+        let intake = Arc::new(FakeIntake {
+            issues: Mutex::new(vec![revise_issue.clone(), approve_issue.clone()]),
+        });
+        let comments = FakeComments::new("symphony-bot");
+        let routing = FakeRouting::new(&["ready-to-spec", "spec-approved", "spec-revise"]);
+        let mut coordinator = SpecCoordinator::new(
+            store.clone(),
+            intake.clone(),
+            comments.clone(),
+            routing.clone(),
+            SpecCoordinatorConfig {
+                forge_host: "github.com".into(),
+                repository: "owner/repo".into(),
+                owner_instance: "test".into(),
+                workflow_dir,
+            },
+        );
+
+        let summary = coordinator.poll_once(&service).await.unwrap();
+        assert_eq!(
+            summary.skipped, 1,
+            "missing feedback is diagnosed and skipped"
+        );
+        assert_eq!(summary.approved, 1);
+
+        use crate::triage::store::FactoryRunStore;
+        let approve_run = store
+            .get_run_by_issue("github.com", "owner/repo", "11")
+            .unwrap()
+            .unwrap();
+        let state = store.get_spec_state(&approve_run.run_id).unwrap().unwrap();
+        assert_eq!(state.approved_version, Some(1));
+        assert!(routing
+            .labels
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|label| label == "ready-for-agent"));
+        assert_eq!(
+            routing.project_state.lock().unwrap().as_deref(),
+            Some("Todo")
+        );
+
+        // Conflict path on a third issue with a published version.
+        let mut conflict = issue();
+        conflict.issue_id = "12".into();
+        conflict.issue_number = 12;
+        conflict.identifier = "#12".into();
+        conflict.labels = vec![
+            "ready-to-spec".into(),
+            "spec-approved".into(),
+            "spec-revise".into(),
+        ];
+        seed_published_spec(&store, &service, &conflict);
+        *intake.issues.lock().unwrap() = vec![conflict];
+        let summary = coordinator.poll_once(&service).await.unwrap();
+        assert_eq!(summary.skipped, 1);
     }
 }

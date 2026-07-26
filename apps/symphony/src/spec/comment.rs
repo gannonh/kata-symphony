@@ -99,29 +99,78 @@ pub fn render_spec_comment(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::domain::SpecArtifact;
+    use crate::spec::domain::{FindingSection, FindingSeverity, ReviewFinding, SpecArtifact};
+
+    fn artifact() -> SpecArtifact {
+        SpecArtifact {
+            schema_version: 1,
+            product_behavior: "Behavior".to_string(),
+            technical_approach: "Approach".to_string(),
+            acceptance_criteria: vec!["Observable".to_string()],
+            open_decisions: vec!["Open item".to_string()],
+        }
+    }
+
+    fn render(state: SpecCommentState<'_>) -> String {
+        render_spec_comment("intent", "run", "stage", 1, 2, &artifact(), &[], state)
+    }
 
     #[test]
     fn renders_owned_versioned_preview() {
-        let body = render_spec_comment(
-            "intent",
-            "run",
-            "stage",
-            1,
-            2,
-            &SpecArtifact {
-                schema_version: 1,
-                product_behavior: "Behavior".to_string(),
-                technical_approach: "Approach".to_string(),
-                acceptance_criteria: vec!["Observable".to_string()],
-                open_decisions: vec![],
-            },
-            &[],
-            SpecCommentState::Preview,
-        );
+        let body = render(SpecCommentState::Preview);
         assert!(body.starts_with("<!-- symphony:spec:intent -->"));
         assert!(body.contains("**Version:** 2"));
         assert!(body.contains("### Product behavior"));
         assert!(body.contains("**Preview:**"));
+        assert!(body.contains("- Open item"));
+    }
+
+    #[test]
+    fn renders_awaiting_decision_and_approval_states() {
+        assert!(render(SpecCommentState::AwaitingDecision).contains("`spec-approved`"));
+        assert!(render(SpecCommentState::ApprovalPending).contains("Approval pending"));
+        assert!(render(SpecCommentState::Diagnostic("Add feedback."))
+            .contains("**Action required:** Add feedback."));
+
+        let with_state = render(SpecCommentState::Approved {
+            route_label: "ready-for-agent",
+            project_state: Some("Todo"),
+        });
+        assert!(with_state.contains("implementation-ready"));
+        assert!(with_state.contains("`ready-for-agent`"));
+        assert!(with_state.contains("`Todo`"));
+
+        let without_state = render(SpecCommentState::Approved {
+            route_label: "ready-for-agent",
+            project_state: None,
+        });
+        assert!(without_state.contains("`ready-for-agent`"));
+        assert!(!without_state.contains("project state"));
+    }
+
+    #[test]
+    fn renders_unresolved_blocking_findings_and_empty_open_decisions() {
+        let body = render_spec_comment(
+            "intent",
+            "run",
+            "stage",
+            3,
+            1,
+            &SpecArtifact {
+                open_decisions: vec![],
+                ..artifact()
+            },
+            &[ReviewFinding {
+                severity: FindingSeverity::Blocking,
+                section: FindingSection::AcceptanceCriteria,
+                summary: "Not observable".to_string(),
+                recommendation: "Name the signal".to_string(),
+            }],
+            SpecCommentState::AwaitingDecision,
+        );
+        assert!(body.contains("_None._"));
+        assert!(body.contains("Unresolved blocking review findings"));
+        assert!(body.contains("Not observable"));
+        assert!(body.contains("Name the signal"));
     }
 }
