@@ -431,7 +431,7 @@ jobs:
 
       - name: Create Symphony GitHub Release
         if: needs.preflight.outputs.previous_tag != ''
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
           target_commitish: ${{ needs.preflight.outputs.ref }}
@@ -449,7 +449,7 @@ jobs:
 
       - name: Create first Symphony GitHub Release
         if: needs.preflight.outputs.previous_tag == ''
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
           target_commitish: ${{ needs.preflight.outputs.ref }}
@@ -465,7 +465,7 @@ jobs:
           fail_on_unmatched_files: true
 
       - name: Create Pi extension GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.preflight.outputs.secondary_tag }}
           target_commitish: ${{ needs.preflight.outputs.ref }}
