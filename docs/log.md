@@ -1,5 +1,9 @@
 # Docs Update Log
 
+## 2026-07-27
+* **A1 PR3 shipped; A1 complete**: Roadmap marks A1 GitHub path complete (PR1–PR3, [#599](https://github.com/gannonh/kata-symphony/pull/599)), clears Blocked, and keeps A3 as next. Updated [docs index](/index.md), [specs roadmap](/specs/index.md), A1/A2/A3 designs, PRD, and PR3 build/re-verify reports.
+* **A1 PR2 shipped; A3 next**: Roadmap and OKF entry points mark A1 PR2 shipped ([#598](https://github.com/gannonh/kata-symphony/pull/598)) and promote A3 to Active as the next factory slice. Updated [docs index](/index.md), [specs roadmap](/specs/index.md), A1/A2/A3 designs, and [factory PRD](/specs/symphony-software-factory-platform-prd.md).
+
 ## 2026-07-26
 * **A3 draft**: Added the [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md) on the shipped A2 approved-artifact boundary, covering credential-isolated local/Docker implementation, deterministic validation and repair, durable Git bundles, Symphony-owned draft-PR publication, and Agent Review handoff.
 * **A2 completed**: Live GitHub UAT accepted for the durable GitHub spec stage ([verify report](/specs/2026-07-26-a2-uat-verify-report.md)). Nine product defects and two measure gaps found during UAT were fixed (`4fda65a1`, `17999528`). Roadmap, [A2 design](/specs/2026-07-18-a2-spec-stage-design.md), and [factory PRD](/specs/symphony-software-factory-platform-prd.md) mark A2 complete under the documented tracker-only narrowings.

@@ -85,7 +85,7 @@ A2 must add:
 - stale-approval and conflict handling across issue and configuration revisions;
 - spec HTTP surface, events, doctor checks, prompts, and starter configuration.
 
-Not yet shipped and not required by A2: A1 PR2 automatic route publication, A1 PR3 correction measurement. When A1 PR2 ships, its `spec` route applies the same label A2 polls; no A2 change is needed.
+A1 PR2 automatic route publication shipped in [#598](https://github.com/gannonh/kata-symphony/pull/598); its `spec` route applies the same label A2 polls. A1 PR3 recovery and agreement measurement shipped in [#599](https://github.com/gannonh/kata-symphony/pull/599).
 
 ## Scope
 

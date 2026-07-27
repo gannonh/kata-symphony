@@ -11,7 +11,7 @@ timestamp: 2026-07-24T17:16:00-07:00
 
 ## Status
 
-**Accepted** (maintainer sign-off 2026-07-24) — automated suite + live GitHub UAT on the dedicated UAT project both Pass. Merge/PR still pending.
+**Accepted** (maintainer sign-off 2026-07-24) — automated suite + live GitHub UAT on the dedicated UAT project both Pass. Subsequently shipped in [#598](https://github.com/gannonh/kata-symphony/pull/598) (`6a454fe9`, merged 2026-07-25).
 
 ## Spec / Build
 
@@ -56,4 +56,4 @@ Evidence bundle (gitignored): `uat-evidence/cli-a1-pr2-20260724/`.
 
 ## Recommendation
 
-**Accepted.** Next: commit the working tree and open the PR2 merge PR when ready.
+**Accepted.** Subsequently shipped in [#598](https://github.com/gannonh/kata-symphony/pull/598). Next factory slice is A3.

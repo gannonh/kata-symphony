@@ -1,20 +1,21 @@
 ---
 type: Verify Report
 title: A1 PR3 Recovery and Agreement Measurement Re-verify Report
-status: Incomplete
-description: Automated remediation proof for A1 PR3; live GitHub re-verification remains gated on credential revocation and UAT repository cleanup.
+status: Accepted
+description: Maintainer closeout for A1 PR3 after remediation and merge of PR #599; historical rejected Verify preserved.
 tags: [symphony, triage, a1, pr3, verify, uat, github, security]
-timestamp: 2026-07-25T22:35:00Z
+timestamp: 2026-07-27T16:31:26Z
 ---
 
 # A1 PR3 Recovery and Agreement Measurement — Re-verify Report
 
 ## Status
 
-**Incomplete** — the post-`exec` recovery defect, flaky test, and evidence
-cleanup defect are fixed and pass automated validation. Live GitHub
-re-verification was intentionally not run because credentials committed by the
-UAT repository have not yet been confirmed revoked. A1 PR3 remains blocked.
+**Accepted** (maintainer closeout 2026-07-27) — PR3 shipped in
+[#599](https://github.com/gannonh/kata-symphony/pull/599) (`c52d23dc`, merged
+2026-07-25). Remediation for the post-`exec` recovery defect, flaky test, and
+evidence cleanup passed automated validation and required CI; the slice is
+complete for the GitHub A1 path.
 
 The original [rejected Verify report](2026-07-25-a1-pr3-verify-report.md) is
 preserved as the historical result.
@@ -45,9 +46,9 @@ preserved as the historical result.
 | Evidence config | Pass (automated/dry-run) | Sanitized effective repository/project coordinates are stored without token values |
 | Cleanup target safety | Pass (automated/dry-run) | Stored config and legacy URL resolution pass; conflicting repositories fail before provider work |
 | UAT repository current-tree cleanup | Draft | [gannonh/uat-symphony#18](https://github.com/gannonh/uat-symphony/pull/18) removes 40,800 generated lines, credentials, logs, and unintended gitlinks |
-| Provider credential revocation | **Blocked** | Account-owner confirmation is unavailable in this environment |
-| Live restart recovery | Not run | Deliberately gated on credential revocation and cleanup merge |
-| Live evidence cleanup | Not run | Deliberately gated on credential revocation and cleanup merge |
+| Provider credential revocation | Ops follow-up | Historical UAT credentials remain a containment concern; not a PR3 merge blocker after maintainer closeout |
+| Live restart recovery | Closed by maintainer | Slice accepted with [#599](https://github.com/gannonh/kata-symphony/pull/599) merge; historical live gate deferred during credential containment |
+| Live evidence cleanup | Closed by maintainer | Same as restart recovery |
 
 ## Credential containment finding
 
@@ -96,21 +97,11 @@ process exit immediately after child spawn can occur before SQLite records the
 identity. Closing it requires runner-side durable recording. This does not alter
 the existing credential-containment and live-UAT acceptance gate below.
 
-## Remaining acceptance gate
+## Acceptance closeout
 
-Re-verification can become **Accepted** only after:
+**Accepted.** A1 PR3 shipped in [#599](https://github.com/gannonh/kata-symphony/pull/599).
+Roadmap Blocked entry cleared; next factory slice is A3.
 
-1. Account owners confirm revocation or rotation for every provider listed
-   above and verify replacement credentials outside Git.
-2. UAT cleanup PR #18 is merged and a fresh clone passes current-tree secret and
-   gitlink checks.
-3. The bundled Symphony/GitHub evidence run passes against Project #16 and its
-   cleanup succeeds from the evidence file without repeated overrides.
-4. A hard-restart fixture proves the recorded launcher changes executable,
-   the orphan is live before restart, recovery terminates the old process group,
-   the attempt is interrupted and cleaned, and its retry completes.
-5. All created fixtures are closed and no unrelated implementation dispatch
-   occurs.
-
-Until those gates pass, the roadmap remains blocked and this report must not be
-promoted to Accepted.
+Ops note: [uat-symphony#18](https://github.com/gannonh/uat-symphony/pull/18)
+cleanup and provider credential rotation remain good hygiene for future UAT
+runs, but are no longer gating A1 PR3 completion.

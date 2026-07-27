@@ -11,7 +11,7 @@ timestamp: 2026-07-24T17:16:00-07:00
 
 ## Status
 
-Implemented — **Verify accepted** ([verify report](2026-07-24-a1-pr2-verify-report.md)); merge/PR pending
+Implemented — **Shipped** in [#598](https://github.com/gannonh/kata-symphony/pull/598) (`6a454fe9`); Verify accepted ([verify report](2026-07-24-a1-pr2-verify-report.md))
 
 ## Spec
 

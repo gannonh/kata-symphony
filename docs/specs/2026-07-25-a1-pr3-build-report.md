@@ -4,14 +4,14 @@ title: A1 PR3 Recovery and Agreement Measurement Build Report
 status: Implemented
 description: Build completion report for A1 PR3 interrupted-attempt recovery, route correction measurement, and agreement metrics.
 tags: [symphony, triage, a1, pr3, recovery, correction]
-timestamp: 2026-07-25T22:35:00Z
+timestamp: 2026-07-27T16:31:26Z
 ---
 
 # A1 PR3 Recovery and Agreement Measurement — Build Report
 
 ## Status
 
-**Implemented** — automated gates pass. Live GitHub UAT (AC18 restart + correction evidence) is outstanding and belongs to Verify.
+**Shipped** in [#599](https://github.com/gannonh/kata-symphony/pull/599) (`c52d23dc`, merged 2026-07-25). Automated gates passed; maintainer accepted the slice as complete ([re-verify](2026-07-25-a1-pr3-reverify-report.md)).
 
 ## Spec
 
@@ -127,8 +127,8 @@ launcher regression covers the exact failure shape.
 
 Commit `424bd4b` makes Symphony UAT evidence self-contained and validates every
 GitHub cleanup target before provider work. The automated remediation gates pass;
-live re-verification remains gated on credential containment as recorded in the
-[re-verify report](2026-07-25-a1-pr3-reverify-report.md).
+maintainer later accepted and shipped the slice in
+[#599](https://github.com/gannonh/kata-symphony/pull/599) ([re-verify](2026-07-25-a1-pr3-reverify-report.md)).
 
 ## 2026-07-25 PR review addendum
 
@@ -149,5 +149,5 @@ The focused `triage::` suite passed 89/89 tests. PR CI run
 [`30177679884`](https://github.com/gannonh/kata-symphony/actions/runs/30177679884)
 passed validate, Symphony coverage, GitHub backend validation, golden-path smoke,
 distribution, and aggregate gate checks after the formatting follow-up
-`6833395a`. All PR review threads are resolved. These results close automated PR
-review findings; they do not replace the blocked live-UAT acceptance gate.
+`6833395a`. All PR review threads are resolved. Subsequently shipped/merged as
+[#599](https://github.com/gannonh/kata-symphony/pull/599) (`c52d23dc`).

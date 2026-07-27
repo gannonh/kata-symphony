@@ -210,13 +210,13 @@ The roadmap horizons describe outcome clusters. They are not release trains or p
 
 A new GitHub or Linear issue triggers a triage stage. Symphony creates the minimum durable factory run, triage stage run, and triage artifact for that issue. The issue receives one route: implement, spec, needs information, park, or human-owned. The tracker shows the rationale, evidence, risk class, and next action.
 
-**Progress (2026-07-18):** GitHub **preview** shipped in [#587](https://github.com/gannonh/kata-symphony/pull/587). Design: [A1 GitHub Issue Triage](/specs/2026-07-16-a1-github-issue-triage-design.md). Decisions: [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md).
+**Progress (2026-07-27):** GitHub path complete — preview [#587](https://github.com/gannonh/kata-symphony/pull/587), automatic route publication [#598](https://github.com/gannonh/kata-symphony/pull/598), recovery and agreement [#599](https://github.com/gannonh/kata-symphony/pull/599). Design: [A1 GitHub Issue Triage](/specs/2026-07-16-a1-github-issue-triage-design.md). Decisions: [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md), [ADR-0002](/adrs/0002-triage-process-recovery-identity.md).
 
 | Slice | Status | Notes |
 | --- | --- | --- |
 | PR1 preview | **Shipped** | Intake label + Projects v2 membership, local Pi/Codex triage, immutable artifact, durable preview comment, factory-run HTTP read API, doctor/starter assets |
-| PR2 automatic route publication | **Verify accepted** (merge pending) | Apply route labels/states, remove intake label, implement handoff ([build](/specs/2026-07-24-a1-pr2-build-report.md), [verify](/specs/2026-07-24-a1-pr2-verify-report.md)) |
-| PR3 recovery and agreement | **PR #599 threads resolved/CI passed; live re-verify blocked** | Post-`exec` recovery, process-group isolation, retained unresolved recovery state, cleanup authorization, correction candidate fixes, and evidence cleanup pass automated gates; credential rotation, UAT cleanup PR #18, and clean live UAT remain ([build](/specs/2026-07-25-a1-pr3-build-report.md), [rejected verify](/specs/2026-07-25-a1-pr3-verify-report.md), [incomplete re-verify](/specs/2026-07-25-a1-pr3-reverify-report.md)) |
+| PR2 automatic route publication | **Shipped** | [#598](https://github.com/gannonh/kata-symphony/pull/598); apply route labels/states, remove intake label, implement handoff ([build](/specs/2026-07-24-a1-pr2-build-report.md), [verify](/specs/2026-07-24-a1-pr2-verify-report.md)) |
+| PR3 recovery and agreement | **Shipped** | [#599](https://github.com/gannonh/kata-symphony/pull/599); post-`exec` recovery, process-group isolation, retained unresolved recovery state, cleanup authorization, correction measurement ([build](/specs/2026-07-25-a1-pr3-build-report.md), [re-verify](/specs/2026-07-25-a1-pr3-reverify-report.md); historical [rejected verify](/specs/2026-07-25-a1-pr3-verify-report.md)) |
 | Linear triage | Deferred | Separate vertical slice after GitHub path is complete |
 
 **Demo (PR1):** Label a project-member issue `needs-triage`. Symphony records a factory run, posts a marked preview comment with route/rationale/evidence, and exposes the run over `GET /api/v1/factory-runs`. Off-project intake gets a diagnostic comment without an agent attempt.
@@ -237,11 +237,11 @@ A spec-routed issue produces versioned product behavior, technical approach, acc
 
 Implementation consumes the approved artifact version, runs repository validation, and opens a draft PR that links the issue, spec version, factory run, and validation summary.
 
-**Design (2026-07-26):** [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md) defines A2-approved-only intake, credential-isolated local and Docker implementation, a committed approved-spec file, deterministic validation with bounded repair, durable Git bundles, and Symphony-owned draft-PR publication.
+**Progress (2026-07-27):** **Next** factory slice. Active design: [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md) defines A2-approved-only intake, credential-isolated local and Docker implementation, a committed approved-spec file, deterministic validation with bounded repair, durable Git bundles, and Symphony-owned draft-PR publication. A1 PR2 and A2 prerequisites are shipped.
 
 | Slice | Status | Notes |
 | --- | --- | --- |
-| PR1 implementation and validation preview | Planned | Local/Docker runners, typed manifest, committed approved spec, blocking validation/repair, durable bundle, tracker-visible preview |
+| PR1 implementation and validation preview | **Next** | Local/Docker runners, typed manifest, committed approved spec, blocking validation/repair, durable bundle, tracker-visible preview |
 | PR2 deterministic draft-PR publication | Planned | Expected-projection branch push, owned draft PR, restart recovery, Agent Review handoff |
 
 **Demo:** Approve a spec and watch Symphony produce a draft PR whose description records the intended behavior and evidence.

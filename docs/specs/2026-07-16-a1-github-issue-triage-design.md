@@ -1,17 +1,17 @@
 ---
 type: Spec
 title: A1 GitHub Issue Triage
-status: Active
+status: Completed
 description: Design for a durable, repository-backed GitHub triage stage that routes issues into Symphony's software factory.
 tags: [symphony, software-factory, triage, github]
-timestamp: 2026-07-25T22:35:00Z
+timestamp: 2026-07-27T16:31:26Z
 ---
 
 # A1 GitHub Issue Triage
 
 ## Status
 
-Active — **PR1 (triage preview) shipped** in [#587](https://github.com/gannonh/kata-symphony/pull/587) (`80b3c215`). **PR2 (automatic route publication) Verify accepted** ([build](/specs/2026-07-24-a1-pr2-build-report.md), [verify](/specs/2026-07-24-a1-pr2-verify-report.md)); merge/PR pending. **PR3 (recovery and agreement measurement) implementation PR [#599](https://github.com/gannonh/kata-symphony/pull/599) has all review threads resolved and required CI passing; live re-verify remains blocked on UAT credential rotation and cleanup PR #18** ([build](/specs/2026-07-25-a1-pr3-build-report.md), [rejected verify](/specs/2026-07-25-a1-pr3-verify-report.md), [incomplete re-verify](/specs/2026-07-25-a1-pr3-reverify-report.md)).
+Completed — GitHub path shipped: **PR1** [#587](https://github.com/gannonh/kata-symphony/pull/587) (`80b3c215`), **PR2** [#598](https://github.com/gannonh/kata-symphony/pull/598) (`6a454fe9`), **PR3** [#599](https://github.com/gannonh/kata-symphony/pull/599) (`c52d23dc`) ([PR2 build](/specs/2026-07-24-a1-pr2-build-report.md), [PR2 verify](/specs/2026-07-24-a1-pr2-verify-report.md), [PR3 build](/specs/2026-07-25-a1-pr3-build-report.md), [PR3 re-verify](/specs/2026-07-25-a1-pr3-reverify-report.md)). Linear triage remains deferred.
 
 Related decisions: [ADR-0001 A1 triage durability and isolation](/adrs/0001-a1-triage-durability-and-isolation.md) and [ADR-0002 triage process recovery identity](/adrs/0002-triage-process-recovery-identity.md).
 

@@ -71,7 +71,7 @@ Measure path (`17999528`):
 ## Caveats
 
 - Historical turns recorded before the token fix remain zero; new turns capture usage.
-- A1 PR3 live acceptance remains separately blocked (credential rotation / UAT cleanup).
+- A1 PR3 subsequently shipped in [#599](https://github.com/gannonh/kata-symphony/pull/599).
 - Documented A2 narrowings stand: tracker-only approval; one artifact with product and technical sections.
 
 ## Recommendation

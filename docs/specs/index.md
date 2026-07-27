@@ -5,22 +5,24 @@ Roadmap for planned and completed work. Historical Superpowers designs and plans
 # Active
 
 * [Symphony Software Factory Platform PRD](symphony-software-factory-platform-prd.md) - product requirements and vertical-slice roadmap for the full software factory platform
-* [A1 GitHub Issue Triage](2026-07-16-a1-github-issue-triage-design.md) - Active design; **PR1 shipped**; **PR2 Verify accepted** (merge pending) ([build](2026-07-24-a1-pr2-build-report.md), [verify](2026-07-24-a1-pr2-verify-report.md)); **PR3 implementation PR [#599](https://github.com/gannonh/kata-symphony/pull/599) has all review threads resolved and required CI passing, while live re-verify remains blocked on credential rotation and UAT cleanup** ([build](2026-07-25-a1-pr3-build-report.md), [rejected verify](2026-07-25-a1-pr3-verify-report.md), [incomplete re-verify](2026-07-25-a1-pr3-reverify-report.md))
+* [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md) - **Next**; Active design; pinned A2 approved spec → credential-isolated local/Docker implementation → deterministic validation and repair → durable change bundle → linked draft GitHub PR. A1 and A2 prerequisites shipped.
 * [Pi Symphony Extension Design](../superpowers/specs/2026-05-14-pi-symphony-extension-design.md) - Pi extension to init, launch, monitor, and steer Symphony
 * [Wave 4 Shared Context and Diagnostics Plan](../superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md) - dashboard parity for shared context + diagnostics
 
 # Planned
 
-* [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md) - Draft design; pinned A2 approved spec → credential-isolated local/Docker implementation → deterministic validation and repair → durable change bundle → linked draft GitHub PR. A2 prerequisite shipped and live UAT accepted.
+_(none — A3 is Active as the next factory slice)_
 
 # Blocked
 
-* A1 PR3 recovery and agreement measurement — implementation PR [#599](https://github.com/gannonh/kata-symphony/pull/599) has all review threads resolved and required CI passing; revoke committed UAT credentials, merge [UAT cleanup PR #18](https://github.com/gannonh/uat-symphony/pull/18), then rerun live restart/evidence Verify ([rejected report](2026-07-25-a1-pr3-verify-report.md), [incomplete re-verify](2026-07-25-a1-pr3-reverify-report.md))
+_(none)_
 
 # Completed (recent)
 
+* A1 GitHub Issue Triage — GitHub path complete: PR1 [#587](https://github.com/gannonh/kata-symphony/pull/587), PR2 [#598](https://github.com/gannonh/kata-symphony/pull/598), PR3 [#599](https://github.com/gannonh/kata-symphony/pull/599) (`c52d23dc`); Linear triage deferred ([design](2026-07-16-a1-github-issue-triage-design.md); [ADR-0001](../adrs/0001-a1-triage-durability-and-isolation.md), [ADR-0002](../adrs/0002-triage-process-recovery-identity.md))
 * A2 Spec Stage — live UAT accepted on `uat-symphony` Project #16 ([verify](2026-07-26-a2-uat-verify-report.md); [ADR-0003](../adrs/0003-a2-spec-stage-artifacts-and-gates.md))
-* A1 PR2 automatic route publication — Verify accepted on `uat-symphony` Project #16 ([verify](2026-07-24-a1-pr2-verify-report.md)); merge/PR pending
+* A1 PR3 recovery and agreement measurement — shipped in [#599](https://github.com/gannonh/kata-symphony/pull/599) (`c52d23dc`) ([build](2026-07-25-a1-pr3-build-report.md), [re-verify](2026-07-25-a1-pr3-reverify-report.md))
+* A1 PR2 automatic route publication — shipped in [#598](https://github.com/gannonh/kata-symphony/pull/598) (`6a454fe9`); Verify accepted on `uat-symphony` Project #16 ([verify](2026-07-24-a1-pr2-verify-report.md))
 * A1 PR1 triage preview — durable factory runs, intake, runner, preview comments, HTTP read API ([#587](https://github.com/gannonh/kata-symphony/pull/587); [ADR-0001](../adrs/0001-a1-triage-durability-and-isolation.md))
 
 # Completed (archived)

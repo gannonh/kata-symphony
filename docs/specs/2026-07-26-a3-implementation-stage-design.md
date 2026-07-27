@@ -1,17 +1,17 @@
 ---
 type: Spec
 title: A3 Implementation Stage
-status: Draft
+status: Active
 description: Design for turning a pinned A2 approved specification into a validated change bundle and linked draft GitHub pull request.
 tags: [symphony, software-factory, implementation-stage, github, docker]
-timestamp: 2026-07-26T23:00:41Z
+timestamp: 2026-07-27T16:30:13Z
 ---
 
 # A3 Implementation Stage
 
 ## Status
 
-Draft
+Active — **Next** factory slice after A1 GitHub path completed (PR1–PR3, including [#599](https://github.com/gannonh/kata-symphony/pull/599)) and A2 live UAT accepted. Design ready for PR1 implementation/validation preview; A2 approved-artifact pin is the intake boundary.
 
 ## Goal
 
