@@ -176,12 +176,19 @@ fn own_process_group() -> i64 {
     process_group_of(std::process::id() as i64).unwrap_or(-1)
 }
 
+#[cfg(unix)]
 fn process_group_of(pid: i64) -> Option<i64> {
     // SAFETY: getpgid is a plain POSIX query with no memory effects.
     let pgid = unsafe { getpgid(pid as i32) };
     (pgid >= 0).then_some(i64::from(pgid))
 }
 
+#[cfg(not(unix))]
+fn process_group_of(_pid: i64) -> Option<i64> {
+    None
+}
+
+#[cfg(unix)]
 unsafe extern "C" {
     fn getpgid(pid: i32) -> i32;
 }
@@ -276,31 +283,43 @@ pub async fn terminate_process_group(recorded: &ProcessIdentity) -> TerminationO
         }
     };
 
-    // SAFETY: kill against a negative pid signals the process group; the call
-    // has no memory effects and a failure only means the group is already gone.
-    unsafe { kill(-group, SIGTERM) };
+    #[cfg(unix)]
+    {
+        // SAFETY: kill against a negative pid signals the process group; the
+        // call has no memory effects and a failure only means the group is
+        // already gone.
+        unsafe { kill(-group, SIGTERM) };
 
-    let deadline = std::time::Instant::now() + FORCE_KILL_WAIT;
-    while std::time::Instant::now() < deadline {
-        if !process_group_has_running_members(group) {
-            return TerminationOutcome::Terminated;
+        let deadline = std::time::Instant::now() + FORCE_KILL_WAIT;
+        while std::time::Instant::now() < deadline {
+            if !process_group_has_running_members(group) {
+                return TerminationOutcome::Terminated;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-    unsafe { kill(-group, SIGKILL) };
+        unsafe { kill(-group, SIGKILL) };
 
-    let deadline = std::time::Instant::now() + FORCE_KILL_CONFIRM_WAIT;
-    while std::time::Instant::now() < deadline {
-        if !process_group_has_running_members(group) {
-            return TerminationOutcome::Terminated;
+        let deadline = std::time::Instant::now() + FORCE_KILL_CONFIRM_WAIT;
+        while std::time::Instant::now() < deadline {
+            if !process_group_has_running_members(group) {
+                return TerminationOutcome::Terminated;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        if process_group_has_running_members(group) {
+            TerminationOutcome::StillRunning
+        } else {
+            TerminationOutcome::Terminated
+        }
     }
 
-    if process_group_has_running_members(group) {
-        TerminationOutcome::StillRunning
-    } else {
-        TerminationOutcome::Terminated
+    // `assess_signalability` never authorizes a non-unix recorded identity
+    // (`process_group_of` returns `None` there), so this is unreachable.
+    #[cfg(not(unix))]
+    {
+        let _ = group;
+        TerminationOutcome::NoLongerSignalable(SignalBlockReason::ProcessNotFound)
     }
 }
 
@@ -309,6 +328,7 @@ const SIGKILL: i32 = 9;
 const FORCE_KILL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 const FORCE_KILL_CONFIRM_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
+#[cfg(unix)]
 unsafe extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
 }
