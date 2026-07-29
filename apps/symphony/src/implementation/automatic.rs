@@ -672,7 +672,7 @@ where
             &request.bundle.head_commit,
             publisher_login,
         )
-            .and_then(|pr| verify_persisted_draft_pr_record(persisted, &pr));
+        .and_then(|pr| verify_persisted_draft_pr_record(persisted, &pr));
 
         if let Err(error) = verification {
             store.set_implementation_publication_error(
