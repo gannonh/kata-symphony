@@ -743,9 +743,7 @@ where
             Ok(AttemptResult::AutomaticPublished) => {
                 Ok(CandidateOutcome::StartedAutomaticPublished)
             }
-            Ok(AttemptResult::AutomaticPending) => {
-                Ok(CandidateOutcome::StartedAutomaticPending)
-            }
+            Ok(AttemptResult::AutomaticPending) => Ok(CandidateOutcome::StartedAutomaticPending),
             Ok(AttemptResult::AwaitingHuman) => Ok(CandidateOutcome::StartedAwaitingHuman),
             Ok(AttemptResult::Failed) => Ok(CandidateOutcome::StartedFailed),
             Err(error) => {
