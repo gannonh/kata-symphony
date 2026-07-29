@@ -30,7 +30,7 @@ use crate::implementation::domain::{
     IMPLEMENTATION_STAGE_NAME,
 };
 use crate::implementation::publisher::{
-    DiagnosticPublishRequest, ImplementationPublisher, PreviewPublishRequest,
+    DiagnosticPublishRequest, ImplementationPublisher, PreviewPublishRequest, COMMENT_FINAL_STEP,
 };
 use crate::implementation::runner::{
     assess_postconditions, blob_sha_of_file, resolve_base_commit, ImplementationHarness,
@@ -304,6 +304,38 @@ where
                 ImplementationPublicationKind::Automatic => {
                     if let Err(error) = self.reconcile_automatic_publication(service, &intent).await
                     {
+                        let latest = self
+                            .store
+                            .get_implementation_publication_intent(&intent.intent_id)?;
+                        if let Some(latest) = latest.filter(|latest| {
+                            latest.status == PublicationStatus::Pending
+                                && latest
+                                    .last_error
+                                    .as_ref()
+                                    .is_none_or(|last| last.code != "issue_revision_drift")
+                        }) {
+                            let failure = FactoryError::new(
+                                "publication_retryable",
+                                "implementation_publication",
+                                error.to_string(),
+                                true,
+                                latest.completed_steps.last().cloned(),
+                            );
+                            self.store.set_implementation_publication_error(
+                                &intent.intent_id,
+                                PublicationStatus::Pending,
+                                failure.clone(),
+                            )?;
+                            self.record_event(
+                                Some(&intent.run_id),
+                                None,
+                                "implementation_publication_blocked",
+                                serde_json::json!({
+                                    "intent_id": intent.intent_id,
+                                    "error": failure,
+                                }),
+                            )?;
+                        }
                         tracing::warn!(
                             event = "implementation_automatic_publication_failed",
                             intent_id = %intent.intent_id,
@@ -521,11 +553,6 @@ where
             )
             .await?;
 
-        self.store.set_implementation_decision(
-            &intent.run_id,
-            ImplementationDecision::Published,
-            None,
-        )?;
         self.record_event(
             Some(&intent.run_id),
             Some(&artifact.stage_run_id),
@@ -555,6 +582,13 @@ where
                 "pr_url": draft.url,
             }),
         )?;
+        self.store.set_implementation_decision(
+            &intent.run_id,
+            ImplementationDecision::Published,
+            None,
+        )?;
+        self.store
+            .complete_implementation_publication(&intent.intent_id, COMMENT_FINAL_STEP)?;
         Ok(())
     }
 
@@ -2105,6 +2139,61 @@ mod tests {
             .list_a3_eligible_approved_runs(&configuration_revision)
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn automatic_reconcile_persists_unhandled_retryable_error() {
+        let root = tempdir().unwrap();
+        let workflow = root.path().join("workflow");
+        let db = root.path().join("factory.db");
+        fs::create_dir_all(&workflow).unwrap();
+
+        let store = SharedFactoryStore::open(&db, 5_000).unwrap();
+        let approved = seed_approved(&store, "rev").await;
+        let intent = store
+            .create_implementation_publication_intent(
+                &approved.run_id,
+                None,
+                ImplementationPublicationKind::Automatic,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        let comments = FakeComments::new("symphony-bot");
+        let issues = Arc::new(FakeIssues {
+            issue: Mutex::new(base_issue()),
+        });
+        let mut coordinator = ImplementationCoordinator::with_harness(
+            store.clone(),
+            comments,
+            issues,
+            ImplementationCoordinatorConfig {
+                forge_host: "github.com".into(),
+                repository: "acme/repo".into(),
+                owner_instance: "test".into(),
+                workflow_dir: workflow,
+                storage_path: db,
+            },
+            FakeHarness {
+                repair_touch: false,
+                calls: Mutex::new(0),
+            },
+        );
+
+        coordinator
+            .poll_once(&ServiceConfig::default())
+            .await
+            .unwrap();
+
+        let recovered = store
+            .get_implementation_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.status, PublicationStatus::Pending);
+        assert_eq!(recovered.retry_count, 1);
+        assert_eq!(
+            recovered.last_error.as_ref().map(|error| error.code.as_str()),
+            Some("publication_retryable")
+        );
     }
 
     #[test]
