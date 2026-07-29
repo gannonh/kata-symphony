@@ -11,7 +11,7 @@ timestamp: 2026-07-29T18:05:00Z
 
 ## Status
 
-**Incomplete** — automated gates Pass; live GitHub draft-PR publication, Agent Review handoff, and restart-during-publication UAT not executed here.
+**Incomplete** — automated gates Pass; live GitHub draft-PR publication, Agent Review handoff, and restart-during-publication UAT not executed here. Pull request: [#607](https://github.com/gannonh/kata-symphony/pull/607).
 
 ## Automated evidence
 
