@@ -25,10 +25,12 @@ A3 turns a pinned A2 approved specification into a validated change bundle and (
 4. **Preview-only publisher (PR1).** Owned issue comments use `<!-- symphony:implementation:{intent_id} -->` with create-before-record recovery. No branch push, draft PR, label removal, or Projects v2 state change until PR2.
 5. **Automatic publication (PR2).** Progressive `record_implementation_publication_step` updates completed steps without forcing `applied` until the final comment. Branch expected-projection never force-pushes. Draft PRs use `<!-- symphony:implementation-pr:{intent_id} -->`, recover create-before-record by head/base list, and reject foreign/closed/ready/drifted candidates. Tracker label removal and `completion_route.state` run only after the draft-PR artifact is stored.
 6. **Dispatch ownership.** A3 claims before legacy candidate fetch. Durable guards cover nonterminal attempts/publications and retained A3 run state so approved A2 work cannot race the legacy worker.
+7. **Pinned publication identity and bounded authentication.** Automatic intents capture forge owner, repository, base branch, and publication branch. Recovery rejects active configuration drift and derives the HTTPS remote from that pinned identity. The trusted publisher supplies the GitHub token only through a subprocess-scoped HTTP authorization header; network Git calls disable prompting, time out, and redact credentials. A persisted draft-PR artifact is revalidated against live GitHub state before tracker handoff.
 
 ## Consequences
 
 - A1/A2 suites remain green; migrations are additive.
+- Configuration changes cannot silently redirect a pending publication or its credentials.
 - Disk growth from retained bundles is operator-visible; GC is deferred.
 - Live draft-PR / Agent Review UAT remains operator residual after PR2 automation.
 - Live Docker container orchestration beyond the env/bundle contract is residual where no daemon is available.
