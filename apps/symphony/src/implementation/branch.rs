@@ -4,16 +4,24 @@
 //! publisher path pushes to a configured remote.
 
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use tempfile::TempDir;
 
 use crate::error::{Result, SymphonyError};
 use crate::implementation::bundle::{blob_path, sha256_file, verify_bundle};
 use crate::path_safety::sanitize_identifier;
+use crate::repo_url::redact_url_credentials;
 
 pub const BRANCH_PUSHED_STEP: &str = "branch_pushed";
+const NETWORK_GIT_TIMEOUT: Duration = Duration::from_secs(60);
+const NETWORK_GIT_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchProjectionDecision {
@@ -55,7 +63,7 @@ pub fn branch_name_for_issue(branch_prefix: &str, issue_identifier: &str) -> Str
     )
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BranchPublishRequest<'a> {
     pub artifacts_dir: &'a Path,
     pub bundle_sha256: &'a str,
@@ -64,8 +72,27 @@ pub struct BranchPublishRequest<'a> {
     pub expected_remote_sha: Option<&'a str>,
     pub branch_name: &'a str,
     pub base_branch: &'a str,
-    /// Trusted remote URL (local bare path or `https://…` with credentials for live use).
+    /// Trusted forge remote. Credentials are supplied separately and never persisted in Git config.
     pub remote_url: &'a str,
+    /// Trusted-host GitHub token used only by network Git subprocesses.
+    pub github_token: Option<&'a str>,
+}
+
+impl std::fmt::Debug for BranchPublishRequest<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BranchPublishRequest")
+            .field("artifacts_dir", &self.artifacts_dir)
+            .field("bundle_sha256", &self.bundle_sha256)
+            .field("bundle_bytes_len", &self.bundle_bytes_len)
+            .field("desired_head", &self.desired_head)
+            .field("expected_remote_sha", &self.expected_remote_sha)
+            .field("branch_name", &self.branch_name)
+            .field("base_branch", &self.base_branch)
+            .field("remote_url", &redact_url_credentials(self.remote_url))
+            .field("github_token", &self.github_token.map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,25 +155,37 @@ pub fn publish_branch(request: &BranchPublishRequest<'_>) -> Result<BranchPublis
     })?;
 
     run_git(&repo, &["init"])?;
-    run_git(&repo, &["remote", "add", "origin", request.remote_url])?;
+    run_git_redacted(
+        &repo,
+        &["remote", "add", "origin", request.remote_url],
+        "git remote add origin",
+        request.remote_url,
+        request.github_token,
+    )?;
     // Fetch base branch history so the result bundle can attach.
-    let fetch_base = Command::new("git")
-        .args([
+    let fetch_base = run_network_git(
+        Some(&repo),
+        &[
             "fetch",
             "origin",
             &format!(
                 "+refs/heads/{0}:refs/remotes/origin/{0}",
                 request.base_branch
             ),
-        ])
-        .current_dir(&repo)
-        .output()
-        .map_err(|error| SymphonyError::TriageError(format!("git fetch base failed: {error}")))?;
+        ],
+        request.github_token,
+        "git fetch base",
+        request.remote_url,
+    )?;
     if !fetch_base.status.success() {
         return Err(SymphonyError::TriageError(format!(
             "git fetch base `{}` failed: {}",
             request.base_branch,
-            String::from_utf8_lossy(&fetch_base.stderr).trim()
+            sanitized_git_stderr(
+                &fetch_base.stderr,
+                request.remote_url,
+                request.github_token
+            )
         )));
     }
 
@@ -212,7 +251,11 @@ pub fn publish_branch(request: &BranchPublishRequest<'_>) -> Result<BranchPublis
         )?;
     }
 
-    let remote_sha_before = observe_remote_branch(request.remote_url, request.branch_name)?;
+    let remote_sha_before = observe_remote_branch(
+        request.remote_url,
+        request.branch_name,
+        request.github_token,
+    )?;
     let ancestor = match remote_sha_before.as_deref() {
         Some(remote) => is_ancestor(&repo, remote, request.desired_head)?,
         None => false,
@@ -243,31 +286,37 @@ pub fn publish_branch(request: &BranchPublishRequest<'_>) -> Result<BranchPublis
         }
         BranchProjectionDecision::PushAbsent | BranchProjectionDecision::FastForwardPush => {
             // Non-force push only.
-            let push = Command::new("git")
-                .args([
+            let push = run_network_git(
+                Some(&repo),
+                &[
                     "push",
                     "origin",
                     &format!("refs/heads/{0}:refs/heads/{0}", request.branch_name),
-                ])
-                .current_dir(&repo)
-                .output()
-                .map_err(|error| SymphonyError::TriageError(format!("git push failed: {error}")))?;
+                ],
+                request.github_token,
+                "git push",
+                request.remote_url,
+            )?;
             if !push.status.success() {
                 return Err(SymphonyError::TriageError(format!(
                     "git push (no-force) failed: {}",
-                    String::from_utf8_lossy(&push.stderr).trim()
+                    sanitized_git_stderr(&push.stderr, request.remote_url, request.github_token)
                 )));
             }
         }
     }
 
-    let remote_sha_after = observe_remote_branch(request.remote_url, request.branch_name)?
-        .ok_or_else(|| {
-            SymphonyError::TriageError(format!(
-                "remote branch {} missing after push",
-                request.branch_name
-            ))
-        })?;
+    let remote_sha_after = observe_remote_branch(
+        request.remote_url,
+        request.branch_name,
+        request.github_token,
+    )?
+    .ok_or_else(|| {
+        SymphonyError::TriageError(format!(
+            "remote branch {} missing after push",
+            request.branch_name
+        ))
+    })?;
     if remote_sha_after != request.desired_head {
         return Err(SymphonyError::TriageError(format!(
             "remote branch {} after push is {remote_sha_after}, expected {}",
@@ -283,19 +332,26 @@ pub fn publish_branch(request: &BranchPublishRequest<'_>) -> Result<BranchPublis
     })
 }
 
-fn observe_remote_branch(remote_url: &str, branch_name: &str) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .args([
+fn observe_remote_branch(
+    remote_url: &str,
+    branch_name: &str,
+    github_token: Option<&str>,
+) -> Result<Option<String>> {
+    let output = run_network_git(
+        None,
+        &[
             "ls-remote",
             remote_url,
             &format!("refs/heads/{branch_name}"),
-        ])
-        .output()
-        .map_err(|error| SymphonyError::TriageError(format!("git ls-remote failed: {error}")))?;
+        ],
+        github_token,
+        "git ls-remote",
+        remote_url,
+    )?;
     if !output.status.success() {
         return Err(SymphonyError::TriageError(format!(
             "git ls-remote failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            sanitized_git_stderr(&output.stderr, remote_url, github_token)
         )));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -355,6 +411,173 @@ fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+fn run_git_redacted(
+    cwd: &Path,
+    args: &[&str],
+    operation: &str,
+    remote_url: &str,
+    github_token: Option<&str>,
+) -> Result<()> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| SymphonyError::TriageError(format!("{operation} failed: {error}")))?;
+    if !output.status.success() {
+        return Err(SymphonyError::TriageError(format!(
+            "{operation} failed: {}",
+            sanitized_git_stderr(&output.stderr, remote_url, github_token)
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct GitCommandOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn run_network_git(
+    cwd: Option<&Path>,
+    args: &[&str],
+    github_token: Option<&str>,
+    operation: &str,
+    remote_url: &str,
+) -> Result<GitCommandOutput> {
+    run_network_git_with_timeout(
+        cwd,
+        args,
+        github_token,
+        operation,
+        remote_url,
+        NETWORK_GIT_TIMEOUT,
+    )
+}
+
+fn run_network_git_with_timeout(
+    cwd: Option<&Path>,
+    args: &[&str],
+    github_token: Option<&str>,
+    operation: &str,
+    remote_url: &str,
+    timeout: Duration,
+) -> Result<GitCommandOutput> {
+    let mut stdout = tempfile::tempfile().map_err(|error| {
+        SymphonyError::StorageError(format!(
+            "failed creating temporary stdout for {operation}: {error}"
+        ))
+    })?;
+    let mut stderr = tempfile::tempfile().map_err(|error| {
+        SymphonyError::StorageError(format!(
+            "failed creating temporary stderr for {operation}: {error}"
+        ))
+    })?;
+
+    let mut command = Command::new("git");
+    command
+        .args(args)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdout(Stdio::from(stdout.try_clone().map_err(|error| {
+            SymphonyError::StorageError(format!(
+                "failed cloning temporary stdout for {operation}: {error}"
+            ))
+        })?))
+        .stderr(Stdio::from(stderr.try_clone().map_err(|error| {
+            SymphonyError::StorageError(format!(
+                "failed cloning temporary stderr for {operation}: {error}"
+            ))
+        })?));
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
+    if let Some(token) = github_token.map(str::trim).filter(|token| !token.is_empty()) {
+        let credentials = BASE64_STANDARD.encode(format!("x-access-token:{token}"));
+        command
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "http.extraHeader")
+            .env(
+                "GIT_CONFIG_VALUE_0",
+                format!("Authorization: Basic {credentials}"),
+            );
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| SymphonyError::TriageError(format!("{operation} failed: {error}")))?;
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait().map_err(|error| {
+            SymphonyError::TriageError(format!("{operation} wait failed: {error}"))
+        })? {
+            Some(status) => break status,
+            None if started.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(SymphonyError::TriageError(format!(
+                    "{operation} timed out after {} seconds for {}",
+                    timeout.as_secs_f64(),
+                    redact_remote(remote_url)
+                )));
+            }
+            None => thread::sleep(NETWORK_GIT_POLL_INTERVAL),
+        }
+    };
+
+    stdout.seek(SeekFrom::Start(0)).map_err(|error| {
+        SymphonyError::StorageError(format!(
+            "failed rewinding temporary stdout for {operation}: {error}"
+        ))
+    })?;
+    stderr.seek(SeekFrom::Start(0)).map_err(|error| {
+        SymphonyError::StorageError(format!(
+            "failed rewinding temporary stderr for {operation}: {error}"
+        ))
+    })?;
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    stdout.read_to_end(&mut stdout_bytes).map_err(|error| {
+        SymphonyError::StorageError(format!(
+            "failed reading temporary stdout for {operation}: {error}"
+        ))
+    })?;
+    stderr.read_to_end(&mut stderr_bytes).map_err(|error| {
+        SymphonyError::StorageError(format!(
+            "failed reading temporary stderr for {operation}: {error}"
+        ))
+    })?;
+
+    Ok(GitCommandOutput {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    })
+}
+
+fn sanitized_git_stderr(
+    stderr: &[u8],
+    remote_url: &str,
+    github_token: Option<&str>,
+) -> String {
+    let mut message = String::from_utf8_lossy(stderr).trim().to_string();
+    if !remote_url.is_empty() {
+        message = message.replace(remote_url, "<remote>");
+    }
+    if let Some(token) = github_token.map(str::trim).filter(|token| !token.is_empty()) {
+        message = message.replace(token, "[REDACTED]");
+    }
+    redact_url_credentials(&message)
+}
+
+fn redact_remote(remote_url: &str) -> String {
+    if remote_url.trim().is_empty() {
+        "<remote>".to_string()
+    } else {
+        redact_url_credentials(remote_url)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,6 +621,50 @@ mod tests {
             branch_name_for_issue("symphony/", "KATA-123"),
             "symphony/KATA-123"
         );
+    }
+
+    #[test]
+    fn network_git_injects_token_without_exposing_raw_secret() {
+        let output = run_network_git_with_timeout(
+            None,
+            &["config", "--get", "http.extraHeader"],
+            Some("test-secret-token"),
+            "git auth probe",
+            "https://github.com/acme/repo.git",
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert!(output.status.success());
+        let header = String::from_utf8(output.stdout).unwrap();
+        assert!(header.starts_with("Authorization: Basic "));
+        assert!(!header.contains("test-secret-token"));
+    }
+
+    #[test]
+    fn network_git_timeout_kills_the_process_and_redacts_remote() {
+        let err = run_network_git_with_timeout(
+            None,
+            &["-c", "alias.slow=!sleep 1", "slow"],
+            Some("test-secret-token"),
+            "git timeout probe",
+            "https://user:test-secret-token@github.com/acme/repo.git",
+            Duration::from_millis(25),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("timed out"));
+        assert!(!message.contains("test-secret-token"));
+        assert!(!message.contains("user:"));
+    }
+
+    #[test]
+    fn git_stderr_redacts_remote_and_token() {
+        let sanitized = sanitized_git_stderr(
+            b"fatal: https://user:secret@github.com/acme/repo.git rejected secret",
+            "https://user:secret@github.com/acme/repo.git",
+            Some("secret"),
+        );
+        assert_eq!(sanitized, "fatal: <remote> rejected [REDACTED]");
     }
 
     fn init_repo(path: &Path) -> String {
@@ -464,13 +731,14 @@ mod tests {
             branch_name: "symphony/42",
             base_branch: "main",
             remote_url: bare.path().to_str().unwrap(),
+            github_token: None,
         })
         .unwrap();
         assert!(outcome.pushed);
         assert_eq!(outcome.decision, BranchProjectionDecision::PushAbsent);
         assert_eq!(outcome.remote_sha_after, head);
         assert_eq!(
-            observe_remote_branch(bare.path().to_str().unwrap(), "symphony/42").unwrap(),
+            observe_remote_branch(bare.path().to_str().unwrap(), "symphony/42", None).unwrap(),
             Some(head)
         );
     }
@@ -504,6 +772,7 @@ mod tests {
             branch_name: "symphony/42",
             base_branch: "main",
             remote_url: bare.path().to_str().unwrap(),
+            github_token: None,
         })
         .unwrap();
         assert!(!outcome.pushed);
@@ -540,6 +809,7 @@ mod tests {
             branch_name: "symphony/42",
             base_branch: "main",
             remote_url: bare.path().to_str().unwrap(),
+            github_token: None,
         })
         .unwrap();
         assert!(outcome.pushed);
@@ -587,6 +857,7 @@ mod tests {
             branch_name: "symphony/42",
             base_branch: "main",
             remote_url: bare.path().to_str().unwrap(),
+            github_token: None,
         })
         .unwrap_err();
         assert!(
@@ -595,7 +866,7 @@ mod tests {
         );
         // Remote unchanged.
         assert_eq!(
-            observe_remote_branch(bare.path().to_str().unwrap(), "symphony/42").unwrap(),
+            observe_remote_branch(bare.path().to_str().unwrap(), "symphony/42", None).unwrap(),
             Some(foreign)
         );
     }
