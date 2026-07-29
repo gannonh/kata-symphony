@@ -1,6 +1,7 @@
 # Docs Update Log
 
 ## 2026-07-29
+* **A3 PR2 review remediation**: [#607](https://github.com/gannonh/kata-symphony/pull/607) pins publication identity, uses bounded/redacted token-authenticated Git subprocesses, verifies live PR state before Agent Review routing, and keeps retryable recovery pending. All original inline findings are addressed; automated gates Pass, with live AC20 UAT still residual.
 * **A3 PR2 implemented**: Draft-PR publication / Agent Review handoff automation complete ([build](/specs/2026-07-29-a3-pr2-build-report.md); [verify](/specs/2026-07-29-a3-pr2-verify-report.md) Incomplete). Next: live UAT, then A4.
 * **A3 PR1 next step = PR2**: Roadmap/PRD mark PR1 implemented ([#606](https://github.com/gannonh/kata-symphony/pull/606)); next factory slice is draft-PR publication / Agent Review handoff. Live PR1 UAT remains residual on the verify report only.
 * **A3 PR1 implemented**: Preview path complete with [build](/specs/2026-07-29-a3-pr1-build-report.md) / [verify](/specs/2026-07-29-a3-pr1-verify-report.md) and [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md). Automated gates Pass; live UAT residual. PR2 is next.
