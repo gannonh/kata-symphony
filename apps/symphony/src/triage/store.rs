@@ -2762,6 +2762,30 @@ impl SqliteFactoryStore {
                 request.stage_run_id
             )));
         }
+        // Content-addressed reuse: identical sha256 returns the existing row.
+        if let Some(existing_id) = self
+            .conn
+            .query_row(
+                "SELECT artifact_id FROM implementation_bundle_artifacts WHERE sha256 = ?1",
+                params![request.sha256],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(storage_error)?
+        {
+            self.conn
+                .execute(
+                    "UPDATE implementation_run_state SET bundle_artifact_id = ?1, updated_at = ?2
+                     WHERE run_id = ?3",
+                    params![existing_id, ts(Self::now()), stage.run_id],
+                )
+                .map_err(storage_error)?;
+            return self.get_bundle_artifact(&existing_id)?.ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "bundle artifact {existing_id} was not found after reuse"
+                ))
+            });
+        }
         let artifact_id = new_id();
         self.conn
             .execute(
@@ -3126,6 +3150,15 @@ impl SqliteFactoryStore {
                      WHERE sr.run_id = r.run_id
                        AND sr.stage = 'implementation'
                        AND sr.status IN ('pending', 'running')
+                   )
+                   AND (
+                     NOT EXISTS (
+                       SELECT 1 FROM implementation_run_state irs WHERE irs.run_id = r.run_id
+                     )
+                     OR EXISTS (
+                       SELECT 1 FROM implementation_run_state irs
+                       WHERE irs.run_id = r.run_id AND irs.decision = 'failed'
+                     )
                    )
                  ORDER BY r.updated_at ASC",
             )
@@ -4952,6 +4985,42 @@ mod tests {
                 &impl_attempt.stage_run_id,
                 FactoryError::new("test", "store", "interrupt", false, None),
             )
+            .unwrap();
+        assert_eq!(
+            store
+                .list_a3_eligible_approved_runs("impl-config")
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // Pending/awaiting_human/previewed decisions must exclude eligibility;
+        // only absent state or decision=failed may retry.
+        store
+            .upsert_implementation_state(UpsertImplementationStateRequest {
+                run_id: run_id.clone(),
+                approved_artifact_id: approved_artifact_id.clone(),
+                approved_version: 1,
+                configuration_revision: "impl-config".to_string(),
+                decision: ImplementationDecision::Pending,
+                successful_artifact_id: None,
+                bundle_artifact_id: None,
+                blocker: None,
+            })
+            .unwrap();
+        assert!(store
+            .list_a3_eligible_approved_runs("impl-config")
+            .unwrap()
+            .is_empty());
+        store
+            .set_implementation_decision(&run_id, ImplementationDecision::AwaitingHuman, None)
+            .unwrap();
+        assert!(store
+            .list_a3_eligible_approved_runs("impl-config")
+            .unwrap()
+            .is_empty());
+        store
+            .set_implementation_decision(&run_id, ImplementationDecision::Failed, None)
             .unwrap();
         assert_eq!(
             store

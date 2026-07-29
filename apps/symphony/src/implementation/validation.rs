@@ -1,11 +1,14 @@
 //! Deterministic repository validation command execution.
 
-use std::path::Path;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use sha2::{Digest, Sha256};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -107,31 +110,60 @@ impl ValidationExecutor {
             cmd
         };
 
+        let env = validation_isolated_env(workspace)?;
         child_cmd
             .current_dir(workspace)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            .env_clear()
+            .envs(env);
 
-        let child = child_cmd.spawn().map_err(|error| {
+        let mut child = child_cmd.spawn().map_err(|error| {
             SymphonyError::TriageError(format!(
                 "failed to spawn validation command '{}': {error}",
                 command.name
             ))
         })?;
 
-        let timed = timeout(Duration::from_millis(timeout_ms), child.wait_with_output()).await;
+        let mut stdout = child.stdout.take().ok_or_else(|| {
+            SymphonyError::TriageError(format!(
+                "validation command '{}' stdout was not piped",
+                command.name
+            ))
+        })?;
+        let mut stderr = child.stderr.take().ok_or_else(|| {
+            SymphonyError::TriageError(format!(
+                "validation command '{}' stderr was not piped",
+                command.name
+            ))
+        })?;
+
+        let stdout_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf).await;
+            buf
+        });
+        let stderr_task = tokio::spawn(async move {
+            let mut buf = Vec::new();
+            let _ = stderr.read_to_end(&mut buf).await;
+            buf
+        });
+
+        let timed = timeout(Duration::from_millis(timeout_ms), child.wait()).await;
         let completed_at = Utc::now();
         let duration_ms = wall_start.elapsed().as_millis() as u64;
 
         match timed {
-            Ok(Ok(output)) => {
-                let stdout_tail = bounded_redacted_tail(&output.stdout);
-                let stderr_tail = bounded_redacted_tail(&output.stderr);
+            Ok(Ok(status)) => {
+                let stdout_bytes = stdout_task.await.unwrap_or_default();
+                let stderr_bytes = stderr_task.await.unwrap_or_default();
+                let stdout_tail = bounded_redacted_tail(&stdout_bytes);
+                let stderr_tail = bounded_redacted_tail(&stderr_bytes);
                 let output_sha256 = output_digest(&stdout_tail, &stderr_tail);
-                let exit_code = output.status.code();
-                let passed = output.status.success();
+                let exit_code = status.code();
+                let passed = status.success();
                 Ok(ValidationCommandResult {
                     name: command.name.clone(),
                     command_sha256,
@@ -157,17 +189,31 @@ impl ValidationExecutor {
                     execution_profile: self.execution_profile,
                 })
             }
-            Ok(Err(error)) => Err(SymphonyError::TriageError(format!(
-                "validation command '{}' failed to wait: {error}",
-                command.name
-            ))),
+            Ok(Err(error)) => {
+                let _ = stdout_task.await;
+                let _ = stderr_task.await;
+                Err(SymphonyError::TriageError(format!(
+                    "validation command '{}' failed to wait: {error}",
+                    command.name
+                )))
+            }
             Err(_elapsed) => {
-                // `wait_with_output` was cancelled; kill_on_drop terminates the child.
-                let stdout_tail = String::new();
-                let stderr_tail = format!(
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                let stdout_bytes = stdout_task.await.unwrap_or_default();
+                let stderr_bytes = stderr_task.await.unwrap_or_default();
+                let stdout_tail = bounded_redacted_tail(&stdout_bytes);
+                let mut stderr_tail = bounded_redacted_tail(&stderr_bytes);
+                let timeout_note = format!(
                     "validation command '{}' timed out after {timeout_ms} ms",
                     command.name
                 );
+                if stderr_tail.is_empty() {
+                    stderr_tail = timeout_note;
+                } else {
+                    stderr_tail = format!("{stderr_tail}\n{timeout_note}");
+                    stderr_tail = tail_str(&stderr_tail, OUTPUT_TAIL_BYTES);
+                }
                 let output_sha256 = output_digest(&stdout_tail, &stderr_tail);
                 Ok(ValidationCommandResult {
                     name: command.name.clone(),
@@ -187,6 +233,42 @@ impl ValidationExecutor {
             }
         }
     }
+}
+
+/// Credential-isolated env for repo validation commands (no forge/SSH/model keys).
+pub fn validation_isolated_env(workspace: &Path) -> Result<HashMap<String, String>> {
+    let parent: HashMap<String, String> = std::env::vars().collect();
+    let mut env = HashMap::new();
+
+    if let Some(path) = parent.get("PATH") {
+        env.insert("PATH".to_string(), path.clone());
+    }
+    if let Some(term) = parent.get("TERM") {
+        env.insert("TERM".to_string(), term.clone());
+    }
+    for (key, value) in &parent {
+        if key == "LANG" || key.starts_with("LC_") {
+            env.insert(key.clone(), value.clone());
+        }
+        if matches!(key.as_str(), "TMPDIR" | "TMP" | "TEMP") {
+            env.insert(key.clone(), value.clone());
+        }
+    }
+
+    let home = disposable_validation_home(workspace)?;
+    env.insert("HOME".to_string(), home.display().to_string());
+    Ok(env)
+}
+
+fn disposable_validation_home(workspace: &Path) -> Result<PathBuf> {
+    let home = workspace.join(".symphony-validation-home");
+    fs::create_dir_all(&home).map_err(|error| {
+        SymphonyError::TriageError(format!(
+            "failed creating validation home {}: {error}",
+            home.display()
+        ))
+    })?;
+    Ok(home)
 }
 
 fn split_command(command: &str) -> Result<Vec<String>> {
@@ -307,5 +389,77 @@ mod tests {
             Some("timeout")
         );
         assert!(outcome.commands[0].exit_code.is_none());
+    }
+
+    #[tokio::test]
+    async fn validation_timeout_preserves_stdout_tail() {
+        let dir = tempdir().unwrap();
+        let executor = ValidationExecutor::new(ExecutionProfile::Local);
+        let outcome = executor
+            .run_cycle(
+                dir.path(),
+                &[cmd("slow", "echo before-timeout; sleep 5", 300)],
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(!outcome.passed);
+        assert_eq!(
+            outcome.commands[0].termination_reason.as_deref(),
+            Some("timeout")
+        );
+        assert!(
+            outcome.commands[0].stdout_tail.contains("before-timeout"),
+            "expected preserved stdout, got {:?}",
+            outcome.commands[0].stdout_tail
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_does_not_inherit_gh_token() {
+        let dir = tempdir().unwrap();
+        let secret = "super-secret-gh-token-xyz";
+        std::env::set_var("GH_TOKEN", secret);
+        let executor = ValidationExecutor::new(ExecutionProfile::Local);
+        let outcome = executor
+            .run_cycle(
+                dir.path(),
+                &[cmd("check-token", "printenv GH_TOKEN; exit 0", 5_000)],
+                1,
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("GH_TOKEN");
+        assert!(outcome.passed);
+        assert!(
+            !outcome.commands[0].stdout_tail.contains(secret),
+            "GH_TOKEN leaked into validation env: {:?}",
+            outcome.commands[0].stdout_tail
+        );
+        // Empty printenv produces no stdout.
+        assert!(!outcome.commands[0].stdout_tail.contains("GH_TOKEN"));
+    }
+
+    #[test]
+    fn validation_env_omits_forge_model_and_ssh() {
+        std::env::set_var("GH_TOKEN", "gh");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk");
+        std::env::set_var("OPENAI_API_KEY", "sk-oai");
+        std::env::set_var("SSH_AUTH_SOCK", "/tmp/ssh");
+        let dir = tempdir().unwrap();
+        let env = validation_isolated_env(dir.path()).unwrap();
+        std::env::remove_var("GH_TOKEN");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("SSH_AUTH_SOCK");
+        assert!(!env.contains_key("GH_TOKEN"));
+        assert!(!env.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!env.contains_key("OPENAI_API_KEY"));
+        assert!(!env.contains_key("SSH_AUTH_SOCK"));
+        assert!(env.contains_key("HOME"));
+        assert!(env
+            .get("HOME")
+            .unwrap()
+            .contains("symphony-validation-home"));
     }
 }

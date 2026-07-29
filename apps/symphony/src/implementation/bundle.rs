@@ -7,10 +7,19 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 use tempfile::tempdir;
+use uuid::Uuid;
 
 use crate::error::{Result, SymphonyError};
 
 const TEMP_PREFIX: &str = ".symphony-bundle-tmp-";
+
+fn unique_temp_name(sha256: &str) -> String {
+    format!(
+        "{TEMP_PREFIX}{sha256}.{}.{}",
+        std::process::id(),
+        Uuid::new_v4()
+    )
+}
 
 /// Derive the content-addressed artifacts directory beside the factory database.
 pub fn artifacts_dir(storage_path: &Path) -> PathBuf {
@@ -211,7 +220,7 @@ pub fn store_blob_atomic(
                 )));
             }
             let sha256 = hex::encode(Sha256::digest(bytes));
-            let staged = artifacts_dir.join(format!("{TEMP_PREFIX}{sha256}"));
+            let staged = artifacts_dir.join(unique_temp_name(&sha256));
             {
                 let mut file = File::create(&staged).map_err(|error| {
                     SymphonyError::StorageError(format!("failed writing temp blob: {error}"))
@@ -236,7 +245,7 @@ pub fn store_blob_atomic(
                 )));
             }
             let sha256 = sha256_file(path)?;
-            let staged = artifacts_dir.join(format!("{TEMP_PREFIX}{sha256}"));
+            let staged = artifacts_dir.join(unique_temp_name(&sha256));
             fs::copy(path, &staged).map_err(|error| {
                 SymphonyError::StorageError(format!(
                     "failed copying blob into temp {}: {error}",
@@ -354,10 +363,11 @@ pub fn import_bundle_to_temp(
             SymphonyError::TriageError(format!("git pull result bundle failed: {error}"))
         })?;
     if !output.status.success() {
-        // Fallback: `git fetch` + checkout of the fetched tip.
+        // Fallback: `git fetch` with an explicit refspec, then checkout that branch.
         let fetch = Command::new("git")
             .args(["fetch"])
             .arg(result_bundle)
+            .arg("HEAD:refs/heads/bundle-head")
             .current_dir(&repo)
             .output()
             .map_err(|error| {
@@ -370,6 +380,7 @@ pub fn import_bundle_to_temp(
                 String::from_utf8_lossy(&fetch.stderr).trim()
             )));
         }
+        run_git(&repo, &["checkout", "bundle-head"])?;
     }
     Ok(dir)
 }

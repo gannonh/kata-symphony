@@ -20,6 +20,7 @@ use crate::triage::runner::{
 };
 
 const OUTPUT_ENV: &str = "SYMPHONY_STAGE_OUTPUT";
+const INPUT_ENV: &str = "SYMPHONY_STAGE_INPUT";
 const FORBIDDEN_DOCKER_ENV: &[&str] = &[
     "GH_TOKEN",
     "GITHUB_TOKEN",
@@ -28,6 +29,14 @@ const FORBIDDEN_DOCKER_ENV: &[&str] = &[
     "SYMPHONY_HELPER_TOKEN",
     "SSH_AUTH_SOCK",
     "SSH_AGENT_PID",
+];
+
+/// Allowlisted stage-input JSON object keys and the files they materialize.
+const STAGE_INPUT_FILES: &[(&str, &str)] = &[
+    ("issue", "issue.json"),
+    ("approved_spec", "approved-spec.md"),
+    ("previous_manifest", "previous-manifest.json"),
+    ("validation_failure", "validation-failure.json"),
 ];
 
 /// Request for one implementation or repair turn.
@@ -227,7 +236,10 @@ fn prepare_local_attempt(request: &ImplementationTurnRequest) -> Result<AttemptL
         let _ = fs::remove_dir_all(&attempt_root);
         return Err(SymphonyError::TriageError(error));
     }
-    configure_local_identity(&layout.workspace_path)?;
+    if let Err(error) = configure_local_identity(&layout.workspace_path) {
+        let _ = fs::remove_dir_all(&attempt_root);
+        return Err(error);
+    }
     if let Err(error) = disable_push_urls(&layout.workspace_path) {
         let _ = fs::remove_dir_all(&attempt_root);
         return Err(SymphonyError::TriageError(error));
@@ -273,16 +285,37 @@ fn write_stage_inputs(path: &Path, inputs: &serde_json::Value) -> Result<()> {
     fs::create_dir_all(path).map_err(|error| {
         SymphonyError::TriageError(format!("failed creating stage inputs: {error}"))
     })?;
-    let file = path.join("inputs.json");
-    let bytes = serde_json::to_vec_pretty(inputs).map_err(|error| {
-        SymphonyError::TriageError(format!("failed encoding stage inputs: {error}"))
-    })?;
-    fs::write(&file, bytes).map_err(|error| {
-        SymphonyError::TriageError(format!(
-            "failed writing stage inputs {}: {error}",
-            file.display()
-        ))
-    })?;
+    let Some(object) = inputs.as_object() else {
+        return Err(SymphonyError::TriageError(
+            "stage inputs must be a JSON object".to_string(),
+        ));
+    };
+    for (key, filename) in STAGE_INPUT_FILES {
+        let Some(value) = object.get(*key) else {
+            continue;
+        };
+        let file = path.join(filename);
+        let bytes = if *key == "approved_spec" {
+            match value {
+                serde_json::Value::String(text) => text.as_bytes().to_vec(),
+                other => serde_json::to_vec_pretty(other).map_err(|error| {
+                    SymphonyError::TriageError(format!(
+                        "failed encoding stage input {key}: {error}"
+                    ))
+                })?,
+            }
+        } else {
+            serde_json::to_vec_pretty(value).map_err(|error| {
+                SymphonyError::TriageError(format!("failed encoding stage input {key}: {error}"))
+            })?
+        };
+        fs::write(&file, bytes).map_err(|error| {
+            SymphonyError::TriageError(format!(
+                "failed writing stage input {}: {error}",
+                file.display()
+            ))
+        })?;
+    }
     Ok(())
 }
 
@@ -360,19 +393,25 @@ pub fn assess_postconditions(
             "working tree is not clean:\n{status}"
         )));
     }
-    let spec_path = workspace.join(approved_spec_path);
-    let committed = fs::read(&spec_path).map_err(|error| {
-        SymphonyError::TriageError(format!(
-            "approved spec missing at {}: {error}",
-            spec_path.display()
-        ))
-    })?;
+    // Spec must be tracked in HEAD (not merely present on disk).
+    git_stdout(
+        workspace,
+        &["ls-files", "--error-unmatch", "--", approved_spec_path],
+    )?;
+    let tree_entry = git_stdout(workspace, &["ls-tree", "HEAD", "--", approved_spec_path])?;
+    if tree_entry.split_whitespace().next() == Some("120000") {
+        return Err(SymphonyError::TriageError(
+            "approved spec path must not be a symlink".to_string(),
+        ));
+    }
+    let committed = git_show_blob(workspace, approved_spec_path)?;
     if committed != canonical_spec_bytes {
         return Err(SymphonyError::TriageError(format!(
             "approved spec at {approved_spec_path} is not byte-identical to the canonical render"
         )));
     }
-    // Confirm the path is a regular file (not a symlink).
+    // Also reject a checked-out symlink masquerading as the tracked blob.
+    let spec_path = workspace.join(approved_spec_path);
     let meta = fs::symlink_metadata(&spec_path).map_err(|error| {
         SymphonyError::TriageError(format!("failed stating approved spec: {error}"))
     })?;
@@ -424,12 +463,30 @@ fn git_stdout(workspace: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn git_show_blob(workspace: &Path, path: &str) -> Result<Vec<u8>> {
+    let output = Command::new("git")
+        .args(["show", &format!("HEAD:{path}")])
+        .current_dir(workspace)
+        .output()
+        .map_err(|error| {
+            SymphonyError::TriageError(format!("git show HEAD:{path} failed: {error}"))
+        })?;
+    if !output.status.success() {
+        return Err(SymphonyError::TriageError(format!(
+            "git show HEAD:{path} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    Ok(output.stdout)
+}
+
 /// Build the environment list that would be passed to `docker run` for A3.
 ///
 /// Model auth only — forge, Linear, helper, and SSH credentials are omitted.
 pub fn docker_credential_isolated_env(
     home_in_container: &str,
     output_in_container: &str,
+    stage_input_in_container: Option<&str>,
     model: Option<&str>,
     parent_env: &HashMap<String, String>,
 ) -> Vec<(String, String)> {
@@ -444,6 +501,9 @@ pub fn docker_credential_isolated_env(
     }
     env.push(("HOME".to_string(), home_in_container.to_string()));
     env.push((OUTPUT_ENV.to_string(), output_in_container.to_string()));
+    if let Some(stage_input) = stage_input_in_container {
+        env.push((INPUT_ENV.to_string(), stage_input.to_string()));
+    }
     if let Some(model) = model {
         env.push(("SYMPHONY_TRIAGE_MODEL".to_string(), model.to_string()));
     }
@@ -498,8 +558,9 @@ pub fn resolve_base_commit(repo: &Path, base_branch: &str) -> Result<String> {
 pub fn isolated_env_omits_forge_credentials(
     home_dir: &Path,
     output_path: &Path,
+    stage_input_path: &Path,
 ) -> HashMap<String, String> {
-    build_isolated_env(home_dir, output_path, None)
+    build_isolated_env(home_dir, output_path, Some(stage_input_path), None)
 }
 
 pub use crate::implementation::bundle::verify_bundle as verify_git_bundle;
@@ -622,7 +683,10 @@ mod tests {
             codex: None,
             approved_spec_markdown: String::from_utf8(spec_bytes.clone()).unwrap(),
             approved_spec_path: spec_path.into(),
-            stage_inputs: serde_json::json!({"issue":{"id":"1"}}),
+            stage_inputs: serde_json::json!({
+                "issue": {"id":"1","identifier":"#1","title":"t"},
+                "approved_spec": String::from_utf8(spec_bytes.clone()).unwrap(),
+            }),
             spawned: None,
             execution_profile: ExecutionProfile::Local,
             existing_workspace: None,
@@ -635,6 +699,9 @@ mod tests {
             .run_local_turn(&request, &harness)
             .await
             .unwrap();
+        let stage_input = result.attempt_root.join("stage-input");
+        assert!(stage_input.join("issue.json").is_file());
+        assert!(stage_input.join("approved-spec.md").is_file());
         let head: String = serde_json::from_slice::<serde_json::Value>(&result.output_bytes)
             .unwrap()["head_commit"]
             .as_str()
@@ -686,12 +753,21 @@ mod tests {
         let dir = tempdir().unwrap();
         // Ensure parent has GH_TOKEN; builder must not forward it.
         std::env::set_var("GH_TOKEN", "secret-should-not-leak");
-        let env = isolated_env_omits_forge_credentials(dir.path(), &dir.path().join("out.json"));
+        let stage_input = dir.path().join("stage-input");
+        let env = isolated_env_omits_forge_credentials(
+            dir.path(),
+            &dir.path().join("out.json"),
+            &stage_input,
+        );
         assert!(!env.contains_key("GH_TOKEN"));
         assert!(!env.contains_key("GITHUB_TOKEN"));
         assert_eq!(
             env.get("HOME").map(String::as_str),
             Some(dir.path().to_str().unwrap())
+        );
+        assert_eq!(
+            env.get(INPUT_ENV).map(String::as_str),
+            Some(stage_input.to_str().unwrap())
         );
         std::env::remove_var("GH_TOKEN");
     }
@@ -705,12 +781,18 @@ mod tests {
         parent.insert("SSH_AUTH_SOCK".into(), "/tmp/ssh".into());
         parent.insert("ANTHROPIC_API_KEY".into(), "sk".into());
         parent.insert("PATH".into(), "/usr/bin".into());
-        let env =
-            docker_credential_isolated_env("/home/worker", "/out/result.json", Some("m"), &parent);
+        let env = docker_credential_isolated_env(
+            "/home/worker",
+            "/out/result.json",
+            Some("/in"),
+            Some("m"),
+            &parent,
+        );
         assert_no_forge_credentials(&env).unwrap();
         assert!(env
             .iter()
             .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v == "sk"));
+        assert!(env.iter().any(|(k, v)| k == INPUT_ENV && v == "/in"));
         assert!(!env.iter().any(|(k, _)| k == "GH_TOKEN"));
         assert!(!env.iter().any(|(k, _)| k == "SSH_AUTH_SOCK"));
     }
@@ -766,7 +848,8 @@ mod tests {
         let mut parent = HashMap::new();
         parent.insert("GH_TOKEN".into(), "x".into());
         parent.insert("ANTHROPIC_API_KEY".into(), "sk".into());
-        let env = docker_credential_isolated_env("/home/w", "/out.json", None, &parent);
+        let env =
+            docker_credential_isolated_env("/home/w", "/out.json", Some("/in"), None, &parent);
         assert_no_forge_credentials(&env).unwrap();
     }
 }

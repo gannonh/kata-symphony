@@ -341,7 +341,11 @@ pub fn validate_spec_file_path(path: &str) -> Result<(), ImplementationValidatio
                 "must not contain '..' path segments".to_string(),
             ));
         }
-        if component == ".git" || normalized.contains(&".git") {
+        if component.eq_ignore_ascii_case(".git")
+            || normalized
+                .iter()
+                .any(|existing: &&str| existing.eq_ignore_ascii_case(".git"))
+        {
             return Err(ImplementationValidationError::new(
                 "spec_file",
                 "must not address .git".to_string(),
@@ -499,6 +503,7 @@ mod tests {
         .ends_with("APPROVED-v2.md"));
         assert!(validate_spec_file_path("../secrets.md").is_err());
         assert!(validate_spec_file_path(".git/config.md").is_err());
+        assert!(validate_spec_file_path(".GIT/config.md").is_err());
         assert!(validate_spec_file_path("/abs/path.md").is_err());
         assert!(validate_spec_file_path("specs/file.txt").is_err());
     }

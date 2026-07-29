@@ -20,6 +20,7 @@ use crate::triage::process_identity::{self, ProcessIdentity};
 
 const FORCE_KILL_WAIT: Duration = Duration::from_secs(5);
 const OUTPUT_ENV: &str = "SYMPHONY_STAGE_OUTPUT";
+const INPUT_ENV: &str = "SYMPHONY_STAGE_INPUT";
 const MODEL_ENV: &str = "SYMPHONY_TRIAGE_MODEL";
 /// Bytes of child stdout/stderr retained for failure diagnostics.
 const CHILD_OUTPUT_TAIL: usize = 4_000;
@@ -532,6 +533,7 @@ pub(crate) async fn run_pi_turn(
     let env = build_isolated_env(
         &layout.home_dir,
         &layout.output_path,
+        Some(&layout.stage_input_path),
         request.model.as_deref(),
     );
     seed_pi_auth(&layout.home_dir);
@@ -928,7 +930,12 @@ async fn codex_session_start(
 ) -> std::result::Result<crate::codex::app_server::SessionHandle, TriageRunnerOutcome> {
     let workspace_str = layout.workspace_path.to_string_lossy().to_string();
     let cmd_str = config.command.join(" ");
-    let env = build_isolated_env(&layout.home_dir, &layout.output_path, None);
+    let env = build_isolated_env(
+        &layout.home_dir,
+        &layout.output_path,
+        Some(&layout.stage_input_path),
+        None,
+    );
 
     let mut command = Command::new("bash");
     command
@@ -1230,6 +1237,7 @@ fn seed_pi_auth(home_dir: &Path) {
 pub(crate) fn build_isolated_env(
     home_dir: &Path,
     output_path: &Path,
+    stage_input_path: Option<&Path>,
     model: Option<&str>,
 ) -> HashMap<String, String> {
     let mut env = HashMap::new();
@@ -1259,6 +1267,9 @@ pub(crate) fn build_isolated_env(
 
     env.insert("HOME".to_string(), home_dir.display().to_string());
     env.insert(OUTPUT_ENV.to_string(), output_path.display().to_string());
+    if let Some(stage_input) = stage_input_path {
+        env.insert(INPUT_ENV.to_string(), stage_input.display().to_string());
+    }
     if let Some(model) = model {
         env.insert(MODEL_ENV.to_string(), model.to_string());
     }
@@ -1897,6 +1908,7 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
         let env = build_isolated_env(
             Path::new("/tmp/home"),
             Path::new("/tmp/out.json"),
+            Some(Path::new("/tmp/stage-input")),
             Some("m"),
         );
         assert!(!env.contains_key("GH_TOKEN"));
@@ -1912,6 +1924,10 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
         assert_eq!(
             env.get(OUTPUT_ENV).map(String::as_str),
             Some("/tmp/out.json")
+        );
+        assert_eq!(
+            env.get(INPUT_ENV).map(String::as_str),
+            Some("/tmp/stage-input")
         );
         assert_eq!(env.get(MODEL_ENV).map(String::as_str), Some("m"));
     }

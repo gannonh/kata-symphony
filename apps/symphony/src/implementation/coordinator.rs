@@ -41,9 +41,9 @@ use crate::triage::publisher::TriageCommentPort;
 use crate::triage::runner::{effective_pi_model, TriageHarness, TriageIssueIdentity};
 use crate::triage::runtime::SharedFactoryStore;
 use crate::triage::store::{
-    A3EligibleApprovedRun, ClaimAttemptRequest, FactoryRunStore, StoreBundleArtifactRequest,
-    StoreImplementationArtifactRequest, StoreImplementationTurnRequest,
-    StoreValidationCycleRequest,
+    A3EligibleApprovedRun, ClaimAttemptRequest, FactoryRunStore, RecordAttemptProcessRequest,
+    StoreBundleArtifactRequest, StoreImplementationArtifactRequest, StoreImplementationTurnRequest,
+    StoreValidationCycleRequest, UpsertImplementationStateRequest,
 };
 
 #[derive(Debug, Clone)]
@@ -407,16 +407,6 @@ where
         } else {
             ExecutionProfile::Local
         };
-        if execution_profile == ExecutionProfile::Docker {
-            // PR1: Docker full container path is supported for credential isolation
-            // unit tests; live Docker execution still uses the local runner profile
-            // when a FakeHarness is injected. Real docker orchestration is best-effort.
-            tracing::info!(
-                event = "implementation_docker_profile_selected",
-                run_id = %candidate.run_id,
-                "docker execution profile selected; worker isolation uses credential-free env"
-            );
-        }
 
         let harness = match service.agent_backend {
             AgentBackend::Codex => TriageHarness::Codex,
@@ -451,6 +441,20 @@ where
                 executable_identity: None,
             })?;
 
+        // Stick dispatch guards immediately so a mid-attempt crash still blocks
+        // duplicate claim eligibility (retry only after decision=failed).
+        self.store
+            .upsert_implementation_state(UpsertImplementationStateRequest {
+                run_id: stage.run_id.clone(),
+                approved_artifact_id: approved.artifact_id.clone(),
+                approved_version: approved.version,
+                configuration_revision: configuration_revision.to_string(),
+                decision: ImplementationDecision::Pending,
+                successful_artifact_id: None,
+                bundle_artifact_id: None,
+                blocker: None,
+            })?;
+
         self.store.store_implementation_attempt_inputs(
             &stage.stage_run_id,
             &ImplementationAttemptInputs {
@@ -463,6 +467,30 @@ where
                 configuration_revision: configuration_revision.to_string(),
             },
         )?;
+
+        if execution_profile == ExecutionProfile::Docker {
+            // PR1: fail closed — host execution is refused when workspace.docker is set.
+            let error = FactoryError::new(
+                "docker_execution_required",
+                "implementation",
+                "workspace.docker is configured; host (local) implementation execution is refused until Docker orchestration is available in this build",
+                false,
+                None,
+            );
+            self.store
+                .fail_attempt(&stage.stage_run_id, error.clone())?;
+            // Leave decision=pending so eligibility does not retry forever.
+            self.record_event(
+                Some(&stage.run_id),
+                Some(&stage.stage_run_id),
+                "implementation_failed",
+                serde_json::json!({
+                    "error": error.remediation,
+                    "code": error.code,
+                }),
+            )?;
+            return Ok(CandidateOutcome::StartedFailed);
+        }
 
         self.record_event(
             Some(&stage.run_id),
@@ -508,6 +536,11 @@ where
                         true,
                         None,
                     ),
+                );
+                let _ = self.store.set_implementation_decision(
+                    &stage.run_id,
+                    ImplementationDecision::Failed,
+                    None,
                 );
                 self.record_event(
                     Some(&stage.run_id),
@@ -563,10 +596,38 @@ where
                 "title": issue.title,
                 "body": issue.body,
             },
-            "approved_spec": approved.artifact,
+            "approved_spec": spec_markdown,
             "approved_spec_path": spec_path,
             "base_commit": base_commit,
         });
+
+        let spawned = {
+            let store = self.store.clone();
+            let stage_run_id = stage_run_id.to_string();
+            let owner_instance = self.config.owner_instance.clone();
+            Some(
+                std::sync::Arc::new(move |spawn: crate::triage::runner::TriageSpawnInfo| {
+                    let mut durable = store.clone();
+                    if let Err(error) = FactoryRunStore::record_attempt_process(
+                        &mut durable,
+                        RecordAttemptProcessRequest {
+                            stage_run_id: stage_run_id.clone(),
+                            owner_instance: owner_instance.clone(),
+                            identity: spawn.identity,
+                            workspace_path: Some(
+                                spawn.workspace_path.to_string_lossy().to_string(),
+                            ),
+                            output_path: Some(spawn.output_path.to_string_lossy().to_string()),
+                        },
+                    ) {
+                        tracing::error!(
+                            %error,
+                            "failed to persist spawned implementation process identity"
+                        );
+                    }
+                }) as crate::triage::runner::TriageSpawnSink,
+            )
+        };
 
         let turn_request = ImplementationTurnRequest {
             attempt_id: stage_run_id.to_string(),
@@ -587,7 +648,7 @@ where
             approved_spec_markdown: spec_markdown.clone(),
             approved_spec_path: spec_path.clone(),
             stage_inputs: stage_inputs.clone(),
-            spawned: None,
+            spawned,
             execution_profile,
             existing_workspace: None,
         };
@@ -611,8 +672,9 @@ where
         {
             Ok(manifest) => manifest,
             Err(error) => {
-                self.store.fail_attempt(
+                self.fail_implementation_attempt(
                     stage_run_id,
+                    run_id,
                     FactoryError::new(
                         "invalid_manifest",
                         "implementation",
@@ -679,8 +741,9 @@ where
                 )?;
                 return Ok(AttemptResult::AwaitingHuman);
             }
-            self.store.fail_attempt(
+            self.fail_implementation_attempt(
                 stage_run_id,
+                run_id,
                 FactoryError::new(
                     format!("blocked_{}", blocker.kind.as_str()),
                     "implementation",
@@ -706,8 +769,9 @@ where
         ) {
             Ok(a) => a,
             Err(error) => {
-                self.store.fail_attempt(
+                self.fail_implementation_attempt(
                     stage_run_id,
+                    run_id,
                     FactoryError::new(
                         "postcondition_failed",
                         "implementation",
@@ -775,8 +839,9 @@ where
                     "implementation_validation_exhausted",
                     serde_json::json!({"cycles": cycle}),
                 )?;
-                self.store.fail_attempt(
+                self.fail_implementation_attempt(
                     stage_run_id,
+                    run_id,
                     FactoryError::new(
                         "validation_exhausted",
                         "implementation",
@@ -791,7 +856,7 @@ where
             // Repair turn in the same workspace. Ordinal 1 is implement; repairs are cycle+1.
             let repair_inputs = serde_json::json!({
                 "issue": stage_inputs.get("issue"),
-                "approved_spec": approved.artifact,
+                "approved_spec": spec_markdown,
                 "approved_spec_path": spec_path,
                 "previous_manifest": manifest,
                 "validation_failure": validation_results,
@@ -821,8 +886,9 @@ where
                     SymphonyError::TriageError(format!("repair manifest invalid: {error}"))
                 })?;
             if manifest.status != ManifestStatus::Completed {
-                self.store.fail_attempt(
+                self.fail_implementation_attempt(
                     stage_run_id,
+                    run_id,
                     FactoryError::new(
                         "repair_not_completed",
                         "implementation",
@@ -833,7 +899,11 @@ where
                 )?;
                 return Ok(AttemptResult::Failed);
             }
-            let expected_head = manifest.head_commit.clone().unwrap();
+            let expected_head = manifest.head_commit.clone().ok_or_else(|| {
+                SymphonyError::TriageError(
+                    "repair completed manifest missing head_commit".to_string(),
+                )
+            })?;
             assessment = assess_postconditions(
                 &turn.workspace_path,
                 base_commit,
@@ -843,20 +913,26 @@ where
             )?;
         }
 
-        // Export result bundle and store blob.
+        // Export result bundle and store blob (blocking IO off the async runtime).
         let result_bundle = turn.attempt_root.join("result.bundle");
-        create_result_bundle(
-            &turn.workspace_path,
-            base_commit,
-            &assessment.head_commit,
-            &result_bundle,
-        )?;
+        let workspace_path = turn.workspace_path.clone();
+        let base_commit_owned = base_commit.to_string();
+        let head_commit = assessment.head_commit.clone();
         let arts = artifacts_dir(&self.config.storage_path);
-        let (sha256, bytes_len) = store_blob_atomic(
-            &arts,
-            BlobSource::Path(&result_bundle),
-            service.implementation.max_bundle_bytes,
-        )?;
+        let max_bundle_bytes = service.implementation.max_bundle_bytes;
+        let (sha256, bytes_len) = tokio::task::spawn_blocking(move || {
+            create_result_bundle(
+                &workspace_path,
+                &base_commit_owned,
+                &head_commit,
+                &result_bundle,
+            )?;
+            store_blob_atomic(&arts, BlobSource::Path(&result_bundle), max_bundle_bytes)
+        })
+        .await
+        .map_err(|error| {
+            SymphonyError::TriageError(format!("bundle worker join failed: {error}"))
+        })??;
         let approved_spec_blob_sha = blob_sha_of_file(&turn.workspace_path.join(&spec_path))?;
 
         let artifact =
@@ -948,6 +1024,18 @@ where
         )?;
 
         Ok(AttemptResult::Previewed)
+    }
+
+    fn fail_implementation_attempt(
+        &self,
+        stage_run_id: &str,
+        run_id: &str,
+        error: FactoryError,
+    ) -> Result<()> {
+        let mut store = self.store.clone();
+        store.fail_attempt(stage_run_id, error)?;
+        store.set_implementation_decision(run_id, ImplementationDecision::Failed, None)?;
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1265,6 +1353,30 @@ mod tests {
             let spec = layout.workspace_path.join(&request.approved_spec_path);
             fs::create_dir_all(spec.parent().unwrap()).unwrap();
             fs::write(&spec, request.approved_spec_markdown.as_bytes()).unwrap();
+            assert!(
+                layout.stage_input_path.join("issue.json").is_file(),
+                "stage-input/issue.json missing"
+            );
+            assert!(
+                layout.stage_input_path.join("approved-spec.md").is_file(),
+                "stage-input/approved-spec.md missing"
+            );
+            if call >= 2 {
+                assert!(
+                    layout
+                        .stage_input_path
+                        .join("previous-manifest.json")
+                        .is_file(),
+                    "stage-input/previous-manifest.json missing on repair"
+                );
+                assert!(
+                    layout
+                        .stage_input_path
+                        .join("validation-failure.json")
+                        .is_file(),
+                    "stage-input/validation-failure.json missing on repair"
+                );
+            }
             let code = layout.workspace_path.join("src/feature.rs");
             fs::create_dir_all(code.parent().unwrap()).unwrap();
             fs::write(&code, format!("// call {call}\n")).unwrap();
@@ -1632,5 +1744,70 @@ mod tests {
         let summary = coordinator.poll_once(&service).await.unwrap();
         assert_eq!(summary.stale_skipped, 1);
         assert_eq!(summary.attempts_started, 0);
+    }
+
+    #[tokio::test]
+    async fn docker_profile_fails_closed_without_local_execution() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let workspace = root.path().join("workspaces");
+        let workflow = root.path().join("workflow");
+        let db = root.path().join("factory.db");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&workflow).unwrap();
+        init_repo(&repo);
+        write_prompts(&workflow);
+
+        let store = SharedFactoryStore::open(&db, 5_000).unwrap();
+        let issue = base_issue();
+        let mut service = service_config(&repo, &workspace, &workflow);
+        service.workspace.docker = Some(crate::domain::DockerConfig {
+            image: "symphony-impl:test".into(),
+            ..Default::default()
+        });
+        let rev = implementation_issue_revision(&issue, &service, "symphony-bot");
+        let approved = seed_approved(&store, &rev).await;
+
+        let comments = FakeComments::new("symphony-bot");
+        let issues = Arc::new(FakeIssues {
+            issue: Mutex::new(issue),
+        });
+        let mut coordinator = ImplementationCoordinator::with_harness(
+            store.clone(),
+            comments,
+            issues,
+            ImplementationCoordinatorConfig {
+                forge_host: "github.com".into(),
+                repository: "acme/repo".into(),
+                owner_instance: "test".into(),
+                workflow_dir: workflow,
+                storage_path: db,
+            },
+            FakeHarness {
+                repair_touch: false,
+                calls: Mutex::new(0),
+            },
+        );
+        let summary = coordinator.poll_once(&service).await.unwrap();
+        assert_eq!(summary.attempts_started, 1);
+        assert_eq!(summary.attempts_failed, 1);
+        assert_eq!(summary.preview_published, 0);
+
+        let impl_state = store
+            .get_implementation_state(&approved.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(impl_state.decision, ImplementationDecision::Pending);
+        // Pending excludes eligibility (no silent local retry).
+        let configuration_revision = implementation_configuration_revision(
+            &service.implementation,
+            "implement please",
+            "repair please",
+        );
+        assert!(store
+            .list_a3_eligible_approved_runs(&configuration_revision)
+            .unwrap()
+            .is_empty());
     }
 }
