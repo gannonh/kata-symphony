@@ -1,6 +1,7 @@
 # ADRs Update Log
 
 ## 2026-07-29
+* **Updated**: [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md) bounds automatic publication reconcile attempts with exponential backoff and a retry ceiling that terminalizes an exhausted intent as `blocked` instead of retrying forever on every poll.
 * **Updated**: [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md) now pins automatic publication identity, scopes Git token use to bounded subprocesses, and requires live PR revalidation before tracker handoff.
 * **Updated**: [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md) extended for PR2 progressive publication, draft-PR artifacts (`005_implementation_draft_pr.sql`), and no-force expected-projection branch/PR rules.
 * **Accepted**: [ADR-0004 A3 implementation durability and bundles](/adrs/0004-a3-implementation-durability-and-bundles.md) records stage-scoped A3 tables, content-addressed Git bundles beside SQLite, credential-isolated local execution, and preview-only publication before PR2 draft-PR handoff.

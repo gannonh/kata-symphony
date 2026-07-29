@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -50,6 +50,20 @@ use crate::triage::store::{
     StoreBundleArtifactRequest, StoreImplementationArtifactRequest, StoreImplementationTurnRequest,
     StoreValidationCycleRequest, UpsertImplementationStateRequest,
 };
+
+/// Reconcile attempts an automatic publication intent may consume before it is
+/// terminalized as `Blocked`. Every poll retries each pending intent, so an
+/// unreachable or misconfigured publication target would otherwise issue forge
+/// calls and append event rows forever without ever surfacing to an operator.
+const MAX_AUTOMATIC_PUBLICATION_RETRIES: u32 = 8;
+
+/// First backoff interval between automatic publication reconcile attempts.
+const AUTOMATIC_PUBLICATION_BACKOFF_BASE_SECS: i64 = 30;
+
+/// Ceiling for a single backoff interval. With the base and ceiling above, the
+/// retry budget spans roughly an hour, so transient forge outages recover
+/// without exhausting it.
+const AUTOMATIC_PUBLICATION_BACKOFF_MAX_SECS: i64 = 1_800;
 
 #[derive(Debug, Clone)]
 pub struct ImplementationCoordinatorConfig {
@@ -302,6 +316,48 @@ where
         for intent in pending {
             match intent.kind {
                 ImplementationPublicationKind::Automatic => {
+                    if intent.retry_count >= MAX_AUTOMATIC_PUBLICATION_RETRIES {
+                        let failure = FactoryError::new(
+                            "publication_retry_exhausted",
+                            "implementation_publication",
+                            format!(
+                                "automatic publication exhausted {} reconcile attempts; last error: {}",
+                                MAX_AUTOMATIC_PUBLICATION_RETRIES,
+                                intent
+                                    .last_error
+                                    .as_ref()
+                                    .map(|last| last.remediation.as_str())
+                                    .unwrap_or("unknown"),
+                            ),
+                            false,
+                            intent.completed_steps.last().cloned(),
+                        );
+                        self.store.set_implementation_publication_error(
+                            &intent.intent_id,
+                            PublicationStatus::Blocked,
+                            failure.clone(),
+                        )?;
+                        self.record_event(
+                            Some(&intent.run_id),
+                            None,
+                            "implementation_publication_blocked",
+                            serde_json::json!({
+                                "intent_id": intent.intent_id,
+                                "retry_count": intent.retry_count,
+                                "error": failure,
+                            }),
+                        )?;
+                        tracing::warn!(
+                            event = "implementation_automatic_publication_retry_exhausted",
+                            intent_id = %intent.intent_id,
+                            retry_count = intent.retry_count,
+                            "automatic publication blocked after exhausting retries"
+                        );
+                        continue;
+                    }
+                    if !automatic_retry_ready(intent.retry_count, intent.updated_at, Utc::now()) {
+                        continue;
+                    }
                     if let Err(error) = self.reconcile_automatic_publication(service, &intent).await
                     {
                         let error_message = error.to_string();
@@ -1557,6 +1613,25 @@ fn required_desired_effect<'a>(
         })
 }
 
+/// Exponential backoff for the given reconcile attempt count, capped at
+/// [`AUTOMATIC_PUBLICATION_BACKOFF_MAX_SECS`].
+fn automatic_backoff_secs(retry_count: u32) -> i64 {
+    let exponent = retry_count.saturating_sub(1).min(16);
+    AUTOMATIC_PUBLICATION_BACKOFF_BASE_SECS
+        .saturating_mul(1i64 << exponent)
+        .min(AUTOMATIC_PUBLICATION_BACKOFF_MAX_SECS)
+}
+
+/// Whether a pending automatic intent has waited out its backoff. A never-tried
+/// intent (`retry_count == 0`) is always ready, so first publication stays
+/// immediate.
+fn automatic_retry_ready(retry_count: u32, updated_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    if retry_count == 0 {
+        return true;
+    }
+    (now - updated_at).num_seconds() >= automatic_backoff_secs(retry_count)
+}
+
 fn automatic_completion_state(service: &ServiceConfig) -> Result<&str> {
     service
         .implementation
@@ -2238,6 +2313,136 @@ mod tests {
         );
         let err = required_desired_effect(&desired, "repo_name").unwrap_err();
         assert!(err.to_string().contains("pinned repo_name"));
+    }
+
+    #[test]
+    fn automatic_backoff_grows_then_saturates() {
+        assert_eq!(automatic_backoff_secs(1), 30);
+        assert_eq!(automatic_backoff_secs(2), 60);
+        assert_eq!(automatic_backoff_secs(3), 120);
+        assert_eq!(
+            automatic_backoff_secs(7),
+            AUTOMATIC_PUBLICATION_BACKOFF_MAX_SECS
+        );
+        assert_eq!(
+            automatic_backoff_secs(u32::MAX),
+            AUTOMATIC_PUBLICATION_BACKOFF_MAX_SECS
+        );
+    }
+
+    #[test]
+    fn automatic_retry_waits_out_backoff() {
+        let now = Utc::now();
+        // A never-tried intent publishes immediately.
+        assert!(automatic_retry_ready(0, now, now));
+        // A just-failed intent waits.
+        assert!(!automatic_retry_ready(1, now, now));
+        assert!(!automatic_retry_ready(
+            1,
+            now - chrono::Duration::seconds(29),
+            now
+        ));
+        assert!(automatic_retry_ready(
+            1,
+            now - chrono::Duration::seconds(30),
+            now
+        ));
+        // Later attempts wait proportionally longer.
+        assert!(!automatic_retry_ready(
+            3,
+            now - chrono::Duration::seconds(60),
+            now
+        ));
+        assert!(automatic_retry_ready(
+            3,
+            now - chrono::Duration::seconds(120),
+            now
+        ));
+    }
+
+    #[tokio::test]
+    async fn automatic_publication_blocks_after_exhausting_retries() {
+        let root = tempdir().unwrap();
+        let workflow = root.path().join("workflow");
+        let db = root.path().join("factory.db");
+        fs::create_dir_all(&workflow).unwrap();
+
+        let store = SharedFactoryStore::open(&db, 5_000).unwrap();
+        let approved = seed_approved(&store, "rev").await;
+        let intent = store
+            .create_implementation_publication_intent(
+                &approved.run_id,
+                None,
+                ImplementationPublicationKind::Automatic,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+
+        // Burn the retry budget the way repeated reconcile failures would.
+        for _ in 0..MAX_AUTOMATIC_PUBLICATION_RETRIES {
+            store
+                .set_implementation_publication_error(
+                    &intent.intent_id,
+                    PublicationStatus::Pending,
+                    FactoryError::new(
+                        "publication_retryable",
+                        "implementation_publication",
+                        "forge unreachable",
+                        true,
+                        None,
+                    ),
+                )
+                .unwrap();
+        }
+        let exhausted = store
+            .get_implementation_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(exhausted.retry_count, MAX_AUTOMATIC_PUBLICATION_RETRIES);
+        assert_eq!(exhausted.status, PublicationStatus::Pending);
+
+        let comments = FakeComments::new("symphony-bot");
+        let issues = Arc::new(FakeIssues {
+            issue: Mutex::new(base_issue()),
+        });
+        let mut coordinator = ImplementationCoordinator::with_harness(
+            store.clone(),
+            comments,
+            issues,
+            ImplementationCoordinatorConfig {
+                forge_host: "github.com".into(),
+                repository: "acme/repo".into(),
+                owner_instance: "test".into(),
+                workflow_dir: workflow,
+                storage_path: db,
+            },
+            FakeHarness {
+                repair_touch: false,
+                calls: Mutex::new(0),
+            },
+        );
+
+        coordinator
+            .poll_once(&ServiceConfig::default())
+            .await
+            .unwrap();
+
+        let recovered = store
+            .get_implementation_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.status, PublicationStatus::Blocked);
+        let last_error = recovered.last_error.expect("blocking error recorded");
+        assert_eq!(last_error.code, "publication_retry_exhausted");
+        assert!(!last_error.retryable);
+        assert!(last_error.remediation.contains("forge unreachable"));
+
+        // A blocked intent leaves the pending poll set for good.
+        assert!(store
+            .list_pending_implementation_publications()
+            .unwrap()
+            .iter()
+            .all(|pending| pending.intent_id != intent.intent_id));
     }
 
     #[test]
