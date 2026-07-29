@@ -1,6 +1,6 @@
 use crate::error::{Result, SymphonyError};
 use crate::implementation::domain::{
-    BundleArtifactRecord, ExecutionProfile, ImplementationArtifactRecord,
+    BundleArtifactRecord, DraftPrArtifactRecord, ExecutionProfile, ImplementationArtifactRecord,
     ImplementationAttemptInputs, ImplementationBlocker, ImplementationDecision,
     ImplementationManifest, ImplementationMetricsAggregate, ImplementationPublicationIntent,
     ImplementationPublicationKind, ImplementationRunState, ImplementationTurnKind,
@@ -31,11 +31,12 @@ use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 /// Embedded migrations, applied in order while the exclusive store lock is held.
-const MIGRATIONS: [&str; 4] = [
+const MIGRATIONS: [&str; 5] = [
     include_str!("migrations/001_init.sql"),
     include_str!("migrations/002_route_observations.sql"),
     include_str!("migrations/003_spec_stage.sql"),
     include_str!("migrations/004_implementation_stage.sql"),
+    include_str!("migrations/005_implementation_draft_pr.sql"),
 ];
 
 #[derive(Debug, Clone)]
@@ -159,6 +160,20 @@ pub struct StoreBundleArtifactRequest {
     pub execution_profile: ExecutionProfile,
     pub created_at: DateTime<Utc>,
     pub verified_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreDraftPrArtifactRequest {
+    pub run_id: String,
+    pub implementation_artifact_id: String,
+    pub intent_id: String,
+    pub number: u64,
+    pub url: String,
+    pub draft: bool,
+    pub head: String,
+    pub base: String,
+    pub head_sha: String,
+    pub marker: String,
 }
 
 #[derive(Debug, Clone)]
@@ -3041,6 +3056,179 @@ impl SqliteFactoryStore {
         Ok(())
     }
 
+    /// Append a publication step and update status/expected projection without
+    /// forcing `applied` (A1-style progressive reconciliation for automatic mode).
+    pub fn record_implementation_publication_step(
+        &mut self,
+        intent_id: &str,
+        step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        let intent = self
+            .get_implementation_publication_intent(intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "implementation publication intent {intent_id} not found"
+                ))
+            })?;
+        let mut steps = intent.completed_steps;
+        let trimmed = step.trim();
+        if !trimmed.is_empty() && !steps.iter().any(|existing| existing == trimmed) {
+            steps.push(trimmed.to_string());
+        }
+        self.conn
+            .execute(
+                "UPDATE implementation_publication_intents
+                 SET completed_steps_json = ?1, status = ?2, last_error_json = NULL,
+                     expected_projection_json = ?3, updated_at = ?4
+                 WHERE intent_id = ?5",
+                params![
+                    bounded_json(&steps)?,
+                    status.as_str(),
+                    bounded_json(expected_projection)?,
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn set_implementation_publication_baseline(
+        &mut self,
+        intent_id: &str,
+        observed_baseline: &serde_json::Value,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE implementation_publication_intents
+                 SET observed_baseline_json = ?1, expected_projection_json = ?2, updated_at = ?3
+                 WHERE intent_id = ?4",
+                params![
+                    bounded_json(observed_baseline)?,
+                    bounded_json(expected_projection)?,
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "implementation publication intent {intent_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn set_implementation_publication_error(
+        &mut self,
+        intent_id: &str,
+        status: PublicationStatus,
+        error: FactoryError,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE implementation_publication_intents
+                 SET status = ?1, last_error_json = ?2,
+                     retry_count = retry_count + 1, updated_at = ?3
+                 WHERE intent_id = ?4",
+                params![
+                    status.as_str(),
+                    optional_json(&Some(error))?,
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn store_draft_pr_artifact(
+        &mut self,
+        request: StoreDraftPrArtifactRequest,
+    ) -> Result<DraftPrArtifactRecord> {
+        let artifact_id = new_id();
+        let now = Self::now();
+        let now_s = ts(now);
+        self.conn
+            .execute(
+                "INSERT INTO implementation_draft_pr_artifacts (
+                    artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    artifact_id,
+                    request.run_id,
+                    request.implementation_artifact_id,
+                    request.intent_id,
+                    request.number as i64,
+                    request.url,
+                    if request.draft { 1 } else { 0 },
+                    request.head,
+                    request.base,
+                    request.head_sha,
+                    request.marker,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        self.get_draft_pr_artifact(&artifact_id)?.ok_or_else(|| {
+            SymphonyError::StorageError("created draft PR artifact is missing".to_string())
+        })
+    }
+
+    pub fn get_draft_pr_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<DraftPrArtifactRecord>> {
+        self.conn
+            .query_row(
+                "SELECT artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 FROM implementation_draft_pr_artifacts WHERE artifact_id = ?1",
+                params![artifact_id],
+                draft_pr_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn get_draft_pr_for_implementation_artifact(
+        &self,
+        implementation_artifact_id: &str,
+    ) -> Result<Option<DraftPrArtifactRecord>> {
+        self.conn
+            .query_row(
+                "SELECT artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 FROM implementation_draft_pr_artifacts
+                 WHERE implementation_artifact_id = ?1",
+                params![implementation_artifact_id],
+                draft_pr_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn get_draft_pr_for_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<DraftPrArtifactRecord>> {
+        self.conn
+            .query_row(
+                "SELECT artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 FROM implementation_draft_pr_artifacts WHERE intent_id = ?1",
+                params![intent_id],
+                draft_pr_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
     pub fn bind_implementation_publication_comment(
         &mut self,
         intent_id: &str,
@@ -3559,6 +3747,24 @@ fn bundle_artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BundleA
         execution_profile: parse_execution_profile(&profile).map_err(row_error)?,
         created_at: parse_ts_row(row.get::<_, String>(16)?)?,
         verified_at: parse_ts_row(row.get::<_, String>(17)?)?,
+    })
+}
+
+fn draft_pr_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DraftPrArtifactRecord> {
+    let draft_i: i64 = row.get(6)?;
+    Ok(DraftPrArtifactRecord {
+        artifact_id: row.get(0)?,
+        run_id: row.get(1)?,
+        implementation_artifact_id: row.get(2)?,
+        intent_id: row.get(3)?,
+        number: row.get::<_, i64>(4)? as u64,
+        url: row.get(5)?,
+        draft: draft_i != 0,
+        head: row.get(7)?,
+        base: row.get(8)?,
+        head_sha: row.get(9)?,
+        marker: row.get(10)?,
+        created_at: parse_ts_row(row.get::<_, String>(11)?)?,
     })
 }
 

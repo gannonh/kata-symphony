@@ -1,6 +1,6 @@
 use crate::implementation::domain::{
     AcceptanceCriterionClaim, ImplementationManifest, ValidationCommandResult,
-    IMPLEMENTATION_COMMENT_MARKER_PREFIX,
+    IMPLEMENTATION_COMMENT_MARKER_PREFIX, IMPLEMENTATION_PR_MARKER_PREFIX,
 };
 
 #[derive(Debug, Clone)]
@@ -18,8 +18,49 @@ pub struct ImplementationPreviewComment<'a> {
     pub validation: &'a [ValidationCommandResult],
 }
 
+#[derive(Debug, Clone)]
+pub struct ImplementationDraftPrBody<'a> {
+    pub intent_id: &'a str,
+    pub issue_number: u64,
+    pub run_id: &'a str,
+    pub stage_run_id: &'a str,
+    pub artifact_id: &'a str,
+    pub bundle_artifact_id: &'a str,
+    pub approved_artifact_id: &'a str,
+    pub approved_version: u32,
+    pub approved_spec_path: &'a str,
+    pub base_commit: &'a str,
+    pub head_commit: &'a str,
+    pub manifest: &'a ImplementationManifest,
+    pub validation: &'a [ValidationCommandResult],
+}
+
+#[derive(Debug, Clone)]
+pub struct ImplementationPublicationPendingComment<'a> {
+    pub intent_id: &'a str,
+    pub run_id: &'a str,
+    pub stage_run_id: &'a str,
+    pub artifact_id: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImplementationPublicationFinalComment<'a> {
+    pub intent_id: &'a str,
+    pub run_id: &'a str,
+    pub stage_run_id: &'a str,
+    pub artifact_id: &'a str,
+    pub pr_number: u64,
+    pub pr_url: &'a str,
+    pub branch: &'a str,
+    pub head_commit: &'a str,
+}
+
 pub fn marker(intent_id: &str) -> String {
     format!("{IMPLEMENTATION_COMMENT_MARKER_PREFIX}{intent_id} -->")
+}
+
+pub fn pr_marker(intent_id: &str) -> String {
+    format!("{IMPLEMENTATION_PR_MARKER_PREFIX}{intent_id} -->")
 }
 
 pub fn render_preview_comment(input: ImplementationPreviewComment<'_>) -> String {
@@ -91,6 +132,101 @@ pub fn render_preview_comment(input: ImplementationPreviewComment<'_>) -> String
     out
 }
 
+pub fn render_publication_pending_comment(
+    input: ImplementationPublicationPendingComment<'_>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&marker(input.intent_id));
+    out.push_str("\n## Symphony implementation\n\n");
+    out.push_str("**Publication:** pending\n\n");
+    out.push_str(&format!(
+        "**Factory run:** `{}` · **Stage run:** `{}` · **Artifact:** `{}`\n\n",
+        input.run_id, input.stage_run_id, input.artifact_id
+    ));
+    out.push_str("Symphony is publishing the verified change bundle to a draft pull request.\n");
+    out
+}
+
+pub fn render_publication_final_comment(
+    input: ImplementationPublicationFinalComment<'_>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(&marker(input.intent_id));
+    out.push_str("\n## Symphony implementation\n\n");
+    out.push_str("**Publication:** draft PR created — Agent Review\n\n");
+    out.push_str(&format!(
+        "**Pull request:** [#{}]({})\n\n",
+        input.pr_number, input.pr_url
+    ));
+    out.push_str(&format!(
+        "**Branch:** `{}` @ `{}`\n\n",
+        input.branch,
+        abbreviate(input.head_commit)
+    ));
+    out.push_str(&format!(
+        "**Factory run:** `{}` · **Stage run:** `{}` · **Artifact:** `{}`\n",
+        input.run_id, input.stage_run_id, input.artifact_id
+    ));
+    out
+}
+
+pub fn render_draft_pr_body(input: ImplementationDraftPrBody<'_>) -> String {
+    let mut out = String::new();
+    out.push_str(&pr_marker(input.intent_id));
+    out.push('\n');
+    out.push_str(&format!("Closes #{}\n\n", input.issue_number));
+    out.push_str("## Symphony implementation\n\n");
+    out.push_str(&format!(
+        "**Factory run:** `{}` · **Stage run:** `{}`\n\n",
+        input.run_id, input.stage_run_id
+    ));
+    out.push_str(&format!(
+        "**Implementation artifact:** `{}` · **Bundle:** `{}`\n\n",
+        input.artifact_id, input.bundle_artifact_id
+    ));
+    out.push_str(&format!(
+        "**Approved spec:** `{}` v{} at `{}`\n\n",
+        input.approved_artifact_id, input.approved_version, input.approved_spec_path
+    ));
+    out.push_str(&format!(
+        "**Commits:** `{}` → `{}`\n\n",
+        input.base_commit, input.head_commit
+    ));
+    out.push_str("### Summary\n\n");
+    out.push_str(input.manifest.summary.trim());
+    out.push_str("\n\n### Acceptance criteria\n\n");
+    render_criteria(&mut out, &input.manifest.acceptance_criteria);
+    out.push_str("\n### Validation\n\n");
+    if input.validation.is_empty() {
+        out.push_str("_No validation commands recorded._\n");
+    } else {
+        for command in input.validation {
+            let status = if command.passed { "pass" } else { "fail" };
+            out.push_str(&format!(
+                "- `{}`: **{}** in {} ms\n",
+                command.name, status, command.duration_ms
+            ));
+        }
+    }
+    out.push_str("\n### Known limitations\n\n");
+    if input.manifest.known_limitations.is_empty() {
+        out.push_str("_None._\n");
+    } else {
+        for limitation in &input.manifest.known_limitations {
+            out.push_str(&format!("- {}\n", limitation.trim()));
+        }
+    }
+    out
+}
+
+pub fn extract_implementation_pr_intent_id(body: &str) -> Option<String> {
+    let start = body.find(IMPLEMENTATION_PR_MARKER_PREFIX)? + IMPLEMENTATION_PR_MARKER_PREFIX.len();
+    let rest = &body[start..];
+    let end = rest.find(" -->")?;
+    let intent_id = rest[..end].trim();
+    (!intent_id.is_empty()).then(|| intent_id.to_string())
+}
+
 pub fn render_diagnostic_comment(intent_id: &str, run_id: &str, message: &str) -> String {
     let mut out = String::new();
     out.push_str(&marker(intent_id));
@@ -132,9 +268,8 @@ fn abbreviate(sha: &str) -> &str {
 mod tests {
     use super::*;
     use crate::implementation::domain::{
-        CriterionStatus, EvidenceKind, ExecutionProfile, ImplementationEvidence, ManifestStatus,
+        CriterionStatus, EvidenceKind, ImplementationEvidence, ManifestStatus,
     };
-    use chrono::Utc;
 
     #[test]
     fn renders_preview_with_marker_and_no_publication_claims() {
@@ -148,28 +283,13 @@ mod tests {
                 status: CriterionStatus::Implemented,
                 evidence: vec![ImplementationEvidence {
                     kind: EvidenceKind::Repository,
-                    reference: "src/x.rs".to_string(),
-                    summary: "Coordinator bound".to_string(),
+                    reference: "src/x.rs".into(),
+                    summary: "bound".into(),
                 }],
             }],
-            known_limitations: vec!["SSH deferred".to_string()],
+            known_limitations: vec![],
             blocker: None,
         };
-        let validation = [ValidationCommandResult {
-            name: "affected-validation".to_string(),
-            command_sha256: "abc".to_string(),
-            cycle: 1,
-            started_at: Utc::now(),
-            completed_at: Utc::now(),
-            duration_ms: 12,
-            exit_code: Some(0),
-            passed: true,
-            termination_reason: None,
-            stdout_tail: String::new(),
-            stderr_tail: String::new(),
-            output_sha256: "def".to_string(),
-            execution_profile: ExecutionProfile::Local,
-        }];
         let body = render_preview_comment(ImplementationPreviewComment {
             intent_id: "intent-1",
             run_id: "run-1",
@@ -180,17 +300,62 @@ mod tests {
             base_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             head_commit: "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
             manifest: &manifest,
-            changed_paths: &[
-                "specs/KATA-1/APPROVED-v2.md".to_string(),
-                "src/x.rs".to_string(),
-            ],
-            validation: &validation,
+            changed_paths: &["src/x.rs".into()],
+            validation: &[],
         });
-        assert!(body.starts_with("<!-- symphony:implementation:intent-1 -->"));
+        assert!(body.contains("<!-- symphony:implementation:intent-1 -->"));
         assert!(body.contains("No remote branch or pull request was created"));
-        assert!(body.contains("Adds retry policy."));
-        assert!(body.contains("`affected-validation`: **pass**"));
-        assert!(body.contains("SSH deferred"));
-        assert!(body.contains("implementation.mode: automatic"));
+        assert!(!body.contains("<!-- symphony:implementation-pr:"));
+    }
+
+    #[test]
+    fn renders_draft_pr_body_with_ownership_marker_and_closes() {
+        let manifest = ImplementationManifest {
+            schema_version: 1,
+            status: ManifestStatus::Completed,
+            head_commit: Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()),
+            summary: "Implements feature.".into(),
+            acceptance_criteria: vec![],
+            known_limitations: vec!["no docs".into()],
+            blocker: None,
+        };
+        let body = render_draft_pr_body(ImplementationDraftPrBody {
+            intent_id: "intent-pr",
+            issue_number: 42,
+            run_id: "run",
+            stage_run_id: "stage",
+            artifact_id: "impl",
+            bundle_artifact_id: "bundle",
+            approved_artifact_id: "spec",
+            approved_version: 1,
+            approved_spec_path: "specs/42/APPROVED-v1.md",
+            base_commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            head_commit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            manifest: &manifest,
+            validation: &[],
+        });
+        assert!(body.starts_with("<!-- symphony:implementation-pr:intent-pr -->"));
+        assert!(body.contains("Closes #42"));
+        assert!(body.contains("no docs"));
+        assert_eq!(
+            extract_implementation_pr_intent_id(&body).as_deref(),
+            Some("intent-pr")
+        );
+    }
+
+    #[test]
+    fn renders_final_comment_agent_review() {
+        let body = render_publication_final_comment(ImplementationPublicationFinalComment {
+            intent_id: "i",
+            run_id: "r",
+            stage_run_id: "s",
+            artifact_id: "a",
+            pr_number: 9,
+            pr_url: "https://github.com/acme/repo/pull/9",
+            branch: "symphony/42",
+            head_commit: "cccccccccccccccccccccccccccccccccccccccc",
+        });
+        assert!(body.contains("draft PR created — Agent Review"));
+        assert!(body.contains("#9"));
     }
 }

@@ -16,6 +16,8 @@ pub const IMPLEMENTATION_BLOCKER_SUMMARY_MAX_BYTES: usize = 2_000;
 pub const IMPLEMENTATION_BLOCKER_EVIDENCE_MAX_BYTES: usize = 4_000;
 pub const IMPLEMENTATION_COMMENT_MARKER_PREFIX: &str = "<!-- symphony:implementation:";
 pub const IMPLEMENTATION_COMMENT_MARKER_SUFFIX: &str = " -->";
+pub const IMPLEMENTATION_PR_MARKER_PREFIX: &str = "<!-- symphony:implementation-pr:";
+pub const IMPLEMENTATION_PR_MARKER_SUFFIX: &str = " -->";
 pub const IMPLEMENTATION_DEFAULT_SPEC_FILE: &str =
     "specs/{issue_identifier}/APPROVED-v{version}.md";
 pub const IMPLEMENTATION_MAX_BUNDLE_BYTES_DEFAULT: u64 = 100 * 1024 * 1024;
@@ -389,6 +391,22 @@ pub struct ImplementationPublicationIntent {
     pub expected_projection: serde_json::Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DraftPrArtifactRecord {
+    pub artifact_id: String,
+    pub run_id: String,
+    pub implementation_artifact_id: String,
+    pub intent_id: String,
+    pub number: u64,
+    pub url: String,
+    pub draft: bool,
+    pub head: String,
+    pub base: String,
+    pub head_sha: String,
+    pub marker: String,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

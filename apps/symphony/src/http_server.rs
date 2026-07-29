@@ -782,6 +782,8 @@ pub struct FactoryRunImplementationHttp {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<FactoryRunImplementationPublicationHttp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<FactoryRunImplementationPullRequestHttp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocker: Option<crate::implementation::domain::ImplementationBlocker>,
 }
 
@@ -810,12 +812,23 @@ pub struct FactoryRunImplementationPublicationHttp {
     pub error: Option<crate::triage::domain::FactoryError>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunImplementationPullRequestHttp {
+    pub number: u64,
+    pub url: String,
+    pub draft: bool,
+    pub head: String,
+    pub base: String,
+    pub head_sha: String,
+}
+
 pub fn attach_implementation_http_response(
     response: &mut FactoryRunHttpResponse,
     state: Option<&crate::implementation::domain::ImplementationRunState>,
     artifact: Option<&crate::implementation::domain::ImplementationArtifactRecord>,
     publication: Option<&crate::implementation::domain::ImplementationPublicationIntent>,
     bundle: Option<&crate::implementation::domain::BundleArtifactRecord>,
+    draft_pr: Option<&crate::implementation::domain::DraftPrArtifactRecord>,
 ) {
     let Some(state) = state else {
         return;
@@ -851,6 +864,14 @@ pub fn attach_implementation_http_response(
             status: intent.status.as_str().to_string(),
             completed_steps: intent.completed_steps.clone(),
             error: intent.last_error.clone(),
+        }),
+        pull_request: draft_pr.map(|record| FactoryRunImplementationPullRequestHttp {
+            number: record.number,
+            url: record.url.clone(),
+            draft: record.draft,
+            head: record.head.clone(),
+            base: record.base.clone(),
+            head_sha: record.head_sha.clone(),
         }),
         blocker: state.blocker.clone(),
     });

@@ -509,7 +509,8 @@ fn bootstrap_repository(
     }
 }
 
-fn branch_name_for_issue(config: &WorkspaceConfig, issue_identifier: &str) -> String {
+/// Deterministic workspace / publication branch for an issue identifier.
+pub fn branch_name_for_issue(config: &WorkspaceConfig, issue_identifier: &str) -> String {
     let sanitized_identifier = path_safety::sanitize_identifier(issue_identifier);
     format!("{}/{}", config.branch_prefix, sanitized_identifier)
 }

@@ -15,6 +15,9 @@ use crate::github::client::GithubClient;
 use crate::implementation::artifact::{
     expand_spec_file_path, is_spec_gap, parse_and_validate_manifest, render_approved_spec,
 };
+use crate::implementation::automatic::{
+    resolve_publication_remote, AutomaticImplementationPublisher, AutomaticPublishRequest,
+};
 use crate::implementation::bundle::{
     artifacts_dir, cleanup_incomplete_temps, create_result_bundle, store_blob_atomic, BlobSource,
 };
@@ -37,7 +40,7 @@ use crate::spec::domain::SpecArtifactRecord;
 use crate::triage::coordinator::EventEmitter;
 use crate::triage::domain::{FactoryError, FactoryEventRecord, StageUsage};
 use crate::triage::intake::{IntakeComment, IntakeMilestone, TriageIntakeIssue};
-use crate::triage::publisher::TriageCommentPort;
+use crate::triage::publisher::{TriageCommentPort, TriageRoutingPort};
 use crate::triage::runner::{effective_pi_model, TriageHarness, TriageIssueIdentity};
 use crate::triage::runtime::SharedFactoryStore;
 use crate::triage::store::{
@@ -134,6 +137,8 @@ pub struct ImplementationCoordinator<C, I, H> {
     harness: H,
     config: ImplementationCoordinatorConfig,
     events: Option<Arc<dyn EventEmitter>>,
+    routing: Option<Arc<dyn TriageRoutingPort>>,
+    pulls: Option<Arc<dyn crate::implementation::automatic::ImplementationPullRequestPort>>,
 }
 
 impl<C, I> ImplementationCoordinator<C, I, LiveImplementationHarness>
@@ -154,6 +159,8 @@ where
             harness: LiveImplementationHarness,
             config,
             events: None,
+            routing: None,
+            pulls: None,
         }
     }
 }
@@ -178,11 +185,26 @@ where
             harness,
             config,
             events: None,
+            routing: None,
+            pulls: None,
         }
     }
 
     pub fn with_events(mut self, events: Arc<dyn EventEmitter>) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    pub fn with_routing(mut self, routing: impl TriageRoutingPort + 'static) -> Self {
+        self.routing = Some(Arc::new(routing));
+        self
+    }
+
+    pub fn with_pulls(
+        mut self,
+        pulls: impl crate::implementation::automatic::ImplementationPullRequestPort + 'static,
+    ) -> Self {
+        self.pulls = Some(Arc::new(pulls));
         self
     }
 
@@ -266,7 +288,15 @@ where
         for intent in pending {
             match intent.kind {
                 ImplementationPublicationKind::Automatic => {
-                    publisher.defer_automatic_publication(&intent)?;
+                    if let Err(error) = self.reconcile_automatic_publication(service, &intent).await
+                    {
+                        tracing::warn!(
+                            event = "implementation_automatic_publication_failed",
+                            intent_id = %intent.intent_id,
+                            error = %error,
+                            "automatic publication reconcile failed"
+                        );
+                    }
                 }
                 ImplementationPublicationKind::Preview
                 | ImplementationPublicationKind::Diagnostic => {
@@ -339,6 +369,179 @@ where
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn reconcile_automatic_publication(
+        &self,
+        service: &ServiceConfig,
+        intent: &crate::implementation::domain::ImplementationPublicationIntent,
+    ) -> Result<()> {
+        let Some(routing) = self.routing.as_ref() else {
+            return Err(SymphonyError::TriageError(
+                "automatic publication requires TriageRoutingPort".into(),
+            ));
+        };
+        let Some(artifact_id) = intent.artifact_id.as_deref() else {
+            return Err(SymphonyError::TriageError(
+                "automatic publication missing artifact_id".into(),
+            ));
+        };
+        let Some(artifact) = self.store.get_implementation_artifact(artifact_id)? else {
+            return Err(SymphonyError::TriageError(format!(
+                "implementation artifact {artifact_id} missing"
+            )));
+        };
+        let Some(state) = self.store.get_implementation_state(&intent.run_id)? else {
+            return Err(SymphonyError::TriageError(
+                "implementation run state missing".into(),
+            ));
+        };
+        let Some(bundle_id) = state.bundle_artifact_id.as_deref() else {
+            return Err(SymphonyError::TriageError(
+                "automatic publication missing bundle artifact".into(),
+            ));
+        };
+        let Some(bundle) = self.store.get_bundle_artifact(bundle_id)? else {
+            return Err(SymphonyError::TriageError(format!(
+                "bundle artifact {bundle_id} missing"
+            )));
+        };
+        let issue_id = {
+            let run = self.store.get_run_by_id(&intent.run_id)?.ok_or_else(|| {
+                SymphonyError::StorageError(format!("run {} missing", intent.run_id))
+            })?;
+            run.issue_id
+        };
+        let issue = self.issues.fetch_issue(&issue_id).await?;
+        let remote_url =
+            resolve_publication_remote(&intent.desired_effects, service.workspace.repo.as_deref())?;
+        let approval_label = intent
+            .desired_effects
+            .get("approval_route_label")
+            .and_then(|v| v.as_str())
+            .unwrap_or(service.spec.approval_route.label.as_str());
+        let completion_state = intent
+            .desired_effects
+            .get("completion_route_state")
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                service
+                    .implementation
+                    .completion_route
+                    .as_ref()
+                    .map(|route| route.state.as_str())
+            })
+            .ok_or_else(|| {
+                SymphonyError::TriageError(
+                    "automatic publication requires completion_route.state".into(),
+                )
+            })?;
+        let repo_owner = service
+            .tracker
+            .repo_owner
+            .as_deref()
+            .ok_or_else(|| SymphonyError::TriageError("tracker.repo_owner required".into()))?;
+        let base_branch = intent
+            .desired_effects
+            .get("base_branch")
+            .and_then(|v| v.as_str())
+            .or(service.workspace.base_branch.as_deref())
+            .unwrap_or("main");
+        let validation = last_validation_results(&self.store, &artifact.stage_run_id)?;
+        let publisher_login = self
+            .comments
+            .authenticated_login()
+            .await
+            .unwrap_or_default();
+        let current_revision = implementation_issue_revision(&issue, service, &publisher_login);
+
+        let Some(pulls) = self.pulls.as_ref() else {
+            return Err(SymphonyError::TriageError(
+                "automatic publication requires ImplementationPullRequestPort".into(),
+            ));
+        };
+
+        self.record_event(
+            Some(&intent.run_id),
+            Some(&artifact.stage_run_id),
+            "implementation_publication_started",
+            serde_json::json!({
+                "intent_id": intent.intent_id,
+                "artifact_id": artifact.artifact_id,
+                "bundle_id": bundle.artifact_id,
+            }),
+        )?;
+
+        let publisher = AutomaticImplementationPublisher::new(
+            self.comments.clone(),
+            routing.clone(),
+            pulls.clone(),
+        );
+        let draft = publisher
+            .publish_automatic(
+                &self.store,
+                AutomaticPublishRequest {
+                    intent,
+                    issue_number: issue.issue_number,
+                    issue_identifier: &issue.identifier,
+                    issue_title: &issue.title,
+                    current_issue_revision: &current_revision,
+                    run_id: &intent.run_id,
+                    stage_run_id: &artifact.stage_run_id,
+                    artifact: &artifact,
+                    bundle: &bundle,
+                    manifest: &artifact.manifest,
+                    validation: &validation,
+                    branch_prefix: &service.workspace.branch_prefix,
+                    base_branch,
+                    remote_url: &remote_url,
+                    repo_owner,
+                    approval_route_label: approval_label,
+                    completion_route_state: completion_state,
+                    storage_path: &self.config.storage_path,
+                    max_pages: service
+                        .triage
+                        .max_intake_pages
+                        .max(service.spec.max_intake_pages),
+                },
+            )
+            .await?;
+
+        self.store.set_implementation_decision(
+            &intent.run_id,
+            ImplementationDecision::Published,
+            None,
+        )?;
+        self.record_event(
+            Some(&intent.run_id),
+            Some(&artifact.stage_run_id),
+            "implementation_pr_created",
+            serde_json::json!({
+                "intent_id": intent.intent_id,
+                "pr_number": draft.number,
+                "pr_url": draft.url,
+            }),
+        )?;
+        self.record_event(
+            Some(&intent.run_id),
+            Some(&artifact.stage_run_id),
+            "implementation_route_applied",
+            serde_json::json!({
+                "intent_id": intent.intent_id,
+                "completion_state": completion_state,
+            }),
+        )?;
+        self.record_event(
+            Some(&intent.run_id),
+            Some(&artifact.stage_run_id),
+            "implementation_completed",
+            serde_json::json!({
+                "intent_id": intent.intent_id,
+                "pr_number": draft.number,
+                "pr_url": draft.url,
+            }),
+        )?;
         Ok(())
     }
 
@@ -975,55 +1178,89 @@ where
             })?;
 
         let _ = bundle;
-        let _ =
-            self.store
-                .set_implementation_decision(run_id, ImplementationDecision::Previewed, None);
+        let decision = if service.implementation.mode == ImplementationMode::Automatic {
+            ImplementationDecision::Pending
+        } else {
+            ImplementationDecision::Previewed
+        };
+        let _ = self
+            .store
+            .set_implementation_decision(run_id, decision, None);
 
-        // PR1: always publish preview (even if mode=automatic — automatic deferred).
+        let kind = if service.implementation.mode == ImplementationMode::Automatic {
+            ImplementationPublicationKind::Automatic
+        } else {
+            ImplementationPublicationKind::Preview
+        };
         let intent = self.store.create_implementation_publication_intent(
             run_id,
             Some(&artifact.artifact_id),
-            ImplementationPublicationKind::Preview,
+            kind,
             &serde_json::json!({
                 "mode": service.implementation.mode.as_str(),
                 "changed_paths": assessment.changed_paths,
-                "note": if service.implementation.mode == ImplementationMode::Automatic {
-                    Some("automatic publication deferred to PR2")
-                } else {
-                    None
-                },
+                "approval_route_label": service.spec.approval_route.label,
+                "completion_route_state": service.implementation.completion_route.as_ref().map(|r| &r.state),
+                "base_branch": service.workspace.base_branch,
+                "remote_url": intent_remote_url(service),
             }),
         )?;
-        let publisher = ImplementationPublisher::new(self.comments.clone());
-        publisher
-            .publish_preview(
-                &self.store,
-                PreviewPublishRequest {
-                    intent: &intent,
-                    issue_number: issue.issue_number,
-                    run_id,
-                    stage_run_id,
-                    artifact: &artifact,
-                    manifest: &manifest,
-                    changed_paths: &assessment.changed_paths,
-                    validation: &validation_results,
-                    max_pages: 5,
-                },
-            )
-            .await?;
 
+        if kind == ImplementationPublicationKind::Preview {
+            let publisher = ImplementationPublisher::new(self.comments.clone());
+            publisher
+                .publish_preview(
+                    &self.store,
+                    PreviewPublishRequest {
+                        intent: &intent,
+                        issue_number: issue.issue_number,
+                        run_id,
+                        stage_run_id,
+                        artifact: &artifact,
+                        manifest: &manifest,
+                        changed_paths: &assessment.changed_paths,
+                        validation: &validation_results,
+                        max_pages: 5,
+                    },
+                )
+                .await?;
+
+            self.record_event(
+                Some(run_id),
+                Some(stage_run_id),
+                "implementation_preview_published",
+                serde_json::json!({
+                    "artifact_id": artifact.artifact_id,
+                    "intent_id": intent.intent_id,
+                    "head_commit": assessment.head_commit,
+                }),
+            )?;
+            return Ok(AttemptResult::Previewed);
+        }
+
+        // Automatic: create intent and reconcile immediately (also recoverable via pending list).
         self.record_event(
             Some(run_id),
             Some(stage_run_id),
-            "implementation_preview_published",
+            "implementation_publication_started",
             serde_json::json!({
                 "artifact_id": artifact.artifact_id,
                 "intent_id": intent.intent_id,
                 "head_commit": assessment.head_commit,
             }),
         )?;
-
-        Ok(AttemptResult::Previewed)
+        match self.reconcile_automatic_publication(service, &intent).await {
+            Ok(()) => Ok(AttemptResult::Previewed),
+            Err(error) => {
+                tracing::warn!(
+                    event = "implementation_automatic_publication_failed",
+                    intent_id = %intent.intent_id,
+                    error = %error,
+                    "automatic publication will retry via pending reconcile"
+                );
+                Ok(AttemptResult::Previewed)
+            }
+        }
     }
 
     fn fail_implementation_attempt(
@@ -1224,6 +1461,15 @@ fn issue_number_from_run(store: &SharedFactoryStore, run_id: &str) -> Result<u64
     run.issue_id.parse().map_err(|_| {
         SymphonyError::TriageError(format!("issue id {} is not numeric", run.issue_id))
     })
+}
+
+fn intent_remote_url(service: &ServiceConfig) -> Option<String> {
+    service
+        .workspace
+        .repo
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn last_validation_results(

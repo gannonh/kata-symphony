@@ -1431,6 +1431,29 @@ pub fn check_implementation(
         ));
     }
 
+    if config.implementation.mode == crate::implementation::domain::ImplementationMode::Automatic {
+        match config
+            .implementation
+            .completion_route
+            .as_ref()
+            .map(|route| route.state.trim())
+            .filter(|state| !state.is_empty())
+        {
+            Some(state) => results.push(DoctorCheckResult::pass(
+                "Implementation Completion Route",
+                format!("completion_route.state={state}"),
+            )),
+            None => results.push(DoctorCheckResult::error(
+                "Implementation Completion Route",
+                "implementation.completion_route.state is required when mode is automatic",
+            )),
+        }
+        results.push(DoctorCheckResult::pass(
+            "Implementation Draft PR Permissions",
+            "Automatic mode pushes a branch and creates a draft PR using the configured GitHub token; ensure the token can write contents and pull requests",
+        ));
+    }
+
     results
 }
 
