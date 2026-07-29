@@ -40,12 +40,13 @@ The PR takeover closed the publication-path findings before re-review:
 2. The trusted publisher derives a clean HTTPS forge URL instead of reusing the local workspace path.
 3. Git fetch, push, and observation receive the configured GitHub token through a subprocess-only authorization header. Credentials are never stored in the remote URL or Git config.
 4. Network Git commands have a finite timeout, disabled terminal prompting, bounded output capture, and credential/remote redaction.
-5. Persisted draft-PR artifacts are checked against live GitHub state again before tracker routing.
-6. Closed owned PRs no longer poison recovery; retryable issue drift stays pending.
-7. Authenticated-login failures propagate, missing publication intents fail loudly, and doctor reports the pinned publication target without claiming unverified permissions.
-8. Recovered draft-PR artifacts restore a missing `pr_verified` step; final comments remain pending until run state and completion events are durable, then the intent becomes applied.
-9. Unexpected automatic-reconciliation failures persist a structured retryable error and `implementation_publication_blocked` event.
-10. Focused regression tests cover every repaired failure and the preview path remains backward-compatible.
+5. Persisted draft-PR artifacts are checked against live GitHub state through final-comment publication, including recovery after tracker routing.
+6. Closed owned PRs preserve maintainer divergence as a conflict, and marker-matching PRs are accepted only from the authenticated publisher.
+7. Retryable issue drift stays pending.
+8. Authenticated-login failures propagate, missing publication intents fail loudly, and doctor reports the pinned publication target without claiming unverified permissions.
+9. Recovered draft-PR artifacts restore a missing `pr_verified` step; final comments remain pending until run state and completion events are durable, then the intent becomes applied.
+10. Unexpected automatic-reconciliation failures persist a structured retryable error and `implementation_publication_blocked` event.
+11. Focused regression tests cover every repaired failure and the preview path remains backward-compatible.
 
 ## Files changed (primary)
 
@@ -69,7 +70,7 @@ Results (GitHub Actions on the remediated PR head):
 | --- | --- |
 | `cargo fmt --check` | Pass |
 | `cargo clippy -- -D warnings` | Pass |
-| `cargo test` | Pass, including **329** library tests and **14** GitHub client tests |
+| `cargo test` | Pass, including **330** library tests and **14** GitHub client tests |
 | `cargo llvm-cov --fail-under-lines 72` | Pass |
 | GitHub backend validation / golden-path smoke / distributions | Pass |
 | Docker daemon | Unavailable — residual |
