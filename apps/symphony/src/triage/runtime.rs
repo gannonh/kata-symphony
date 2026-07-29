@@ -1163,6 +1163,8 @@ impl TriageRuntime {
                             attempts_failed = summary.attempts_failed,
                             stale_skipped = summary.stale_skipped,
                             preview_published = summary.preview_published,
+                            automatic_published = summary.automatic_published,
+                            automatic_pending = summary.automatic_pending,
                             awaiting_human = summary.awaiting_human,
                             "implementation poll completed"
                         );
