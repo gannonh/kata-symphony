@@ -2580,10 +2580,7 @@ impl SqliteFactoryStore {
             })
     }
 
-    pub fn list_validation_cycles(
-        &self,
-        stage_run_id: &str,
-    ) -> Result<Vec<ValidationCycleRecord>> {
+    pub fn list_validation_cycles(&self, stage_run_id: &str) -> Result<Vec<ValidationCycleRecord>> {
         let mut stmt = self
             .conn
             .prepare(
@@ -2819,10 +2816,7 @@ impl SqliteFactoryStore {
             .map_err(storage_error)
     }
 
-    pub fn get_implementation_state(
-        &self,
-        run_id: &str,
-    ) -> Result<Option<ImplementationRunState>> {
+    pub fn get_implementation_state(&self, run_id: &str) -> Result<Option<ImplementationRunState>> {
         self.conn
             .query_row(
                 "SELECT run_id, approved_artifact_id, approved_version, configuration_revision,
@@ -2969,6 +2963,28 @@ impl SqliteFactoryStore {
             .map_err(storage_error)?;
         let rows = stmt
             .query_map([], implementation_publication_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn list_implementation_publications_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<ImplementationPublicationIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+                    retry_count, last_error_json, comment_id, publisher_login,
+                    desired_effects_json, observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 FROM implementation_publication_intents
+                 WHERE run_id = ?1 ORDER BY created_at DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], implementation_publication_from_row)
             .map_err(storage_error)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(storage_error)
@@ -4845,11 +4861,7 @@ mod tests {
         store
             .finalize_spec_approval(&artifact.run_id, &intent.intent_id, "route_applied")
             .unwrap();
-        (
-            artifact.run_id,
-            artifact.artifact_id,
-            attempt.stage_run_id,
-        )
+        (artifact.run_id, artifact.artifact_id, attempt.stage_run_id)
     }
 
     #[test]
@@ -4960,17 +4972,15 @@ mod tests {
             status: crate::implementation::domain::ManifestStatus::Completed,
             head_commit: Some("4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()),
             summary: "Done".to_string(),
-            acceptance_criteria: vec![
-                crate::implementation::domain::AcceptanceCriterionClaim {
-                    index: 1,
-                    status: crate::implementation::domain::CriterionStatus::Implemented,
-                    evidence: vec![crate::implementation::domain::ImplementationEvidence {
-                        kind: crate::implementation::domain::EvidenceKind::Repository,
-                        reference: "src/x.rs".to_string(),
-                        summary: "Change".to_string(),
-                    }],
-                },
-            ],
+            acceptance_criteria: vec![crate::implementation::domain::AcceptanceCriterionClaim {
+                index: 1,
+                status: crate::implementation::domain::CriterionStatus::Implemented,
+                evidence: vec![crate::implementation::domain::ImplementationEvidence {
+                    kind: crate::implementation::domain::EvidenceKind::Repository,
+                    reference: "src/x.rs".to_string(),
+                    summary: "Change".to_string(),
+                }],
+            }],
             known_limitations: vec![],
             blocker: None,
         };

@@ -1,13 +1,1638 @@
-//! A3 eligibility, attempts, repair loop, and reconciliation (PR1+).
+//! A3 eligibility, attempts, repair loop, and reconciliation.
 
-use crate::error::Result;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-/// Placeholder for the implementation-stage coordinator.
-#[derive(Debug, Clone, Default)]
-pub struct ImplementationCoordinator;
+use async_trait::async_trait;
+use chrono::Utc;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
-impl ImplementationCoordinator {
-    pub fn poll_placeholder(&self) -> Result<()> {
+use crate::domain::{AgentBackend, ServiceConfig};
+use crate::error::{Result, SymphonyError};
+use crate::github::client::GithubClient;
+use crate::implementation::artifact::{
+    expand_spec_file_path, is_spec_gap, parse_and_validate_manifest, render_approved_spec,
+};
+use crate::implementation::bundle::{
+    artifacts_dir, cleanup_incomplete_temps, create_result_bundle, store_blob_atomic, BlobSource,
+};
+use crate::implementation::domain::{
+    BlockerKind, ExecutionProfile, ImplementationAttemptInputs, ImplementationBlocker,
+    ImplementationDecision, ImplementationMode, ImplementationPublicationKind,
+    ImplementationTurnKind, ImplementationTurnStatus, ManifestStatus, ValidationCommandResult,
+    IMPLEMENTATION_STAGE_NAME,
+};
+use crate::implementation::publisher::{
+    DiagnosticPublishRequest, ImplementationPublisher, PreviewPublishRequest,
+};
+use crate::implementation::runner::{
+    assess_postconditions, blob_sha_of_file, resolve_base_commit, ImplementationHarness,
+    ImplementationRunner, ImplementationTurnRequest, LiveImplementationHarness,
+};
+use crate::implementation::runtime::implementation_configuration_revision;
+use crate::implementation::validation::ValidationExecutor;
+use crate::spec::domain::SpecArtifactRecord;
+use crate::triage::coordinator::EventEmitter;
+use crate::triage::domain::{FactoryError, FactoryEventRecord, StageUsage};
+use crate::triage::intake::{IntakeComment, IntakeMilestone, TriageIntakeIssue};
+use crate::triage::publisher::TriageCommentPort;
+use crate::triage::runner::{effective_pi_model, TriageHarness, TriageIssueIdentity};
+use crate::triage::runtime::SharedFactoryStore;
+use crate::triage::store::{
+    A3EligibleApprovedRun, ClaimAttemptRequest, FactoryRunStore, StoreBundleArtifactRequest,
+    StoreImplementationArtifactRequest, StoreImplementationTurnRequest,
+    StoreValidationCycleRequest,
+};
+
+#[derive(Debug, Clone)]
+pub struct ImplementationCoordinatorConfig {
+    pub forge_host: String,
+    pub repository: String,
+    pub owner_instance: String,
+    pub workflow_dir: PathBuf,
+    pub storage_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ImplementationPollSummary {
+    pub implementation_enabled: bool,
+    pub candidates_seen: u32,
+    pub attempts_started: u32,
+    pub attempts_completed: u32,
+    pub attempts_failed: u32,
+    pub stale_skipped: u32,
+    pub preview_published: u32,
+    pub awaiting_human: u32,
+}
+
+/// Fetch a single issue for eligibility revision checks.
+#[async_trait]
+pub trait ImplementationIssuePort: Send + Sync {
+    async fn fetch_issue(&self, issue_id: &str) -> Result<TriageIntakeIssue>;
+}
+
+#[async_trait]
+impl ImplementationIssuePort for GithubClient {
+    async fn fetch_issue(&self, issue_id: &str) -> Result<TriageIntakeIssue> {
+        let number: u64 = issue_id.parse().map_err(|_| {
+            SymphonyError::TriageError(format!("invalid GitHub issue id {issue_id}"))
+        })?;
+        let issue = self.get_issue(number).await?;
+        let comments = self.list_comments_paginated(number, 10).await?;
+        let labels: Vec<String> = issue
+            .labels
+            .iter()
+            .map(|label| label.name.clone())
+            .collect();
+        let assignees: Vec<String> = if !issue.assignees.is_empty() {
+            issue
+                .assignees
+                .iter()
+                .map(|user| user.login.clone())
+                .collect()
+        } else {
+            issue.assignee.into_iter().map(|user| user.login).collect()
+        };
+        Ok(TriageIntakeIssue {
+            issue_id: issue.number.to_string(),
+            issue_number: issue.number,
+            identifier: format!("#{}", issue.number),
+            title: issue.title,
+            body: issue.body.unwrap_or_default(),
+            labels: labels.clone(),
+            non_managed_labels: labels,
+            assignees,
+            milestone: issue.milestone.map(|m| IntakeMilestone {
+                number: m.number,
+                title: m.title,
+            }),
+            comments: comments
+                .into_iter()
+                .map(|c| IntakeComment {
+                    id: c.id,
+                    author_login: c.user.as_ref().map(|u| u.login.clone()).unwrap_or_default(),
+                    body: c.body.unwrap_or_default(),
+                    created_at: c.created_at.unwrap_or_else(Utc::now),
+                    updated_at: c.updated_at.unwrap_or_else(Utc::now),
+                })
+                .collect(),
+            created_at: issue.created_at.unwrap_or_else(Utc::now),
+            updated_at: issue.updated_at.unwrap_or_else(Utc::now),
+            forge_host: "github.com".into(),
+            repository: format!("{}/{}", self.repo_owner, self.repo_name),
+            in_project: true,
+        })
+    }
+}
+
+pub struct ImplementationCoordinator<C, I, H> {
+    store: SharedFactoryStore,
+    comments: C,
+    issues: I,
+    harness: H,
+    config: ImplementationCoordinatorConfig,
+    events: Option<Arc<dyn EventEmitter>>,
+}
+
+impl<C, I> ImplementationCoordinator<C, I, LiveImplementationHarness>
+where
+    C: TriageCommentPort + Clone,
+    I: ImplementationIssuePort,
+{
+    pub fn new(
+        store: SharedFactoryStore,
+        comments: C,
+        issues: I,
+        config: ImplementationCoordinatorConfig,
+    ) -> Self {
+        Self {
+            store,
+            comments,
+            issues,
+            harness: LiveImplementationHarness,
+            config,
+            events: None,
+        }
+    }
+}
+
+impl<C, I, H> ImplementationCoordinator<C, I, H>
+where
+    C: TriageCommentPort + Clone,
+    I: ImplementationIssuePort,
+    H: ImplementationHarness,
+{
+    pub fn with_harness(
+        store: SharedFactoryStore,
+        comments: C,
+        issues: I,
+        config: ImplementationCoordinatorConfig,
+        harness: H,
+    ) -> Self {
+        Self {
+            store,
+            comments,
+            issues,
+            harness,
+            config,
+            events: None,
+        }
+    }
+
+    pub fn with_events(mut self, events: Arc<dyn EventEmitter>) -> Self {
+        self.events = Some(events);
+        self
+    }
+
+    pub async fn poll_once(
+        &mut self,
+        service: &ServiceConfig,
+    ) -> Result<ImplementationPollSummary> {
+        let mut summary = ImplementationPollSummary {
+            implementation_enabled: service.implementation.enabled,
+            ..Default::default()
+        };
+
+        // Recover interrupted implementation attempts (lease-stale → interrupted).
+        self.store.interrupt_stale_attempts()?;
+        let _ = cleanup_incomplete_temps(&artifacts_dir(&self.config.storage_path));
+
+        self.reconcile_pending_publications(service).await?;
+
+        if !service.implementation.enabled {
+            return Ok(summary);
+        }
+
+        let prompts = load_prompts(&self.config.workflow_dir, service)?;
+        let configuration_revision = implementation_configuration_revision(
+            &service.implementation,
+            &prompts.implement,
+            &prompts.repair,
+        );
+        let publisher_login = self.comments.authenticated_login().await?;
+
+        let candidates = self
+            .store
+            .list_a3_eligible_approved_runs(&configuration_revision)?;
+        summary.candidates_seen = candidates.len() as u32;
+
+        for candidate in candidates {
+            match self
+                .process_candidate(
+                    service,
+                    &prompts,
+                    &configuration_revision,
+                    &publisher_login,
+                    &candidate,
+                )
+                .await
+            {
+                Ok(CandidateOutcome::StartedCompleted) => {
+                    summary.attempts_started += 1;
+                    summary.attempts_completed += 1;
+                    summary.preview_published += 1;
+                }
+                Ok(CandidateOutcome::StartedAwaitingHuman) => {
+                    summary.attempts_started += 1;
+                    summary.attempts_completed += 1;
+                    summary.awaiting_human += 1;
+                }
+                Ok(CandidateOutcome::StartedFailed) => {
+                    summary.attempts_started += 1;
+                    summary.attempts_failed += 1;
+                }
+                Ok(CandidateOutcome::Stale) => summary.stale_skipped += 1,
+                Ok(CandidateOutcome::Skipped) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        event = "implementation_candidate_failed",
+                        run_id = %candidate.run_id,
+                        error = %error,
+                        "implementation candidate processing failed"
+                    );
+                    summary.attempts_failed += 1;
+                }
+            }
+        }
+
+        Ok(summary)
+    }
+
+    async fn reconcile_pending_publications(&self, service: &ServiceConfig) -> Result<()> {
+        let pending = self.store.list_pending_implementation_publications()?;
+        let publisher = ImplementationPublisher::new(self.comments.clone());
+        for intent in pending {
+            match intent.kind {
+                ImplementationPublicationKind::Automatic => {
+                    publisher.defer_automatic_publication(&intent)?;
+                }
+                ImplementationPublicationKind::Preview
+                | ImplementationPublicationKind::Diagnostic => {
+                    // Re-publish when we have enough durable context; otherwise leave pending.
+                    let Some(artifact_id) = intent.artifact_id.as_deref() else {
+                        if intent.kind == ImplementationPublicationKind::Diagnostic {
+                            // Diagnostic without artifact — message in desired_effects.
+                            let message = intent
+                                .desired_effects
+                                .get("message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("Implementation requires human attention.");
+                            let issue_number = issue_number_from_run(&self.store, &intent.run_id)?;
+                            let _ = publisher
+                                .publish_diagnostic(
+                                    &self.store,
+                                    DiagnosticPublishRequest {
+                                        intent: &intent,
+                                        issue_number,
+                                        run_id: &intent.run_id,
+                                        message,
+                                        max_pages: service
+                                            .triage
+                                            .max_intake_pages
+                                            .max(service.spec.max_intake_pages),
+                                    },
+                                )
+                                .await;
+                        }
+                        continue;
+                    };
+                    let Some(artifact) = self.store.get_implementation_artifact(artifact_id)?
+                    else {
+                        continue;
+                    };
+                    let issue_number = issue_number_from_run(&self.store, &intent.run_id)?;
+                    if intent.kind == ImplementationPublicationKind::Preview {
+                        let validation =
+                            last_validation_results(&self.store, &artifact.stage_run_id)?;
+                        let changed = intent
+                            .desired_effects
+                            .get("changed_paths")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(str::to_string))
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
+                        let _ = publisher
+                            .publish_preview(
+                                &self.store,
+                                PreviewPublishRequest {
+                                    intent: &intent,
+                                    issue_number,
+                                    run_id: &artifact.run_id,
+                                    stage_run_id: &artifact.stage_run_id,
+                                    artifact: &artifact,
+                                    manifest: &artifact.manifest,
+                                    changed_paths: &changed,
+                                    validation: &validation,
+                                    max_pages: service
+                                        .triage
+                                        .max_intake_pages
+                                        .max(service.spec.max_intake_pages),
+                                },
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
         Ok(())
+    }
+
+    async fn process_candidate(
+        &mut self,
+        service: &ServiceConfig,
+        prompts: &LoadedPrompts,
+        configuration_revision: &str,
+        publisher_login: &str,
+        candidate: &A3EligibleApprovedRun,
+    ) -> Result<CandidateOutcome> {
+        let approved = self
+            .store
+            .get_spec_artifact(&candidate.approved_artifact_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "approved artifact {} missing",
+                    candidate.approved_artifact_id
+                ))
+            })?;
+
+        let issue = self.issues.fetch_issue(&candidate.issue_id).await?;
+        let current_revision = implementation_issue_revision(&issue, service, publisher_login);
+        if current_revision != approved.issue_revision {
+            self.record_event(
+                Some(&candidate.run_id),
+                None,
+                "approved_spec_stale",
+                serde_json::json!({
+                    "issue": candidate.issue_identifier,
+                    "approved_issue_revision": approved.issue_revision,
+                    "current_issue_revision": current_revision,
+                }),
+            )?;
+            return Ok(CandidateOutcome::Stale);
+        }
+
+        // Bound attempts before claiming.
+        let prior = self.store.list_stage_attempts_for_revision(
+            IMPLEMENTATION_STAGE_NAME,
+            &candidate.run_id,
+            &approved.issue_revision,
+            configuration_revision,
+        )?;
+        if prior.len() as u32 >= service.implementation.max_attempts {
+            return Ok(CandidateOutcome::Skipped);
+        }
+
+        let workspace_root = resolve_path(&service.workspace.root, "workspace.root")?;
+        let repo_path = resolve_path(
+            service.workspace.repo.as_deref().ok_or_else(|| {
+                SymphonyError::InvalidWorkflowConfig(
+                    "workspace.repo is required for the implementation stage".to_string(),
+                )
+            })?,
+            "workspace.repo",
+        )?;
+        let base_branch = service
+            .workspace
+            .base_branch
+            .clone()
+            .unwrap_or_else(|| "main".to_string());
+        let base_commit = resolve_base_commit(&repo_path, &base_branch)?;
+        let execution_profile = if service.workspace.docker.is_some() {
+            ExecutionProfile::Docker
+        } else {
+            ExecutionProfile::Local
+        };
+        if execution_profile == ExecutionProfile::Docker {
+            // PR1: Docker full container path is supported for credential isolation
+            // unit tests; live Docker execution still uses the local runner profile
+            // when a FakeHarness is injected. Real docker orchestration is best-effort.
+            tracing::info!(
+                event = "implementation_docker_profile_selected",
+                run_id = %candidate.run_id,
+                "docker execution profile selected; worker isolation uses credential-free env"
+            );
+        }
+
+        let harness = match service.agent_backend {
+            AgentBackend::Codex => TriageHarness::Codex,
+            AgentBackend::KataCli => TriageHarness::Pi,
+        };
+        let model = match harness {
+            TriageHarness::Pi => effective_pi_model(
+                service.implementation.model.as_deref(),
+                service.pi_agent.model.as_deref(),
+            ),
+            TriageHarness::Codex => None,
+        };
+        let command = agent_command(service)?;
+
+        let stage = self
+            .store
+            .claim_implementation_attempt(ClaimAttemptRequest {
+                forge_host: self.config.forge_host.clone(),
+                repository: self.config.repository.clone(),
+                issue_id: candidate.issue_id.clone(),
+                issue_identifier: candidate.issue_identifier.clone(),
+                issue_revision: approved.issue_revision.clone(),
+                configuration_revision: configuration_revision.to_string(),
+                owner_instance: self.config.owner_instance.clone(),
+                harness: harness_name(harness).to_string(),
+                model: model.clone(),
+                workspace_path: None,
+                output_path: None,
+                pid: None,
+                process_group_id: None,
+                process_start_token: None,
+                executable_identity: None,
+            })?;
+
+        self.store.store_implementation_attempt_inputs(
+            &stage.stage_run_id,
+            &ImplementationAttemptInputs {
+                approved_artifact_id: approved.artifact_id.clone(),
+                approved_version: approved.version,
+                approval_issue_revision: approved.issue_revision.clone(),
+                base_branch: base_branch.clone(),
+                base_commit: base_commit.clone(),
+                execution_profile,
+                configuration_revision: configuration_revision.to_string(),
+            },
+        )?;
+
+        self.record_event(
+            Some(&stage.run_id),
+            Some(&stage.stage_run_id),
+            "implementation_started",
+            serde_json::json!({
+                "status": "running",
+                "attempt": stage.attempt,
+                "approved_artifact_id": approved.artifact_id,
+                "execution_profile": execution_profile.as_str(),
+            }),
+        )?;
+
+        match self
+            .run_attempt_pipeline(
+                service,
+                prompts,
+                &stage.stage_run_id,
+                &stage.run_id,
+                &approved,
+                &issue,
+                &workspace_root,
+                &repo_path,
+                &base_commit,
+                execution_profile,
+                harness,
+                model,
+                &command,
+                configuration_revision,
+            )
+            .await
+        {
+            Ok(AttemptResult::Previewed) => Ok(CandidateOutcome::StartedCompleted),
+            Ok(AttemptResult::AwaitingHuman) => Ok(CandidateOutcome::StartedAwaitingHuman),
+            Ok(AttemptResult::Failed) => Ok(CandidateOutcome::StartedFailed),
+            Err(error) => {
+                let _ = self.store.fail_attempt(
+                    &stage.stage_run_id,
+                    FactoryError::new(
+                        "implementation_failed",
+                        "implementation",
+                        error.to_string(),
+                        true,
+                        None,
+                    ),
+                );
+                self.record_event(
+                    Some(&stage.run_id),
+                    Some(&stage.stage_run_id),
+                    "implementation_failed",
+                    serde_json::json!({"error": error.to_string()}),
+                )?;
+                Ok(CandidateOutcome::StartedFailed)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_attempt_pipeline(
+        &mut self,
+        service: &ServiceConfig,
+        prompts: &LoadedPrompts,
+        stage_run_id: &str,
+        run_id: &str,
+        approved: &SpecArtifactRecord,
+        issue: &TriageIntakeIssue,
+        workspace_root: &Path,
+        repo_path: &Path,
+        base_commit: &str,
+        execution_profile: ExecutionProfile,
+        harness: TriageHarness,
+        model: Option<String>,
+        command: &[String],
+        configuration_revision: &str,
+    ) -> Result<AttemptResult> {
+        let approved_at = approved.received_at.to_rfc3339();
+        let spec_markdown = render_approved_spec(
+            run_id,
+            &issue.identifier,
+            &approved.artifact_id,
+            approved.version,
+            &approved_at,
+            &approved.artifact,
+        );
+        let spec_path = expand_spec_file_path(
+            &service.implementation.spec_file,
+            &issue.identifier,
+            run_id,
+            &approved.artifact_id,
+            approved.version,
+        )
+        .map_err(|error| SymphonyError::InvalidWorkflowConfig(error.to_string()))?;
+
+        let stage_inputs = serde_json::json!({
+            "issue": {
+                "id": issue.issue_id,
+                "identifier": issue.identifier,
+                "title": issue.title,
+                "body": issue.body,
+            },
+            "approved_spec": approved.artifact,
+            "approved_spec_path": spec_path,
+            "base_commit": base_commit,
+        });
+
+        let turn_request = ImplementationTurnRequest {
+            attempt_id: stage_run_id.to_string(),
+            workspace_root: workspace_root.to_path_buf(),
+            repo_path: repo_path.to_path_buf(),
+            base_commit: base_commit.to_string(),
+            command: command.to_vec(),
+            prompt: prompts.implement.clone(),
+            timeout_ms: service.implementation.invocation_timeout_ms,
+            model: model.clone(),
+            harness,
+            issue: TriageIssueIdentity {
+                id: issue.issue_id.clone(),
+                identifier: issue.identifier.clone(),
+                title: issue.title.clone(),
+            },
+            codex: Some(service.codex.clone()),
+            approved_spec_markdown: spec_markdown.clone(),
+            approved_spec_path: spec_path.clone(),
+            stage_inputs: stage_inputs.clone(),
+            spawned: None,
+            execution_profile,
+            existing_workspace: None,
+        };
+
+        let runner = ImplementationRunner;
+        let mut turn = runner.run_local_turn(&turn_request, &self.harness).await?;
+
+        self.store_turn(
+            stage_run_id,
+            1,
+            ImplementationTurnKind::Implement,
+            harness,
+            model.as_deref(),
+            execution_profile,
+            &turn.usage,
+            Some(&turn.output_bytes),
+            None,
+        )?;
+
+        let mut manifest = match parse_and_validate_manifest(&turn.output_bytes, &approved.artifact)
+        {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                self.store.fail_attempt(
+                    stage_run_id,
+                    FactoryError::new(
+                        "invalid_manifest",
+                        "implementation",
+                        error.to_string(),
+                        true,
+                        None,
+                    ),
+                )?;
+                return Ok(AttemptResult::Failed);
+            }
+        };
+
+        if manifest.status == ManifestStatus::Blocked {
+            let blocker = manifest.blocker.clone().unwrap_or(ImplementationBlocker {
+                kind: BlockerKind::Repository,
+                summary: "blocked".into(),
+                evidence: "no blocker payload".into(),
+            });
+            if is_spec_gap(&blocker) {
+                let artifact = self.store.store_implementation_artifact(
+                    StoreImplementationArtifactRequest {
+                        stage_run_id: stage_run_id.to_string(),
+                        approved_artifact_id: approved.artifact_id.clone(),
+                        approved_version: approved.version,
+                        issue_revision: approved.issue_revision.clone(),
+                        configuration_revision: configuration_revision.to_string(),
+                        manifest: manifest.clone(),
+                        base_commit: base_commit.to_string(),
+                        head_commit: None,
+                        approved_spec_path: spec_path.clone(),
+                        validation_cycles: 0,
+                        execution_profile,
+                        bytes_len: turn.output_bytes.len() as u64,
+                        usage: turn.usage.clone(),
+                    },
+                )?;
+                let intent = self.store.create_implementation_publication_intent(
+                    run_id,
+                    Some(&artifact.artifact_id),
+                    ImplementationPublicationKind::Diagnostic,
+                    &serde_json::json!({
+                        "kind": "spec_gap",
+                        "message": blocker.summary,
+                    }),
+                )?;
+                let publisher = ImplementationPublisher::new(self.comments.clone());
+                let _ = publisher
+                    .publish_diagnostic(
+                        &self.store,
+                        DiagnosticPublishRequest {
+                            intent: &intent,
+                            issue_number: issue.issue_number,
+                            run_id,
+                            message: &blocker.summary,
+                            max_pages: 5,
+                        },
+                    )
+                    .await;
+                self.record_event(
+                    Some(run_id),
+                    Some(stage_run_id),
+                    "implementation_spec_gap",
+                    serde_json::json!({"blocker": blocker}),
+                )?;
+                return Ok(AttemptResult::AwaitingHuman);
+            }
+            self.store.fail_attempt(
+                stage_run_id,
+                FactoryError::new(
+                    format!("blocked_{}", blocker.kind.as_str()),
+                    "implementation",
+                    blocker.summary,
+                    true,
+                    None,
+                ),
+            )?;
+            return Ok(AttemptResult::Failed);
+        }
+
+        let expected_head = manifest
+            .head_commit
+            .clone()
+            .ok_or_else(|| SymphonyError::TriageError("completed manifest missing head".into()))?;
+
+        let mut assessment = match assess_postconditions(
+            &turn.workspace_path,
+            base_commit,
+            &spec_path,
+            spec_markdown.as_bytes(),
+            &expected_head,
+        ) {
+            Ok(a) => a,
+            Err(error) => {
+                self.store.fail_attempt(
+                    stage_run_id,
+                    FactoryError::new(
+                        "postcondition_failed",
+                        "implementation",
+                        error.to_string(),
+                        true,
+                        None,
+                    ),
+                )?;
+                return Ok(AttemptResult::Failed);
+            }
+        };
+
+        let validator = ValidationExecutor::new(execution_profile);
+        let max_cycles = service.implementation.max_validation_cycles.max(1);
+        let mut validation_results: Vec<ValidationCommandResult> = Vec::new();
+        let mut cycles_completed = 0u32;
+        let mut ordinal = 2u32;
+
+        for cycle in 1..=max_cycles {
+            let outcome = validator
+                .run_cycle(
+                    &turn.workspace_path,
+                    &service.implementation.validation,
+                    cycle,
+                )
+                .await?;
+            cycles_completed = cycle;
+            self.store
+                .store_validation_cycle(StoreValidationCycleRequest {
+                    cycle_id: Uuid::now_v7().to_string(),
+                    stage_run_id: stage_run_id.to_string(),
+                    cycle,
+                    passed: outcome.passed,
+                    commands: outcome.commands.clone(),
+                    started_at: outcome
+                        .commands
+                        .first()
+                        .map(|c| c.started_at)
+                        .unwrap_or_else(Utc::now),
+                    completed_at: outcome
+                        .commands
+                        .last()
+                        .map(|c| c.completed_at)
+                        .unwrap_or_else(Utc::now),
+                })?;
+            self.record_event(
+                Some(run_id),
+                Some(stage_run_id),
+                "implementation_validation",
+                serde_json::json!({
+                    "cycle": cycle,
+                    "passed": outcome.passed,
+                    "commands": outcome.commands.iter().map(|c| {
+                        serde_json::json!({"name": c.name, "passed": c.passed, "duration_ms": c.duration_ms})
+                    }).collect::<Vec<_>>(),
+                }),
+            )?;
+            validation_results = outcome.commands;
+            if outcome.passed {
+                break;
+            }
+            if cycle == max_cycles {
+                self.record_event(
+                    Some(run_id),
+                    Some(stage_run_id),
+                    "implementation_validation_exhausted",
+                    serde_json::json!({"cycles": cycle}),
+                )?;
+                self.store.fail_attempt(
+                    stage_run_id,
+                    FactoryError::new(
+                        "validation_exhausted",
+                        "implementation",
+                        "validation cycles exhausted".to_string(),
+                        true,
+                        None,
+                    ),
+                )?;
+                return Ok(AttemptResult::Failed);
+            }
+
+            // Repair turn in the same workspace.
+            let repair_inputs = serde_json::json!({
+                "issue": stage_inputs.get("issue"),
+                "approved_spec": approved.artifact,
+                "approved_spec_path": spec_path,
+                "previous_manifest": manifest,
+                "validation_failure": validation_results,
+            });
+            let repair_request = ImplementationTurnRequest {
+                prompt: prompts.repair.clone(),
+                stage_inputs: repair_inputs,
+                existing_workspace: Some(turn.workspace_path.clone()),
+                ..turn_request.clone()
+            };
+            turn = runner
+                .run_local_turn(&repair_request, &self.harness)
+                .await?;
+            self.store_turn(
+                stage_run_id,
+                ordinal,
+                ImplementationTurnKind::Repair,
+                harness,
+                model.as_deref(),
+                execution_profile,
+                &turn.usage,
+                Some(&turn.output_bytes),
+                None,
+            )?;
+            ordinal += 1;
+            manifest = parse_and_validate_manifest(&turn.output_bytes, &approved.artifact)
+                .map_err(|error| {
+                    SymphonyError::TriageError(format!("repair manifest invalid: {error}"))
+                })?;
+            if manifest.status != ManifestStatus::Completed {
+                self.store.fail_attempt(
+                    stage_run_id,
+                    FactoryError::new(
+                        "repair_not_completed",
+                        "implementation",
+                        "repair turn did not produce a completed manifest".to_string(),
+                        true,
+                        None,
+                    ),
+                )?;
+                return Ok(AttemptResult::Failed);
+            }
+            let expected_head = manifest.head_commit.clone().unwrap();
+            assessment = assess_postconditions(
+                &turn.workspace_path,
+                base_commit,
+                &spec_path,
+                spec_markdown.as_bytes(),
+                &expected_head,
+            )?;
+        }
+
+        // Export result bundle and store blob.
+        let result_bundle = turn.attempt_root.join("result.bundle");
+        create_result_bundle(
+            &turn.workspace_path,
+            base_commit,
+            &assessment.head_commit,
+            &result_bundle,
+        )?;
+        let arts = artifacts_dir(&self.config.storage_path);
+        let (sha256, bytes_len) = store_blob_atomic(
+            &arts,
+            BlobSource::Path(&result_bundle),
+            service.implementation.max_bundle_bytes,
+        )?;
+        let approved_spec_blob_sha = blob_sha_of_file(&turn.workspace_path.join(&spec_path))?;
+
+        let artifact =
+            self.store
+                .store_implementation_artifact(StoreImplementationArtifactRequest {
+                    stage_run_id: stage_run_id.to_string(),
+                    approved_artifact_id: approved.artifact_id.clone(),
+                    approved_version: approved.version,
+                    issue_revision: approved.issue_revision.clone(),
+                    configuration_revision: configuration_revision.to_string(),
+                    manifest: manifest.clone(),
+                    base_commit: base_commit.to_string(),
+                    head_commit: Some(assessment.head_commit.clone()),
+                    approved_spec_path: spec_path.clone(),
+                    validation_cycles: cycles_completed,
+                    execution_profile,
+                    bytes_len: turn.output_bytes.len() as u64,
+                    usage: turn.usage.clone(),
+                })?;
+
+        let bundle = self
+            .store
+            .store_bundle_artifact(StoreBundleArtifactRequest {
+                stage_run_id: stage_run_id.to_string(),
+                implementation_artifact_id: artifact.artifact_id.clone(),
+                base_commit: base_commit.to_string(),
+                head_commit: assessment.head_commit.clone(),
+                tree_sha: assessment.tree_sha.clone(),
+                sha256,
+                bytes_len,
+                changed_file_count: assessment.changed_paths.len() as u32,
+                changed_paths: assessment.changed_paths.clone(),
+                approved_spec_path: spec_path.clone(),
+                approved_spec_blob_sha,
+                harness: harness_name(harness).to_string(),
+                model: model.clone(),
+                execution_profile,
+                created_at: Utc::now(),
+                verified_at: Utc::now(),
+            })?;
+
+        let _ = bundle;
+        let _ =
+            self.store
+                .set_implementation_decision(run_id, ImplementationDecision::Previewed, None);
+
+        // PR1: always publish preview (even if mode=automatic — automatic deferred).
+        let intent = self.store.create_implementation_publication_intent(
+            run_id,
+            Some(&artifact.artifact_id),
+            ImplementationPublicationKind::Preview,
+            &serde_json::json!({
+                "mode": service.implementation.mode.as_str(),
+                "changed_paths": assessment.changed_paths,
+                "note": if service.implementation.mode == ImplementationMode::Automatic {
+                    Some("automatic publication deferred to PR2")
+                } else {
+                    None
+                },
+            }),
+        )?;
+        let publisher = ImplementationPublisher::new(self.comments.clone());
+        publisher
+            .publish_preview(
+                &self.store,
+                PreviewPublishRequest {
+                    intent: &intent,
+                    issue_number: issue.issue_number,
+                    run_id,
+                    stage_run_id,
+                    artifact: &artifact,
+                    manifest: &manifest,
+                    changed_paths: &assessment.changed_paths,
+                    validation: &validation_results,
+                    max_pages: 5,
+                },
+            )
+            .await?;
+
+        self.record_event(
+            Some(run_id),
+            Some(stage_run_id),
+            "implementation_preview_published",
+            serde_json::json!({
+                "artifact_id": artifact.artifact_id,
+                "intent_id": intent.intent_id,
+                "head_commit": assessment.head_commit,
+            }),
+        )?;
+
+        Ok(AttemptResult::Previewed)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn store_turn(
+        &self,
+        stage_run_id: &str,
+        ordinal: u32,
+        kind: ImplementationTurnKind,
+        harness: TriageHarness,
+        model: Option<&str>,
+        execution_profile: ExecutionProfile,
+        usage: &StageUsage,
+        output_bytes: Option<&[u8]>,
+        error: Option<FactoryError>,
+    ) -> Result<()> {
+        let output_json = output_bytes.and_then(|bytes| serde_json::from_slice(bytes).ok());
+        self.store
+            .store_implementation_turn(StoreImplementationTurnRequest {
+                turn_id: Uuid::now_v7().to_string(),
+                stage_run_id: stage_run_id.to_string(),
+                ordinal,
+                kind,
+                status: if error.is_some() {
+                    ImplementationTurnStatus::Failed
+                } else {
+                    ImplementationTurnStatus::Completed
+                },
+                harness: harness_name(harness).to_string(),
+                model: model.map(str::to_string),
+                execution_profile,
+                usage: usage.clone(),
+                output_json,
+                error,
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+            })?;
+        Ok(())
+    }
+
+    fn record_event(
+        &self,
+        run_id: Option<&str>,
+        stage_run_id: Option<&str>,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        let mut store = self.store.clone();
+        store.record_event(FactoryEventRecord {
+            event_id: Uuid::now_v7().to_string(),
+            run_id: run_id.map(str::to_string),
+            stage_run_id: stage_run_id.map(str::to_string),
+            event_type: event_type.to_string(),
+            timestamp: Utc::now(),
+            payload: payload.clone(),
+        })?;
+        if let Some(events) = &self.events {
+            events.emit_triage_event(event_type, None, payload);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+enum CandidateOutcome {
+    StartedCompleted,
+    StartedAwaitingHuman,
+    StartedFailed,
+    Stale,
+    Skipped,
+}
+
+#[derive(Debug)]
+enum AttemptResult {
+    Previewed,
+    AwaitingHuman,
+    Failed,
+}
+
+struct LoadedPrompts {
+    implement: String,
+    repair: String,
+}
+
+fn load_prompts(workflow_dir: &Path, service: &ServiceConfig) -> Result<LoadedPrompts> {
+    let implement = read_prompt(workflow_dir, &service.implementation.prompt)?;
+    let repair = read_prompt(workflow_dir, &service.implementation.repair_prompt)?;
+    Ok(LoadedPrompts { implement, repair })
+}
+
+fn read_prompt(workflow_dir: &Path, relative: &str) -> Result<String> {
+    let path = if Path::new(relative).is_absolute() {
+        PathBuf::from(relative)
+    } else {
+        workflow_dir.join(relative)
+    };
+    fs::read_to_string(&path).map_err(|error| {
+        SymphonyError::InvalidWorkflowConfig(format!(
+            "failed reading implementation prompt {}: {error}",
+            path.display()
+        ))
+    })
+}
+
+fn resolve_path(value: &str, field: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(value);
+    if !path.exists() {
+        return Err(SymphonyError::InvalidWorkflowConfig(format!(
+            "{field} does not exist: {}",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
+fn agent_command(service: &ServiceConfig) -> Result<Vec<String>> {
+    let command = match service.agent_backend {
+        AgentBackend::Codex => &service.codex.command,
+        AgentBackend::KataCli => &service.pi_agent.command,
+    };
+    if command.is_empty() {
+        return Err(SymphonyError::InvalidWorkflowConfig(
+            "agent command is required for the implementation stage".to_string(),
+        ));
+    }
+    Ok(command.clone())
+}
+
+fn harness_name(harness: TriageHarness) -> &'static str {
+    match harness {
+        TriageHarness::Pi => "pi",
+        TriageHarness::Codex => "codex",
+    }
+}
+
+fn implementation_issue_revision(
+    issue: &TriageIntakeIssue,
+    service: &ServiceConfig,
+    publisher_login: &str,
+) -> String {
+    let managed = service
+        .spec
+        .managed_labels()
+        .into_iter()
+        .chain(service.triage.routes.managed_labels())
+        .chain(std::iter::once(service.triage.intake_label.clone()))
+        .map(|label| label.to_ascii_lowercase())
+        .collect::<std::collections::HashSet<_>>();
+    let labels: Vec<&str> = issue
+        .labels
+        .iter()
+        .filter(|label| !managed.contains(&label.to_ascii_lowercase()))
+        .map(String::as_str)
+        .collect();
+    let comments: Vec<_> = issue
+        .comments
+        .iter()
+        .filter(|comment| {
+            !(comment.author_login.eq_ignore_ascii_case(publisher_login)
+                && comment.body.contains("<!-- symphony:"))
+        })
+        .map(|comment| {
+            serde_json::json!({
+                "id": comment.id,
+                "body": comment.body,
+                "created_at": comment.created_at,
+                "updated_at": comment.updated_at
+            })
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "title": issue.title,
+        "body": issue.body,
+        "labels": labels,
+        "assignees": issue.assignees,
+        "milestone": issue.milestone.as_ref().map(|m| (&m.number, &m.title)),
+        "comments": comments,
+    }))
+    .expect("JSON serializes");
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn issue_number_from_run(store: &SharedFactoryStore, run_id: &str) -> Result<u64> {
+    let run = store
+        .get_run_by_id(run_id)?
+        .ok_or_else(|| SymphonyError::StorageError(format!("run {run_id} missing")))?;
+    run.issue_id.parse().map_err(|_| {
+        SymphonyError::TriageError(format!("issue id {} is not numeric", run.issue_id))
+    })
+}
+
+fn last_validation_results(
+    store: &SharedFactoryStore,
+    stage_run_id: &str,
+) -> Result<Vec<ValidationCommandResult>> {
+    let cycles = store.list_validation_cycles(stage_run_id)?;
+    Ok(cycles
+        .into_iter()
+        .last()
+        .map(|cycle| cycle.commands)
+        .unwrap_or_default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::github::client::{GithubIssueComment, GithubUser};
+    use crate::implementation::domain::ImplementationValidationCommand;
+    use crate::implementation::runner::ImplementationTurnResult;
+    use crate::spec::domain::{SpecArtifact, SpecPublicationKind};
+    use crate::triage::runner::AttemptLayout;
+    use crate::triage::store::StoreSpecArtifactRequest;
+    use std::process::Command;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
+
+    #[derive(Default)]
+    struct FakeComments {
+        login: String,
+        comments: Mutex<HashMap<u64, GithubIssueComment>>,
+        next_id: Mutex<u64>,
+    }
+
+    impl FakeComments {
+        fn new(login: &str) -> Arc<Self> {
+            Arc::new(Self {
+                login: login.into(),
+                comments: Mutex::new(HashMap::new()),
+                next_id: Mutex::new(800),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl TriageCommentPort for Arc<FakeComments> {
+        async fn authenticated_login(&self) -> Result<String> {
+            Ok(self.login.clone())
+        }
+        async fn list_comments(
+            &self,
+            _issue_number: u64,
+            _max_pages: u32,
+        ) -> Result<Vec<GithubIssueComment>> {
+            Ok(self.comments.lock().unwrap().values().cloned().collect())
+        }
+        async fn get_comment(&self, comment_id: u64) -> Result<GithubIssueComment> {
+            self.comments
+                .lock()
+                .unwrap()
+                .get(&comment_id)
+                .cloned()
+                .ok_or_else(|| SymphonyError::GithubApiStatus {
+                    status: 404,
+                    message: "missing".into(),
+                })
+        }
+        async fn create_comment(
+            &self,
+            _issue_number: u64,
+            body: &str,
+        ) -> Result<GithubIssueComment> {
+            let mut next = self.next_id.lock().unwrap();
+            let id = *next;
+            *next += 1;
+            let comment = GithubIssueComment {
+                id,
+                user: Some(GithubUser {
+                    login: self.login.clone(),
+                }),
+                body: Some(body.to_string()),
+                html_url: None,
+                created_at: None,
+                updated_at: None,
+            };
+            self.comments.lock().unwrap().insert(id, comment.clone());
+            Ok(comment)
+        }
+        async fn update_comment(&self, comment_id: u64, body: &str) -> Result<GithubIssueComment> {
+            let mut comments = self.comments.lock().unwrap();
+            let comment = comments.get_mut(&comment_id).unwrap();
+            comment.body = Some(body.to_string());
+            Ok(comment.clone())
+        }
+    }
+
+    struct FakeIssues {
+        issue: Mutex<TriageIntakeIssue>,
+    }
+
+    #[async_trait]
+    impl ImplementationIssuePort for Arc<FakeIssues> {
+        async fn fetch_issue(&self, _issue_id: &str) -> Result<TriageIntakeIssue> {
+            Ok(self.issue.lock().unwrap().clone())
+        }
+    }
+
+    /// Commits approved spec + code file and writes a completed manifest.
+    struct FakeHarness {
+        repair_touch: bool,
+        calls: Mutex<u32>,
+    }
+
+    #[async_trait]
+    impl ImplementationHarness for FakeHarness {
+        async fn run_turn(
+            &self,
+            request: &ImplementationTurnRequest,
+            layout: &AttemptLayout,
+        ) -> Result<StageUsage> {
+            let mut calls = self.calls.lock().unwrap();
+            *calls += 1;
+            let call = *calls;
+            drop(calls);
+
+            let spec = layout.workspace_path.join(&request.approved_spec_path);
+            fs::create_dir_all(spec.parent().unwrap()).unwrap();
+            fs::write(&spec, request.approved_spec_markdown.as_bytes()).unwrap();
+            let code = layout.workspace_path.join("src/feature.rs");
+            fs::create_dir_all(code.parent().unwrap()).unwrap();
+            fs::write(&code, format!("// call {call}\n")).unwrap();
+            if self.repair_touch && call >= 2 {
+                fs::write(layout.workspace_path.join("repaired"), b"ok\n").unwrap();
+            }
+            assert!(Command::new("git")
+                .args(["add", "-A"])
+                .current_dir(&layout.workspace_path)
+                .status()
+                .unwrap()
+                .success());
+            assert!(Command::new("git")
+                .args([
+                    "-c",
+                    "user.email=t@t.com",
+                    "-c",
+                    "user.name=t",
+                    "commit",
+                    "-m",
+                    "impl"
+                ])
+                .current_dir(&layout.workspace_path)
+                .status()
+                .unwrap()
+                .success());
+            let head = Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(&layout.workspace_path)
+                .output()
+                .unwrap();
+            let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+            let manifest = serde_json::json!({
+                "schema_version": 1,
+                "status": "completed",
+                "head_commit": head,
+                "summary": "Implements the approved feature.",
+                "acceptance_criteria": [{
+                    "index": 1,
+                    "status": "implemented",
+                    "evidence": [{
+                        "kind": "repository",
+                        "reference": "src/feature.rs",
+                        "summary": "Feature module added."
+                    }]
+                }],
+                "known_limitations": []
+            });
+            fs::write(
+                &layout.output_path,
+                serde_json::to_vec_pretty(&manifest).unwrap(),
+            )
+            .unwrap();
+            let _ = ImplementationTurnResult {
+                workspace_path: layout.workspace_path.clone(),
+                output_path: layout.output_path.clone(),
+                output_bytes: vec![],
+                usage: StageUsage::default(),
+                attempt_root: layout.attempt_root.clone(),
+            };
+            Ok(StageUsage::default())
+        }
+    }
+
+    fn init_repo(path: &Path) {
+        for args in [
+            ["init"].as_slice(),
+            ["config", "user.email", "t@t.com"].as_slice(),
+            ["config", "user.name", "T"].as_slice(),
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .unwrap()
+                .success());
+        }
+        fs::write(path.join("README.md"), "base\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(path)
+            .status()
+            .unwrap()
+            .success());
+        // Ensure base_branch main exists.
+        let _ = Command::new("git")
+            .args(["branch", "-M", "main"])
+            .current_dir(path)
+            .status();
+    }
+
+    fn base_issue() -> TriageIntakeIssue {
+        TriageIntakeIssue {
+            issue_id: "42".into(),
+            issue_number: 42,
+            identifier: "#42".into(),
+            title: "Add feature".into(),
+            body: "Please implement.".into(),
+            labels: vec!["ready".into()],
+            non_managed_labels: vec!["ready".into()],
+            assignees: vec![],
+            milestone: None,
+            comments: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            forge_host: "github.com".into(),
+            repository: "acme/repo".into(),
+            in_project: true,
+        }
+    }
+
+    async fn seed_approved(store: &SharedFactoryStore, issue_revision: &str) -> SpecArtifactRecord {
+        let stage = store
+            .claim_spec_attempt(ClaimAttemptRequest {
+                forge_host: "github.com".into(),
+                repository: "acme/repo".into(),
+                issue_id: "42".into(),
+                issue_identifier: "#42".into(),
+                issue_revision: issue_revision.into(),
+                configuration_revision: "spec-cfg".into(),
+                owner_instance: "test".into(),
+                harness: "pi".into(),
+                model: None,
+                workspace_path: None,
+                output_path: None,
+                pid: None,
+                process_group_id: None,
+                process_start_token: None,
+                executable_identity: None,
+            })
+            .unwrap();
+        let artifact = store
+            .store_spec_artifact(StoreSpecArtifactRequest {
+                stage_run_id: stage.stage_run_id,
+                issue_revision: issue_revision.into(),
+                configuration_revision: "spec-cfg".into(),
+                artifact: SpecArtifact {
+                    schema_version: 1,
+                    product_behavior: "Do the thing".into(),
+                    technical_approach: "Add a module".into(),
+                    acceptance_criteria: vec!["Feature module exists".into()],
+                    open_decisions: vec![],
+                },
+                review_cycles: 1,
+                unresolved_blocking_findings: vec![],
+                bytes_len: 64,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+        store
+            .pin_spec_approval(&artifact.run_id, &artifact.artifact_id)
+            .unwrap();
+        let intent = store
+            .create_spec_publication_intent(
+                &artifact.run_id,
+                Some(&artifact.artifact_id),
+                SpecPublicationKind::Approval,
+                &serde_json::json!({"intake_label":"ready"}),
+            )
+            .unwrap();
+        store
+            .finalize_spec_approval(&artifact.run_id, &intent.intent_id, "route_applied")
+            .unwrap();
+        artifact
+    }
+
+    fn service_config(repo: &Path, workspace: &Path, workflow: &Path) -> ServiceConfig {
+        let mut service = ServiceConfig::default();
+        service.implementation.enabled = true;
+        service.implementation.mode = ImplementationMode::Preview;
+        service.implementation.prompt = "prompts/implementation.md".into();
+        service.implementation.repair_prompt = "prompts/implementation-repair.md".into();
+        service.implementation.validation = vec![ImplementationValidationCommand {
+            name: "true".into(),
+            command: "true".into(),
+            timeout_ms: 5_000,
+        }];
+        service.implementation.max_validation_cycles = 3;
+        service.implementation.max_attempts = 3;
+        service.workspace.root = workspace.display().to_string();
+        service.workspace.repo = Some(repo.display().to_string());
+        service.workspace.base_branch = Some("main".into());
+        service.pi_agent.command = vec!["true".into()];
+        service.agent_backend = AgentBackend::KataCli;
+        let _ = workflow;
+        service
+    }
+
+    fn write_prompts(workflow: &Path) {
+        fs::create_dir_all(workflow.join("prompts")).unwrap();
+        fs::write(
+            workflow.join("prompts/implementation.md"),
+            "implement please",
+        )
+        .unwrap();
+        fs::write(
+            workflow.join("prompts/implementation-repair.md"),
+            "repair please",
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn coordinator_preview_path_with_fake_harness() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let workspace = root.path().join("workspaces");
+        let workflow = root.path().join("workflow");
+        let db = root.path().join("factory.db");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&workflow).unwrap();
+        init_repo(&repo);
+        write_prompts(&workflow);
+
+        let store = SharedFactoryStore::open(&db, 5_000).unwrap();
+        let issue = base_issue();
+        let mut service = service_config(&repo, &workspace, &workflow);
+        let rev = implementation_issue_revision(&issue, &service, "symphony-bot");
+        let _approved = seed_approved(&store, &rev).await;
+
+        let comments = FakeComments::new("symphony-bot");
+        let issues = Arc::new(FakeIssues {
+            issue: Mutex::new(issue),
+        });
+        let mut coordinator = ImplementationCoordinator::with_harness(
+            store.clone(),
+            comments.clone(),
+            issues,
+            ImplementationCoordinatorConfig {
+                forge_host: "github.com".into(),
+                repository: "acme/repo".into(),
+                owner_instance: "test".into(),
+                workflow_dir: workflow,
+                storage_path: db,
+            },
+            FakeHarness {
+                repair_touch: false,
+                calls: Mutex::new(0),
+            },
+        );
+
+        let summary = coordinator.poll_once(&service).await.unwrap();
+        assert_eq!(summary.attempts_completed, 1);
+        assert_eq!(summary.preview_published, 1);
+        assert!(!comments.comments.lock().unwrap().is_empty());
+        let body = comments
+            .comments
+            .lock()
+            .unwrap()
+            .values()
+            .next()
+            .unwrap()
+            .body
+            .clone()
+            .unwrap();
+        assert!(body.contains("implementation preview"));
+        assert!(body.contains("No remote branch"));
+
+        // Second poll should find no candidates (successful artifact exists).
+        let summary2 = coordinator.poll_once(&service).await.unwrap();
+        assert_eq!(summary2.candidates_seen, 0);
+        let _ = &mut service;
+    }
+
+    #[tokio::test]
+    async fn coordinator_repairs_after_validation_failure() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let workspace = root.path().join("workspaces");
+        let workflow = root.path().join("workflow");
+        let db = root.path().join("factory.db");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&workflow).unwrap();
+        init_repo(&repo);
+        write_prompts(&workflow);
+
+        let store = SharedFactoryStore::open(&db, 5_000).unwrap();
+        let issue = base_issue();
+        let mut service = service_config(&repo, &workspace, &workflow);
+        // Fail until `repaired` exists (written by FakeHarness on repair turn).
+        service.implementation.validation = vec![ImplementationValidationCommand {
+            name: "needs-repair".into(),
+            command: "test -f repaired".into(),
+            timeout_ms: 5_000,
+        }];
+        let rev = implementation_issue_revision(&issue, &service, "symphony-bot");
+        let _ = seed_approved(&store, &rev).await;
+
+        let comments = FakeComments::new("symphony-bot");
+        let issues = Arc::new(FakeIssues {
+            issue: Mutex::new(issue),
+        });
+        let mut coordinator = ImplementationCoordinator::with_harness(
+            store,
+            comments.clone(),
+            issues,
+            ImplementationCoordinatorConfig {
+                forge_host: "github.com".into(),
+                repository: "acme/repo".into(),
+                owner_instance: "test".into(),
+                workflow_dir: workflow,
+                storage_path: db,
+            },
+            FakeHarness {
+                repair_touch: true,
+                calls: Mutex::new(0),
+            },
+        );
+
+        let summary = coordinator.poll_once(&service).await.unwrap();
+        assert_eq!(summary.attempts_completed, 1);
+        assert_eq!(summary.preview_published, 1);
+        assert!(!comments.comments.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_issue_revision_skips_claim() {
+        let root = tempdir().unwrap();
+        let repo = root.path().join("repo");
+        let workspace = root.path().join("workspaces");
+        let workflow = root.path().join("workflow");
+        let db = root.path().join("factory.db");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&workflow).unwrap();
+        init_repo(&repo);
+        write_prompts(&workflow);
+
+        let store = SharedFactoryStore::open(&db, 5_000).unwrap();
+        let issue = base_issue();
+        let service = service_config(&repo, &workspace, &workflow);
+        let rev = implementation_issue_revision(&issue, &service, "symphony-bot");
+        let _ = seed_approved(&store, &rev).await;
+
+        let mut stale = issue.clone();
+        stale.body = "changed after approval".into();
+        let comments = FakeComments::new("symphony-bot");
+        let issues = Arc::new(FakeIssues {
+            issue: Mutex::new(stale),
+        });
+        let mut coordinator = ImplementationCoordinator::with_harness(
+            store,
+            comments,
+            issues,
+            ImplementationCoordinatorConfig {
+                forge_host: "github.com".into(),
+                repository: "acme/repo".into(),
+                owner_instance: "test".into(),
+                workflow_dir: workflow,
+                storage_path: db,
+            },
+            FakeHarness {
+                repair_touch: false,
+                calls: Mutex::new(0),
+            },
+        );
+        let summary = coordinator.poll_once(&service).await.unwrap();
+        assert_eq!(summary.stale_skipped, 1);
+        assert_eq!(summary.attempts_started, 0);
     }
 }

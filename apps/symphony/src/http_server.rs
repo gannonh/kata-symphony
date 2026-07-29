@@ -762,7 +762,7 @@ pub fn attach_spec_http_response(
     });
 }
 
-/// PR1 stub: attach a minimal `implementation` object when durable state exists.
+/// PR1: attach `implementation` object from durable state/artifacts/bundles/publication.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FactoryRunImplementationHttp {
     pub status: String,
@@ -773,6 +773,12 @@ pub struct FactoryRunImplementationHttp {
     pub base_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_files: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_cycles: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<FactoryRunImplementationBundleHttp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<FactoryRunImplementationPublicationHttp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -785,6 +791,13 @@ pub struct FactoryRunImplementationApprovedSpecHttp {
     pub version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunImplementationBundleHttp {
+    pub artifact_id: String,
+    pub sha256: String,
+    pub bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -802,6 +815,7 @@ pub fn attach_implementation_http_response(
     state: Option<&crate::implementation::domain::ImplementationRunState>,
     artifact: Option<&crate::implementation::domain::ImplementationArtifactRecord>,
     publication: Option<&crate::implementation::domain::ImplementationPublicationIntent>,
+    bundle: Option<&crate::implementation::domain::BundleArtifactRecord>,
 ) {
     let Some(state) = state else {
         return;
@@ -817,13 +831,20 @@ pub fn attach_implementation_http_response(
             .successful_artifact_id
             .clone()
             .or_else(|| artifact.map(|record| record.artifact_id.clone())),
-        base_commit: artifact.map(|record| record.base_commit.clone()),
+        base_commit: artifact
+            .map(|record| record.base_commit.clone())
+            .or_else(|| bundle.map(|record| record.base_commit.clone())),
         head_commit: artifact
             .and_then(|record| record.head_commit.clone())
-            .or_else(|| {
-                artifact
-                    .and_then(|record| record.manifest.head_commit.clone())
-            }),
+            .or_else(|| artifact.and_then(|record| record.manifest.head_commit.clone()))
+            .or_else(|| bundle.map(|record| record.head_commit.clone())),
+        changed_files: bundle.map(|record| record.changed_file_count),
+        validation_cycles: artifact.map(|record| record.validation_cycles),
+        bundle: bundle.map(|record| FactoryRunImplementationBundleHttp {
+            artifact_id: record.artifact_id.clone(),
+            sha256: record.sha256.clone(),
+            bytes: record.bytes_len,
+        }),
         publication: publication.map(|intent| FactoryRunImplementationPublicationHttp {
             intent_id: intent.intent_id.clone(),
             mode: intent.kind.as_str().to_string(),

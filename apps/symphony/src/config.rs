@@ -19,15 +19,15 @@ use crate::domain::{
 };
 use crate::error::{Result, SymphonyError};
 use crate::github::auth::{github_token_missing_message, resolve_github_token};
-use crate::notifications;
-use crate::repo_url::repo_is_remote;
-use crate::spec::domain::{SpecApprovalRoute, SpecConfig, SpecDecisionLabels, SpecPromptsConfig};
 use crate::implementation::domain::{
     ImplementationCompletionRoute, ImplementationConfig, ImplementationMode,
     ImplementationValidationCommand, IMPLEMENTATION_MAX_BUNDLE_BYTES_HARD_CAP,
     IMPLEMENTATION_VALIDATION_COMMAND_MAX_BYTES, IMPLEMENTATION_VALIDATION_MAX_COMMANDS,
     IMPLEMENTATION_VALIDATION_NAME_MAX_BYTES,
 };
+use crate::notifications;
+use crate::repo_url::repo_is_remote;
+use crate::spec::domain::{SpecApprovalRoute, SpecConfig, SpecDecisionLabels, SpecPromptsConfig};
 use crate::triage::domain::{
     RouteMapping, StorageConfig, TriageConfig, TriageMode, TriageRoutesConfig,
 };
@@ -725,7 +725,8 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
     let raw_storage: RawStorageConfig = extract_section(&normalized, "storage")?;
     let raw_triage: RawTriageConfig = extract_section(&normalized, "triage")?;
     let raw_spec: RawSpecConfig = extract_section(&normalized, "spec")?;
-    let raw_implementation: RawImplementationConfig = extract_section(&normalized, "implementation")?;
+    let raw_implementation: RawImplementationConfig =
+        extract_section(&normalized, "implementation")?;
 
     let defaults = ServiceConfig::default();
     let has_kata_agent_section = normalized.get("kata_agent").is_some();
@@ -1504,16 +1505,17 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let completion_route = raw_implementation.completion_route.map(|route| {
-        ImplementationCompletionRoute {
-            state: route
-                .state
-                .map(|value| resolve_env(&value))
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_default(),
-        }
-    });
+    let completion_route =
+        raw_implementation
+            .completion_route
+            .map(|route| ImplementationCompletionRoute {
+                state: route
+                    .state
+                    .map(|value| resolve_env(&value))
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_default(),
+            });
     let implementation = ImplementationConfig {
         enabled: raw_implementation
             .enabled
@@ -1979,12 +1981,18 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
         }
 
         for (field, value) in [
-            ("implementation.prompt", config.implementation.prompt.as_str()),
+            (
+                "implementation.prompt",
+                config.implementation.prompt.as_str(),
+            ),
             (
                 "implementation.repair_prompt",
                 config.implementation.repair_prompt.as_str(),
             ),
-            ("implementation.spec_file", config.implementation.spec_file.as_str()),
+            (
+                "implementation.spec_file",
+                config.implementation.spec_file.as_str(),
+            ),
         ] {
             if value.trim().is_empty() {
                 return Err(SymphonyError::InvalidWorkflowConfig(format!(
@@ -1994,7 +2002,10 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
         }
 
         for (field, value) in [
-            ("implementation.max_turns", config.implementation.max_turns as u64),
+            (
+                "implementation.max_turns",
+                config.implementation.max_turns as u64,
+            ),
             (
                 "implementation.invocation_timeout_ms",
                 config.implementation.invocation_timeout_ms,
@@ -2283,10 +2294,7 @@ agent:
         let config = from_workflow(&yaml).unwrap();
         assert!(!config.implementation.enabled);
         assert_eq!(config.implementation.mode, ImplementationMode::Preview);
-        assert_eq!(
-            config.implementation.prompt,
-            "prompts/implementation.md"
-        );
+        assert_eq!(config.implementation.prompt, "prompts/implementation.md");
         assert!(config.implementation.validation.is_empty());
     }
 

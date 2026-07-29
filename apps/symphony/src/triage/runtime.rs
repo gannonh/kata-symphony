@@ -15,6 +15,10 @@ use crate::http_server::{
     FactoryRunMetricsHttpResponse, FactoryRunQuery, ImplementationRunMetricsHttpResponse,
     SpecRunMetricsHttpResponse,
 };
+use crate::implementation::coordinator::{
+    ImplementationCoordinator, ImplementationCoordinatorConfig,
+};
+use crate::implementation::runner::LiveImplementationHarness;
 use crate::spec::coordinator::{SpecCoordinator, SpecCoordinatorConfig};
 use crate::triage::coordinator::{
     EventEmitter, TriageCoordinator, TriageCoordinatorConfig, TriagePollSummary,
@@ -330,6 +334,13 @@ impl SharedFactoryStore {
         self.with_store(|store| store.list_pending_implementation_publications())
     }
 
+    pub fn list_implementation_publications_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::implementation::domain::ImplementationPublicationIntent>> {
+        self.with_store(|store| store.list_implementation_publications_for_run(run_id))
+    }
+
     pub fn complete_implementation_publication(&self, intent_id: &str, step: &str) -> Result<()> {
         self.with_store_mut(|store| store.complete_implementation_publication(intent_id, step))
     }
@@ -418,11 +429,20 @@ impl SharedFactoryStore {
             );
             let implementation_state = store.get_implementation_state(&run.run_id)?;
             let implementation_artifacts = store.list_implementation_artifacts(&run.run_id)?;
+            let publication = store
+                .list_implementation_publications_for_run(&run.run_id)?
+                .into_iter()
+                .next();
+            let bundle = implementation_state
+                .as_ref()
+                .and_then(|state| state.bundle_artifact_id.as_deref())
+                .and_then(|id| store.get_bundle_artifact(id).ok().flatten());
             attach_implementation_http_response(
                 &mut response,
                 implementation_state.as_ref(),
                 implementation_artifacts.first(),
-                None,
+                publication.as_ref(),
+                bundle.as_ref(),
             );
             Ok(Some(response))
         })
@@ -749,6 +769,8 @@ impl EventEmitter for EventHubEmitter {
 pub struct TriageRuntime {
     coordinator: Option<TriageCoordinator<SharedFactoryStore, GithubTriageIntake, GithubClient>>,
     spec_coordinator: Option<SpecCoordinator<GithubTriageIntake, GithubClient>>,
+    implementation_coordinator:
+        Option<ImplementationCoordinator<GithubClient, GithubClient, LiveImplementationHarness>>,
     store: SharedFactoryStore,
     sessions: Arc<Mutex<crate::domain::TriageSessionRegistry>>,
 }
@@ -760,7 +782,7 @@ impl TriageRuntime {
     pub fn try_open_dispatch_guard_store(
         config: &ServiceConfig,
     ) -> Result<Option<SharedFactoryStore>> {
-        if config.triage.enabled || config.spec.enabled {
+        if config.triage.enabled || config.spec.enabled || config.implementation.enabled {
             return Ok(None);
         }
         if !matches!(config.tracker.kind.as_deref(), Some("github")) {
@@ -806,7 +828,7 @@ impl TriageRuntime {
         workflow_path: &Path,
         event_hub: Option<EventHub>,
     ) -> Result<Option<Self>> {
-        if !config.triage.enabled && !config.spec.enabled {
+        if !config.triage.enabled && !config.spec.enabled && !config.implementation.enabled {
             return Ok(None);
         }
 
@@ -856,6 +878,7 @@ impl TriageRuntime {
             path = %storage_path_for_log(&storage_path),
             triage_enabled = config.triage.enabled,
             spec_enabled = config.spec.enabled,
+            implementation_enabled = config.implementation.enabled,
             "resolved factory SQLite storage path"
         );
 
@@ -938,16 +961,16 @@ impl TriageRuntime {
             let mut coordinator = SpecCoordinator::new(
                 store.clone(),
                 intake,
-                client,
+                client.clone(),
                 routing,
                 SpecCoordinatorConfig {
-                    forge_host,
-                    repository,
-                    owner_instance,
-                    workflow_dir,
+                    forge_host: forge_host.clone(),
+                    repository: repository.clone(),
+                    owner_instance: owner_instance.clone(),
+                    workflow_dir: workflow_dir.clone(),
                 },
             );
-            if let Some(events) = emitter {
+            if let Some(events) = emitter.clone() {
                 coordinator = coordinator.with_events(events);
             }
             Some(coordinator)
@@ -955,9 +978,28 @@ impl TriageRuntime {
             None
         };
 
+        // Always construct when we have a factory store so reconciliation continues
+        // even if implementation.enabled is false (disabling stops new claims only).
+        let mut implementation_coordinator = ImplementationCoordinator::new(
+            store.clone(),
+            client.clone(),
+            client,
+            ImplementationCoordinatorConfig {
+                forge_host,
+                repository,
+                owner_instance,
+                workflow_dir,
+                storage_path: storage_path.clone(),
+            },
+        );
+        if let Some(events) = emitter {
+            implementation_coordinator = implementation_coordinator.with_events(events);
+        }
+
         Ok(Some(Self {
             coordinator,
             spec_coordinator,
+            implementation_coordinator: Some(implementation_coordinator),
             store,
             sessions,
         }))
@@ -1009,6 +1051,36 @@ impl TriageRuntime {
                         event = "spec_poll_failed",
                         error = %error,
                         "spec poll failed; continuing orchestrator loop"
+                    );
+                }
+            }
+        }
+        if let Some(coordinator) = self.implementation_coordinator.as_mut() {
+            match coordinator.poll_once(config).await {
+                Ok(summary) => {
+                    if summary.implementation_enabled
+                        || summary.candidates_seen > 0
+                        || summary.attempts_started > 0
+                    {
+                        tracing::info!(
+                            event = "implementation_poll_completed",
+                            enabled = summary.implementation_enabled,
+                            candidates_seen = summary.candidates_seen,
+                            attempts_started = summary.attempts_started,
+                            attempts_completed = summary.attempts_completed,
+                            attempts_failed = summary.attempts_failed,
+                            stale_skipped = summary.stale_skipped,
+                            preview_published = summary.preview_published,
+                            awaiting_human = summary.awaiting_human,
+                            "implementation poll completed"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "implementation_poll_failed",
+                        error = %error,
+                        "implementation poll failed; continuing orchestrator loop"
                     );
                 }
             }

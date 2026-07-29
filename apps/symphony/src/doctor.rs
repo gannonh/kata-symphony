@@ -1319,7 +1319,10 @@ pub fn check_spec(config: &ServiceConfig, workflow_path: &Path) -> Vec<DoctorChe
     results
 }
 
-pub fn check_implementation(config: &ServiceConfig, workflow_path: &Path) -> Vec<DoctorCheckResult> {
+pub fn check_implementation(
+    config: &ServiceConfig,
+    workflow_path: &Path,
+) -> Vec<DoctorCheckResult> {
     if !config.implementation.enabled {
         return vec![DoctorCheckResult::skipped(
             "Implementation",
@@ -1330,7 +1333,10 @@ pub fn check_implementation(config: &ServiceConfig, workflow_path: &Path) -> Vec
     let mut results = Vec::new();
     for (kind, configured) in [
         ("Prompt", config.implementation.prompt.as_str()),
-        ("Repair Prompt", config.implementation.repair_prompt.as_str()),
+        (
+            "Repair Prompt",
+            config.implementation.repair_prompt.as_str(),
+        ),
     ] {
         let path = resolve_prompt_path(workflow_dir, configured);
         if path.is_file() {
@@ -1375,12 +1381,18 @@ pub fn check_implementation(config: &ServiceConfig, workflow_path: &Path) -> Vec
         ));
     }
 
-    if let Some(storage_path) = config.storage.path.as_deref().map(str::trim).filter(|p| !p.is_empty())
+    if let Some(storage_path) = config
+        .storage
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
     {
         let artifact_dir = format!("{storage_path}.artifacts");
         match std::fs::create_dir_all(&artifact_dir) {
             Ok(()) => {
-                let probe = std::path::Path::new(&artifact_dir).join(".symphony-doctor-write-probe");
+                let probe =
+                    std::path::Path::new(&artifact_dir).join(".symphony-doctor-write-probe");
                 match std::fs::write(&probe, b"ok") {
                     Ok(()) => {
                         let _ = std::fs::remove_file(&probe);

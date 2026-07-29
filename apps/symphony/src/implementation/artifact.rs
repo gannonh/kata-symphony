@@ -36,7 +36,9 @@ impl fmt::Display for ImplementationValidationError {
 
 impl std::error::Error for ImplementationValidationError {}
 
-pub fn parse_manifest(bytes: &[u8]) -> Result<ImplementationManifest, ImplementationValidationError> {
+pub fn parse_manifest(
+    bytes: &[u8],
+) -> Result<ImplementationManifest, ImplementationValidationError> {
     let manifest: ImplementationManifest = parse_bounded(bytes)?;
     validate_manifest(&manifest, None)?;
     Ok(manifest)
@@ -51,9 +53,7 @@ pub fn parse_and_validate_manifest(
     Ok(manifest)
 }
 
-fn parse_bounded<T: DeserializeOwned>(
-    bytes: &[u8],
-) -> Result<T, ImplementationValidationError> {
+fn parse_bounded<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ImplementationValidationError> {
     if bytes.len() > IMPLEMENTATION_MANIFEST_MAX_BYTES {
         return Err(ImplementationValidationError::new(
             "output",
@@ -79,7 +79,11 @@ pub fn validate_manifest(
             format!("must be exactly {IMPLEMENTATION_SCHEMA_VERSION}"),
         ));
     }
-    validate_text("summary", &manifest.summary, IMPLEMENTATION_SUMMARY_MAX_BYTES)?;
+    validate_text(
+        "summary",
+        &manifest.summary,
+        IMPLEMENTATION_SUMMARY_MAX_BYTES,
+    )?;
     if manifest.known_limitations.len() > IMPLEMENTATION_LIMITATIONS_MAX_ITEMS {
         return Err(ImplementationValidationError::new(
             "known_limitations",
@@ -133,7 +137,9 @@ fn validate_completed(
     Ok(())
 }
 
-fn validate_blocked(manifest: &ImplementationManifest) -> Result<(), ImplementationValidationError> {
+fn validate_blocked(
+    manifest: &ImplementationManifest,
+) -> Result<(), ImplementationValidationError> {
     if manifest.head_commit.is_some() {
         return Err(ImplementationValidationError::new(
             "head_commit",
@@ -147,10 +153,7 @@ fn validate_blocked(manifest: &ImplementationManifest) -> Result<(), Implementat
         ));
     }
     let blocker = manifest.blocker.as_ref().ok_or_else(|| {
-        ImplementationValidationError::new(
-            "blocker",
-            "required for blocked manifests".to_string(),
-        )
+        ImplementationValidationError::new("blocker", "required for blocked manifests".to_string())
     })?;
     validate_blocker(blocker)
 }
@@ -242,10 +245,7 @@ fn validate_blocker(blocker: &ImplementationBlocker) -> Result<(), Implementatio
     Ok(())
 }
 
-pub fn validate_commit_oid(
-    field: &str,
-    value: &str,
-) -> Result<(), ImplementationValidationError> {
+pub fn validate_commit_oid(field: &str, value: &str) -> Result<(), ImplementationValidationError> {
     let trimmed = value.trim();
     if trimmed != value {
         return Err(ImplementationValidationError::new(
@@ -313,7 +313,9 @@ pub fn validate_spec_file_path(path: &str) -> Result<(), ImplementationValidatio
     if path.len() > IMPLEMENTATION_SPEC_PATH_MAX_BYTES {
         return Err(ImplementationValidationError::new(
             "spec_file",
-            format!("expanded path must be at most {IMPLEMENTATION_SPEC_PATH_MAX_BYTES} UTF-8 bytes"),
+            format!(
+                "expanded path must be at most {IMPLEMENTATION_SPEC_PATH_MAX_BYTES} UTF-8 bytes"
+            ),
         ));
     }
     if path.starts_with('/') || path.starts_with('\\') {
@@ -373,7 +375,9 @@ pub fn render_approved_spec(
     out.push_str(&format!("symphony_spec_version: {version}\n"));
     out.push_str(&format!("symphony_approved_at: {approved_at}\n"));
     out.push_str("---\n\n");
-    out.push_str(&format!("# Approved specification for {issue_identifier}\n\n"));
+    out.push_str(&format!(
+        "# Approved specification for {issue_identifier}\n\n"
+    ));
     out.push_str("## Product behavior\n\n");
     out.push_str(artifact.product_behavior.trim());
     out.push_str("\n\n## Technical approach\n\n");
@@ -501,8 +505,22 @@ mod tests {
 
     #[test]
     fn approved_spec_render_is_deterministic() {
-        let a = render_approved_spec("run", "KATA-1", "art", 2, "2026-07-26T20:00:00Z", &approved());
-        let b = render_approved_spec("run", "KATA-1", "art", 2, "2026-07-26T20:00:00Z", &approved());
+        let a = render_approved_spec(
+            "run",
+            "KATA-1",
+            "art",
+            2,
+            "2026-07-26T20:00:00Z",
+            &approved(),
+        );
+        let b = render_approved_spec(
+            "run",
+            "KATA-1",
+            "art",
+            2,
+            "2026-07-26T20:00:00Z",
+            &approved(),
+        );
         assert_eq!(a, b);
         assert!(a.contains("symphony_spec_version: 2"));
         assert!(a.contains("1. First"));

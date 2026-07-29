@@ -470,7 +470,10 @@ mod tests {
         assert_eq!(config.invocation_timeout_ms, 3_600_000);
         assert_eq!(config.max_attempts, 3);
         assert_eq!(config.max_validation_cycles, 3);
-        assert_eq!(config.max_bundle_bytes, IMPLEMENTATION_MAX_BUNDLE_BYTES_DEFAULT);
+        assert_eq!(
+            config.max_bundle_bytes,
+            IMPLEMENTATION_MAX_BUNDLE_BYTES_DEFAULT
+        );
         assert_eq!(config.spec_file, IMPLEMENTATION_DEFAULT_SPEC_FILE);
         assert!(config.validation.is_empty());
         assert!(config.completion_route.is_none());
