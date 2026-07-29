@@ -11,7 +11,7 @@ timestamp: 2026-07-29T16:05:00Z
 
 ## Status
 
-Implemented — automated gates Pass; live GitHub/Docker UAT residual (see [verify report](2026-07-29-a3-pr1-verify-report.md)).
+Implemented — automated gates Pass; live GitHub/Docker UAT residual (see [verify report](2026-07-29-a3-pr1-verify-report.md)). Opened as [#606](https://github.com/gannonh/kata-symphony/pull/606).
 
 ## Spec
 

@@ -19,6 +19,7 @@ timestamp: 2026-07-29T16:10:00Z
 - ADR: [ADR-0004](../adrs/0004-a3-implementation-durability-and-bundles.md)
 - Build: [A3 PR1 build report](2026-07-29-a3-pr1-build-report.md)
 - Branch: `cursor/a3-implementation-pr1-4eda`
+- Pull request: [#606](https://github.com/gannonh/kata-symphony/pull/606)
 
 ## Environments
 
