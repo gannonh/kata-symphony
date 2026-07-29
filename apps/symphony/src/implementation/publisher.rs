@@ -146,26 +146,6 @@ where
         Ok(())
     }
 
-    /// PR1: automatic publication is deferred — log and leave pending for PR2.
-    /// Prefer `AutomaticImplementationPublisher` (PR2) for real publication.
-    pub fn defer_automatic_publication(
-        &self,
-        intent: &ImplementationPublicationIntent,
-    ) -> Result<()> {
-        if intent.kind != ImplementationPublicationKind::Automatic {
-            return Err(SymphonyError::TriageError(
-                "defer_automatic_publication requires automatic kind".to_string(),
-            ));
-        }
-        tracing::info!(
-            event = "implementation_automatic_publication_deferred",
-            intent_id = %intent.intent_id,
-            run_id = %intent.run_id,
-            "automatic publication deferred; use AutomaticImplementationPublisher"
-        );
-        Ok(())
-    }
-
     pub(crate) async fn upsert_marked_comment(
         &self,
         store: &SharedFactoryStore,
