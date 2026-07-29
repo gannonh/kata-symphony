@@ -85,10 +85,8 @@ impl ImplementationPullRequestPort for crate::github::client::GithubClient {
         base: Option<&str>,
         max_pages: u32,
     ) -> Result<Vec<GithubPullRequest>> {
-        crate::github::client::GithubClient::list_pull_requests(
-            self, state, head, base, max_pages,
-        )
-        .await
+        crate::github::client::GithubClient::list_pull_requests(self, state, head, base, max_pages)
+            .await
     }
 
     async fn create_pull_request(
