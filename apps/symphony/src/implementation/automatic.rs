@@ -338,8 +338,6 @@ where
                 &intent,
                 &request,
                 &existing,
-                &branch,
-                &desired_head,
                 &publisher_login,
             )
             .await?;
@@ -638,11 +636,9 @@ where
         intent: &ImplementationPublicationIntent,
         request: &AutomaticPublishRequest<'_>,
         persisted: &DraftPrArtifactRecord,
-        branch: &str,
-        desired_head: &str,
         publisher_login: &str,
     ) -> Result<()> {
-        let head_filter = format!("{}:{}", request.repo_owner, branch);
+        let head_filter = format!("{}:{}", request.repo_owner, request.branch);
         let live = self
             .pulls
             .list_pull_requests(
@@ -667,9 +663,9 @@ where
                 verify_owned_draft_pr(
                     pr,
                     intent,
-                    branch,
+                    request.branch,
                     request.base_branch,
-                    desired_head,
+                    &request.bundle.head_commit,
                     publisher_login,
                 )
             })
