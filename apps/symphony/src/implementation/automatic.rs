@@ -743,23 +743,6 @@ pub fn resolve_publication_remote(
     repo_owner: &str,
     repo_name: &str,
 ) -> Result<String> {
-    if let Some(url) = desired_effects
-        .get("remote_url")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        if crate::repo_url::repo_is_remote(url) {
-            if let Ok(parsed) = reqwest::Url::parse(url) {
-                if !parsed.username().is_empty() || parsed.password().is_some() {
-                    return Err(SymphonyError::TriageError(
-                        "automatic publication remote_url must not contain credentials".into(),
-                    ));
-                }
-            }
-            return Ok(url.to_string());
-        }
-    }
     let host = forge_host.trim().trim_end_matches('/');
     let owner = repo_owner.trim().trim_matches('/');
     let repo = repo_name.trim().trim_matches('/');
@@ -769,7 +752,52 @@ pub fn resolve_publication_remote(
         ));
     }
     let repo = repo.strip_suffix(".git").unwrap_or(repo);
-    Ok(format!("https://{host}/{owner}/{repo}.git"))
+    let canonical = format!("https://{host}/{owner}/{repo}.git");
+
+    if let Some(url) = desired_effects
+        .get("remote_url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if crate::repo_url::repo_is_remote(url) {
+            let parsed = reqwest::Url::parse(url).map_err(|_| {
+                SymphonyError::TriageError(
+                    "automatic publication remote_url must be a valid HTTPS URL".into(),
+                )
+            })?;
+            if parsed.scheme() != "https" {
+                return Err(SymphonyError::TriageError(
+                    "automatic publication remote_url must use HTTPS".into(),
+                ));
+            }
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                return Err(SymphonyError::TriageError(
+                    "automatic publication remote_url must not contain credentials".into(),
+                ));
+            }
+            let remote_repo = parsed
+                .path()
+                .trim_matches('/')
+                .strip_suffix(".git")
+                .unwrap_or_else(|| parsed.path().trim_matches('/'));
+            let expected_repo = format!("{owner}/{repo}");
+            if parsed
+                .host_str()
+                .is_none_or(|remote_host| !remote_host.eq_ignore_ascii_case(host))
+                || remote_repo != expected_repo
+                || parsed.query().is_some()
+                || parsed.fragment().is_some()
+            {
+                return Err(SymphonyError::TriageError(
+                    "automatic publication remote_url does not match the pinned forge repository"
+                        .into(),
+                ));
+            }
+            return Ok(canonical);
+        }
+    }
+    Ok(canonical)
 }
 
 #[cfg(test)]
@@ -1604,15 +1632,40 @@ mod tests {
     }
 
     #[test]
-    fn publication_remote_preserves_pinned_remote_url() {
+    fn publication_remote_accepts_matching_pinned_remote_url() {
         let remote = resolve_publication_remote(
             &serde_json::json!({"remote_url": "https://github.example/acme/repo.git"}),
-            "github.com",
-            "other",
-            "other",
+            "github.example",
+            "acme",
+            "repo",
         )
         .unwrap();
         assert_eq!(remote, "https://github.example/acme/repo.git");
+    }
+
+    #[test]
+    fn publication_remote_rejects_cross_forge_token_target() {
+        let err = resolve_publication_remote(
+            &serde_json::json!({"remote_url": "https://attacker.example/acme/repo.git"}),
+            "github.example",
+            "acme",
+            "repo",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not match"));
+        assert!(!err.to_string().contains("attacker.example"));
+    }
+
+    #[test]
+    fn publication_remote_rejects_non_https_transport() {
+        let err = resolve_publication_remote(
+            &serde_json::json!({"remote_url": "git@github.example:acme/repo.git"}),
+            "github.example",
+            "acme",
+            "repo",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("valid HTTPS"));
     }
 
     #[test]
