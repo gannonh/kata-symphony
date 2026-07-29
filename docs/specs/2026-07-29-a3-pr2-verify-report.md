@@ -11,14 +11,25 @@ timestamp: 2026-07-29T18:05:00Z
 
 ## Status
 
-**Incomplete** — automated gates Pass; live GitHub draft-PR publication, Agent Review handoff, and restart-during-publication UAT not executed here. Pull request: [#607](https://github.com/gannonh/kata-symphony/pull/607).
+**Incomplete** — review findings and automated gates Pass; live GitHub draft-PR publication, Agent Review handoff, and restart-during-publication UAT were not executable in this environment. Pull request: [#607](https://github.com/gannonh/kata-symphony/pull/607).
 
 ## Automated evidence
 
-- `cargo fmt` / `cargo clippy --lib -- -D warnings` / `cargo test --lib` — Pass (see [build report](2026-07-29-a3-pr2-build-report.md))
+- `cargo fmt --check` / `cargo clippy -- -D warnings` / `cargo test` — Pass (327 library tests; see [build report](2026-07-29-a3-pr2-build-report.md))
+- `cargo llvm-cov --fail-under-lines 72` — Pass
+- GitHub backend validation, golden-path smoke, and Kata distribution jobs — Pass
 - Branch projection table + bare-remote absent / already-desired / fast-forward / conflict
-- Draft PR create-before-record recovery + foreign PR rejection
-- Tracker handoff ordering gated on draft-PR artifact
+- Token-authenticated Git subprocesses with timeout and secret redaction
+- Pinned forge repository/branch recovery with configuration-drift rejection
+- Draft PR create-before-record recovery + foreign/closed PR handling
+- Persisted draft-PR artifact revalidation before tracker handoff
+- Retryable issue drift remains recoverable; missing store intent updates error
+- Doctor validates the derived publication repository and reports token permissions as unverified
+- All 13 original inline review threads addressed
+
+## Review conclusion
+
+The repaired code preserves the expected-projection/no-force contract and removes the identified stale-evidence, authentication, recovery, and secret-handling gaps. Automated evidence is sufficient for the PR2 code slice. Acceptance criterion 20 still requires operator-owned live fixtures and cleanup, so this report remains Incomplete rather than overstating acceptance.
 
 ## Residual
 
