@@ -1,6 +1,7 @@
 # Specs Update Log
 
 ## 2026-07-29
+* **A3 PR2 review remediation**: [#607](https://github.com/gannonh/kata-symphony/pull/607) now pins the forge repository/branch, authenticates bounded and redacted Git subprocesses, revalidates persisted draft PRs before routing, preserves retryable recovery, and validates publication configuration in doctor. All original inline findings are addressed; automated gates Pass and live AC20 UAT remains documented as residual.
 * **A3 PR2 implemented**: Deterministic draft-PR publication and Agent Review handoff ([build](/specs/2026-07-29-a3-pr2-build-report.md), [verify](/specs/2026-07-29-a3-pr2-verify-report.md) Incomplete). Automated gates Pass; live UAT residual. Next: live PR2 UAT, then A4.
 * **A3 next = PR2**: Specs roadmap / PRD slice table now show PR1 as Implemented ([#606](https://github.com/gannonh/kata-symphony/pull/606)) and PR2 as Next.
 * **A3 PR1 review remediation (#606)**: Validation credential isolation + timeout output tails; discrete `$SYMPHONY_STAGE_INPUT` files; approved-spec verified via `git show HEAD:`; claim-time `pending` run state + eligibility exclude non-`failed` decisions; spawn identity recording; Docker fail-closed; bundle/temp/store hardening.
