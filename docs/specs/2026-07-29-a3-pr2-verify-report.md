@@ -15,17 +15,18 @@ timestamp: 2026-07-29T18:05:00Z
 
 ## Automated evidence
 
-- `cargo fmt --check` / `cargo clippy -- -D warnings` / `cargo test` — Pass (327 library tests; see [build report](2026-07-29-a3-pr2-build-report.md))
+- `cargo fmt --check` / `cargo clippy -- -D warnings` / `cargo test` — Pass (329 library tests; see [build report](2026-07-29-a3-pr2-build-report.md))
 - `cargo llvm-cov --fail-under-lines 72` — Pass
 - GitHub backend validation, golden-path smoke, and Kata distribution jobs — Pass
 - Branch projection table + bare-remote absent / already-desired / fast-forward / conflict
 - Token-authenticated Git subprocesses with timeout and secret redaction
 - Pinned forge repository/branch recovery with configuration-drift rejection
 - Draft PR create-before-record recovery + foreign/closed PR handling
-- Persisted draft-PR artifact revalidation before tracker handoff
-- Retryable issue drift remains recoverable; missing store intent updates error
+- Persisted draft-PR artifact revalidation and missing-step recovery before tracker handoff
+- Run state/events finalize before the publication intent becomes applied
+- Retryable issue drift and unexpected forge failures remain visible/recoverable; missing store intent updates error
 - Doctor validates the derived publication repository and reports token permissions as unverified
-- All 13 original inline review threads addressed
+- All 16 inline review threads and four review-summary nitpicks addressed
 
 ## Review conclusion
 
