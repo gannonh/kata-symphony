@@ -181,11 +181,7 @@ pub fn publish_branch(request: &BranchPublishRequest<'_>) -> Result<BranchPublis
         return Err(SymphonyError::TriageError(format!(
             "git fetch base `{}` failed: {}",
             request.base_branch,
-            sanitized_git_stderr(
-                &fetch_base.stderr,
-                request.remote_url,
-                request.github_token
-            )
+            sanitized_git_stderr(&fetch_base.stderr, request.remote_url, request.github_token)
         )));
     }
 
@@ -492,7 +488,10 @@ fn run_network_git_with_timeout(
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    if let Some(token) = github_token.map(str::trim).filter(|token| !token.is_empty()) {
+    if let Some(token) = github_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
         let credentials = BASE64_STANDARD.encode(format!("x-access-token:{token}"));
         command
             .env("GIT_CONFIG_COUNT", "1")
@@ -555,16 +554,15 @@ fn run_network_git_with_timeout(
     })
 }
 
-fn sanitized_git_stderr(
-    stderr: &[u8],
-    remote_url: &str,
-    github_token: Option<&str>,
-) -> String {
+fn sanitized_git_stderr(stderr: &[u8], remote_url: &str, github_token: Option<&str>) -> String {
     let mut message = String::from_utf8_lossy(stderr).trim().to_string();
     if !remote_url.is_empty() {
         message = message.replace(remote_url, "<remote>");
     }
-    if let Some(token) = github_token.map(str::trim).filter(|token| !token.is_empty()) {
+    if let Some(token) = github_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
         message = message.replace(token, "[REDACTED]");
     }
     redact_url_credentials(&message)
