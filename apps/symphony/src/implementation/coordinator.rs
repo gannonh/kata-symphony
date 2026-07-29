@@ -1493,12 +1493,7 @@ fn issue_number_from_run(store: &SharedFactoryStore, run_id: &str) -> Result<u64
 }
 
 fn intent_remote_url(forge_host: &str, repo_owner: &str, repo_name: &str) -> Result<String> {
-    resolve_publication_remote(
-        &serde_json::Value::Null,
-        forge_host,
-        repo_owner,
-        repo_name,
-    )
+    resolve_publication_remote(&serde_json::Value::Null, forge_host, repo_owner, repo_name)
 }
 
 fn required_desired_effect<'a>(
