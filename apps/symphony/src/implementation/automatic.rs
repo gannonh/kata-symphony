@@ -645,24 +645,33 @@ where
             .into_iter()
             .find(|pr| pr.number == persisted.number);
 
-        let verification = live
-            .as_ref()
-            .ok_or_else(|| {
-                SymphonyError::TriageError(format!(
-                    "persisted draft PR #{} is missing from the expected head/base projection",
+        let Some(live) = live.as_ref() else {
+            let error = FactoryError::new(
+                "pr_not_visible",
+                "implementation_publication",
+                format!(
+                    "persisted draft PR #{} is not visible in the bounded head/base listing",
                     persisted.number
-                ))
-            })
-            .and_then(|pr| {
-                verify_owned_draft_pr(
-                    pr,
-                    intent,
-                    request.branch,
-                    request.base_branch,
-                    &request.bundle.head_commit,
-                    publisher_login,
-                )
-            })
+                ),
+                true,
+                Some(PR_VERIFIED_STEP.into()),
+            );
+            store.set_implementation_publication_error(
+                &intent.intent_id,
+                PublicationStatus::Pending,
+                error.clone(),
+            )?;
+            return Err(SymphonyError::TriageError(error.remediation));
+        };
+
+        let verification = verify_owned_draft_pr(
+            live,
+            intent,
+            request.branch,
+            request.base_branch,
+            &request.bundle.head_commit,
+            publisher_login,
+        )
             .and_then(|pr| verify_persisted_draft_pr_record(persisted, &pr));
 
         if let Err(error) = verification {
@@ -1704,6 +1713,76 @@ mod tests {
             reload_intent(&store, &intent.intent_id).unwrap().status,
             PublicationStatus::Conflict
         );
+    }
+
+    #[tokio::test]
+    async fn persisted_draft_pr_missing_from_bounded_listing_remains_pending() {
+        let (_dir, store) = open_store();
+        let comments = FakeComments::new("symphony-bot");
+        let routing = FakeRouting::new(vec!["ready-for-agent".into()]);
+        let pulls = FakePulls::new();
+        let (intent, artifact, bundle, manifest) = setup_automatic_fixture(&store).await;
+        skip_branch(&store, &intent.intent_id, &bundle.head_commit);
+
+        store
+            .store_draft_pr_artifact(StoreDraftPrArtifactRequest {
+                run_id: artifact.run_id.clone(),
+                implementation_artifact_id: artifact.artifact_id.clone(),
+                intent_id: intent.intent_id.clone(),
+                number: 55,
+                url: "https://github.com/acme/repo/pull/55".into(),
+                draft: true,
+                head: "symphony/_42".into(),
+                base: "main".into(),
+                head_sha: bundle.head_commit.clone(),
+                marker: pr_marker(&intent.intent_id),
+            })
+            .unwrap();
+        store
+            .record_implementation_publication_step(
+                &intent.intent_id,
+                PR_VERIFIED_STEP,
+                PublicationStatus::Pending,
+                &serde_json::json!({"pr_number": 55}),
+            )
+            .unwrap();
+
+        let intent = reload_intent(&store, &intent.intent_id).unwrap();
+        let publisher = AutomaticImplementationPublisher::new(comments, routing, pulls);
+        let err = publisher
+            .publish_automatic(
+                &store,
+                AutomaticPublishRequest {
+                    intent: &intent,
+                    issue_number: 42,
+                    issue_title: "Retry",
+                    current_issue_revision: "rev",
+                    run_id: &artifact.run_id,
+                    stage_run_id: &artifact.stage_run_id,
+                    artifact: &artifact,
+                    bundle: &bundle,
+                    manifest: &manifest,
+                    validation: &[],
+                    branch: "symphony/_42",
+                    base_branch: "main",
+                    remote_url: "/tmp/unused",
+                    github_token: None,
+                    repo_owner: "acme",
+                    approval_route_label: "ready-for-agent",
+                    completion_route_state: "Agent Review",
+                    storage_path: Path::new("/tmp/unused-db"),
+                    max_pages: 2,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not visible"));
+
+        let recovered = reload_intent(&store, &intent.intent_id).unwrap();
+        assert_eq!(recovered.status, PublicationStatus::Pending);
+        let last_error = recovered.last_error.unwrap();
+        assert_eq!(last_error.code, "pr_not_visible");
+        assert!(last_error.retryable);
     }
 
     #[tokio::test]
