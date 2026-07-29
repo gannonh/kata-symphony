@@ -11,13 +11,15 @@ timestamp: 2026-07-29T18:00:00Z
 
 ## Status
 
-Implemented — automated gates Pass; live GitHub draft-PR / restart UAT residual (see [verify report](2026-07-29-a3-pr2-verify-report.md)).
+Implemented — automated gates Pass; live GitHub draft-PR / restart UAT residual (see [verify report](2026-07-29-a3-pr2-verify-report.md)). Opened as [#607](https://github.com/gannonh/kata-symphony/pull/607).
 
 ## Spec
 
 - Spec: [`2026-07-26-a3-implementation-stage-design.md`](2026-07-26-a3-implementation-stage-design.md)
 - Scope: PR2 delivery slice (AC 14–16 and related HTTP/events/tests; automated portions of 17–19)
 - Non-goals: live UAT, Docker daemon lifecycle, A4 agent review
+- Branch: `cursor/a3-pr2-draft-pr-publication-4eda` @ `d08697e3`
+- Base: `main` @ `878bb4b4` (A3 PR1)
 
 ## Tasks completed
 
