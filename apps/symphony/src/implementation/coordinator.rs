@@ -304,20 +304,20 @@ where
                 ImplementationPublicationKind::Automatic => {
                     if let Err(error) = self.reconcile_automatic_publication(service, &intent).await
                     {
+                        let error_message = error.to_string();
                         let latest = self
                             .store
                             .get_implementation_publication_intent(&intent.intent_id)?;
                         if let Some(latest) = latest.filter(|latest| {
                             latest.status == PublicationStatus::Pending
-                                && latest
-                                    .last_error
-                                    .as_ref()
-                                    .is_none_or(|last| last.code != "issue_revision_drift")
+                                && !latest.last_error.as_ref().is_some_and(|last| {
+                                    last.retryable && last.remediation == error_message.as_str()
+                                })
                         }) {
                             let failure = FactoryError::new(
                                 "publication_retryable",
                                 "implementation_publication",
-                                error.to_string(),
+                                error_message,
                                 true,
                                 latest.completed_steps.last().cloned(),
                             );
@@ -1266,11 +1266,12 @@ where
             let publication_branch =
                 branch_name_for_issue(&service.workspace.branch_prefix, &issue.identifier);
             let remote_url = intent_remote_url(&self.config.forge_host, repo_owner, repo_name)?;
+            let completion_state = automatic_completion_state(service)?;
             desired_effects = serde_json::json!({
                 "mode": service.implementation.mode.as_str(),
                 "changed_paths": assessment.changed_paths,
                 "approval_route_label": service.spec.approval_route.label,
-                "completion_route_state": service.implementation.completion_route.as_ref().map(|r| &r.state),
+                "completion_route_state": completion_state,
                 "base_branch": base_branch,
                 "publication_branch": publication_branch,
                 "repo_owner": repo_owner,
@@ -1553,6 +1554,20 @@ fn required_desired_effect<'a>(
             SymphonyError::TriageError(format!(
                 "automatic publication intent is missing pinned {key}"
             ))
+        })
+}
+
+fn automatic_completion_state(service: &ServiceConfig) -> Result<&str> {
+    service
+        .implementation
+        .completion_route
+        .as_ref()
+        .map(|route| route.state.trim())
+        .filter(|state| !state.is_empty())
+        .ok_or_else(|| {
+            SymphonyError::TriageError(
+                "implementation.completion_route.state required when mode is automatic".into(),
+            )
         })
 }
 
@@ -2223,5 +2238,14 @@ mod tests {
         );
         let err = required_desired_effect(&desired, "repo_name").unwrap_err();
         assert!(err.to_string().contains("pinned repo_name"));
+    }
+
+    #[test]
+    fn automatic_completion_route_is_required_before_intent_creation() {
+        let service = ServiceConfig::default();
+        let err = automatic_completion_state(&service).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("implementation.completion_route.state required"));
     }
 }
