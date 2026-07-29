@@ -587,6 +587,41 @@ server:
 #     label: ready-for-agent
 #     state: Todo
 
+# ─── Implementation stage (A3) ────────────────────────────────────────────────
+# GitHub Projects v2 only. Admits factory runs with a terminal A2 approval
+# publication and pinned approved_artifact_id/version. Workers implement in
+# credential-free local or Docker isolation, run repository-owned validation,
+# and store a verified change bundle. Preview mode publishes one owned issue
+# comment with no remote branch/PR or tracker mutation. Automatic mode (PR2)
+# pushes a draft PR and advances completion_route.state.
+#
+# Requires `spec.enabled` so the A2 approval path exists. Validation must list
+# 1–20 uniquely named blocking commands. `implementation.model` is rejected for
+# Codex backends.
+#
+# HTTP additions:
+#   GET /api/v1/factory-runs/{run_id} # includes implementation status when present
+#   GET /api/v1/factory-runs/metrics?stage=implementation
+#
+# implementation:
+#   enabled: false
+#   mode: preview
+#   prompt: prompts/implementation.md
+#   repair_prompt: prompts/implementation-repair.md
+#   # model: provider/model-name
+#   max_turns: 20
+#   invocation_timeout_ms: 3600000
+#   max_attempts: 3
+#   max_validation_cycles: 3
+#   max_bundle_bytes: 104857600
+#   spec_file: specs/{issue_identifier}/APPROVED-v{version}.md
+#   validation:
+#     - name: affected-validation
+#       command: pnpm run validate:affected
+#       timeout_ms: 1800000
+#   # completion_route:
+#   #   state: Agent Review
+
 # ─── Prompts (per-state prompt injection) ─────────────────────────────────────
 # Optional. When configured, the orchestrator selects a prompt template based on
 # the issue's tracker state at dispatch time instead of using the markdown body

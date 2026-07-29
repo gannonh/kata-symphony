@@ -1,5 +1,11 @@
 # Docs Update Log
 
+## 2026-07-29
+* **A3 PR1 next step = PR2**: Roadmap/PRD mark PR1 implemented ([#606](https://github.com/gannonh/kata-symphony/pull/606)); next factory slice is draft-PR publication / Agent Review handoff. Live PR1 UAT remains residual on the verify report only.
+* **A3 PR1 implemented**: Preview path complete with [build](/specs/2026-07-29-a3-pr1-build-report.md) / [verify](/specs/2026-07-29-a3-pr1-verify-report.md) and [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md). Automated gates Pass; live UAT residual. PR2 is next.
+* **A3 PR1 execution path**: Implemented validation cycles, content-addressed Git bundles, local credential-isolated runner (+ Docker env isolation builder), preview publisher, and implementation coordinator wired after A2 in `TriageRuntime::poll`. HTTP attach now surfaces bundle/publication fields. Automatic draft-PR publication remains PR2; full Docker container orchestration and live UAT remain residual.
+* **A3 PR1 foundation**: Symphony implementation-stage module wired (domain/artifact/comment already present; store migration 004, SharedFactoryStore APIs, config/doctor/HTTP stubs, starter prompts, and WORKFLOW comments). Coordinator/runner/validation/bundle/publisher remain stubs for later PR1 slices.
+
 ## 2026-07-27
 * **A1 PR3 shipped; A1 complete**: Roadmap marks A1 GitHub path complete (PR1–PR3, [#599](https://github.com/gannonh/kata-symphony/pull/599)), clears Blocked, and keeps A3 as next. Updated [docs index](/index.md), [specs roadmap](/specs/index.md), A1/A2/A3 designs, PRD, and PR3 build/re-verify reports.
 * **A1 PR2 shipped; A3 next**: Roadmap and OKF entry points mark A1 PR2 shipped ([#598](https://github.com/gannonh/kata-symphony/pull/598)) and promote A3 to Active as the next factory slice. Updated [docs index](/index.md), [specs roadmap](/specs/index.md), A1/A2/A3 designs, and [factory PRD](/specs/symphony-software-factory-platform-prd.md).

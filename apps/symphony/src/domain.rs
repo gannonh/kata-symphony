@@ -583,6 +583,7 @@ pub struct ServiceConfig {
     pub storage: crate::triage::domain::StorageConfig,
     pub triage: crate::triage::domain::TriageConfig,
     pub spec: crate::spec::domain::SpecConfig,
+    pub implementation: crate::implementation::domain::ImplementationConfig,
 }
 
 /// Tracker configuration (spec §5.3.1).

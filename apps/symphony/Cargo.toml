@@ -62,9 +62,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 hex = "0.4"
 fs2 = "0.4"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 serial_test = "3"
 mockito = "1"
 tokio-test = "0.4"

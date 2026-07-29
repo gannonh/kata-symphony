@@ -5,13 +5,13 @@ Roadmap for planned and completed work. Historical Superpowers designs and plans
 # Active
 
 * [Symphony Software Factory Platform PRD](symphony-software-factory-platform-prd.md) - product requirements and vertical-slice roadmap for the full software factory platform
-* [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md) - **Next**; Active design; pinned A2 approved spec → credential-isolated local/Docker implementation → deterministic validation and repair → durable change bundle → linked draft GitHub PR. A1 and A2 prerequisites shipped.
+* [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md) - Active; **PR1 implemented** ([#606](https://github.com/gannonh/kata-symphony/pull/606); [build](2026-07-29-a3-pr1-build-report.md), [verify](2026-07-29-a3-pr1-verify-report.md), [ADR-0004](../adrs/0004-a3-implementation-durability-and-bundles.md)); **next** PR2 draft-PR publication
 * [Pi Symphony Extension Design](../superpowers/specs/2026-05-14-pi-symphony-extension-design.md) - Pi extension to init, launch, monitor, and steer Symphony
 * [Wave 4 Shared Context and Diagnostics Plan](../superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md) - dashboard parity for shared context + diagnostics
 
 # Planned
 
-_(none — A3 is Active as the next factory slice)_
+* [A3 PR2 Deterministic Draft-PR Publication](2026-07-26-a3-implementation-stage-design.md) - **Next** factory slice: branch push, draft PR, Agent Review handoff (same design doc)
 
 # Blocked
 

@@ -20,6 +20,7 @@ use crate::triage::process_identity::{self, ProcessIdentity};
 
 const FORCE_KILL_WAIT: Duration = Duration::from_secs(5);
 const OUTPUT_ENV: &str = "SYMPHONY_STAGE_OUTPUT";
+const INPUT_ENV: &str = "SYMPHONY_STAGE_INPUT";
 const MODEL_ENV: &str = "SYMPHONY_TRIAGE_MODEL";
 /// Bytes of child stdout/stderr retained for failure diagnostics.
 const CHILD_OUTPUT_TAIL: usize = 4_000;
@@ -152,12 +153,12 @@ pub enum TriageRunnerOutcome {
     Failure(TriageRunnerFailure),
 }
 
-struct AttemptLayout {
-    attempt_root: PathBuf,
-    workspace_path: PathBuf,
-    output_path: PathBuf,
-    stage_input_path: PathBuf,
-    home_dir: PathBuf,
+pub struct AttemptLayout {
+    pub attempt_root: PathBuf,
+    pub workspace_path: PathBuf,
+    pub output_path: PathBuf,
+    pub stage_input_path: PathBuf,
+    pub home_dir: PathBuf,
 }
 
 pub struct TriageRunner;
@@ -517,7 +518,7 @@ fn scrub_isolated_home(home_dir: &Path) -> std::io::Result<()> {
 
 // ── Pi one-shot print execution ─────────────────────────────────────────────
 
-async fn run_pi_turn(
+pub(crate) async fn run_pi_turn(
     request: &TriageRunnerRequest,
     layout: &AttemptLayout,
 ) -> std::result::Result<StageUsage, TriageRunnerOutcome> {
@@ -532,6 +533,7 @@ async fn run_pi_turn(
     let env = build_isolated_env(
         &layout.home_dir,
         &layout.output_path,
+        Some(&layout.stage_input_path),
         request.model.as_deref(),
     );
     seed_pi_auth(&layout.home_dir);
@@ -801,7 +803,7 @@ fn tail(bytes: &[u8], max: usize) -> String {
 
 // ── Codex app-server one-turn execution ─────────────────────────────────────
 
-async fn run_codex_turn(
+pub(crate) async fn run_codex_turn(
     request: &TriageRunnerRequest,
     layout: &AttemptLayout,
 ) -> std::result::Result<StageUsage, TriageRunnerOutcome> {
@@ -928,7 +930,12 @@ async fn codex_session_start(
 ) -> std::result::Result<crate::codex::app_server::SessionHandle, TriageRunnerOutcome> {
     let workspace_str = layout.workspace_path.to_string_lossy().to_string();
     let cmd_str = config.command.join(" ");
-    let env = build_isolated_env(&layout.home_dir, &layout.output_path, None);
+    let env = build_isolated_env(
+        &layout.home_dir,
+        &layout.output_path,
+        Some(&layout.stage_input_path),
+        None,
+    );
 
     let mut command = Command::new("bash");
     command
@@ -1111,7 +1118,11 @@ fn format_artifact_error(err: ArtifactValidationError) -> String {
     format!("invalid triage artifact: {err}")
 }
 
-fn prepare_dirs(workspace: &Path, output_dir: &Path, home_dir: &Path) -> std::io::Result<()> {
+pub(crate) fn prepare_dirs(
+    workspace: &Path,
+    output_dir: &Path,
+    home_dir: &Path,
+) -> std::io::Result<()> {
     if let Some(parent) = workspace.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1140,7 +1151,7 @@ fn clone_local_workspace(repo: &Path, workspace: &Path) -> std::result::Result<(
     Ok(())
 }
 
-fn disable_push_urls(workspace: &Path) -> std::result::Result<(), String> {
+pub(crate) fn disable_push_urls(workspace: &Path) -> std::result::Result<(), String> {
     let remotes = git_stdout(workspace, &["remote"])?;
     for remote in remotes
         .lines()
@@ -1219,9 +1230,14 @@ fn seed_pi_auth(home_dir: &Path) {
     }
 }
 
-fn build_isolated_env(
+/// Build the A1 credential-free child environment (model auth only).
+///
+/// Deliberately omits `GH_TOKEN`, `GITHUB_TOKEN`, Linear credentials, Symphony
+/// helper variables, and SSH agent settings.
+pub(crate) fn build_isolated_env(
     home_dir: &Path,
     output_path: &Path,
+    stage_input_path: Option<&Path>,
     model: Option<&str>,
 ) -> HashMap<String, String> {
     let mut env = HashMap::new();
@@ -1251,6 +1267,9 @@ fn build_isolated_env(
 
     env.insert("HOME".to_string(), home_dir.display().to_string());
     env.insert(OUTPUT_ENV.to_string(), output_path.display().to_string());
+    if let Some(stage_input) = stage_input_path {
+        env.insert(INPUT_ENV.to_string(), stage_input.display().to_string());
+    }
     if let Some(model) = model {
         env.insert(MODEL_ENV.to_string(), model.to_string());
     }
@@ -1889,6 +1908,7 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
         let env = build_isolated_env(
             Path::new("/tmp/home"),
             Path::new("/tmp/out.json"),
+            Some(Path::new("/tmp/stage-input")),
             Some("m"),
         );
         assert!(!env.contains_key("GH_TOKEN"));
@@ -1904,6 +1924,10 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
         assert_eq!(
             env.get(OUTPUT_ENV).map(String::as_str),
             Some("/tmp/out.json")
+        );
+        assert_eq!(
+            env.get(INPUT_ENV).map(String::as_str),
+            Some("/tmp/stage-input")
         );
         assert_eq!(env.get(MODEL_ENV).map(String::as_str), Some("m"));
     }

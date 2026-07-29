@@ -237,12 +237,12 @@ A spec-routed issue produces versioned product behavior, technical approach, acc
 
 Implementation consumes the approved artifact version, runs repository validation, and opens a draft PR that links the issue, spec version, factory run, and validation summary.
 
-**Progress (2026-07-27):** **Next** factory slice. Active design: [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md) defines A2-approved-only intake, credential-isolated local and Docker implementation, a committed approved-spec file, deterministic validation with bounded repair, durable Git bundles, and Symphony-owned draft-PR publication. A1 PR2 and A2 prerequisites are shipped.
+**Progress (2026-07-29):** **PR1 implemented** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](/specs/2026-07-29-a3-pr1-build-report.md), [verify](/specs/2026-07-29-a3-pr1-verify-report.md), [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md)) — eligibility, credential-isolated local runner, validation/repair, durable bundles, preview comments, HTTP/metrics; review threads resolved. **Next:** PR2 deterministic draft-PR publication and Agent Review handoff (live PR1 UAT remains residual on the verify report). Design: [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md).
 
 | Slice | Status | Notes |
 | --- | --- | --- |
-| PR1 implementation and validation preview | **Next** | Local/Docker runners, typed manifest, committed approved spec, blocking validation/repair, durable bundle, tracker-visible preview |
-| PR2 deterministic draft-PR publication | Planned | Expected-projection branch push, owned draft PR, restart recovery, Agent Review handoff |
+| PR1 implementation and validation preview | **Implemented** ([#606](https://github.com/gannonh/kata-symphony/pull/606)) | Local preview path; Docker profile fail-closes pending full container orchestration; live UAT residual |
+| PR2 deterministic draft-PR publication | **Next** | Expected-projection branch push, owned draft PR, restart recovery, Agent Review handoff |
 
 **Demo:** Approve a spec and watch Symphony produce a draft PR whose description records the intended behavior and evidence.
 

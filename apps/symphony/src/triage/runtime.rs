@@ -9,10 +9,16 @@ use crate::event_stream::EventHub;
 use crate::github::client::GithubClient;
 use crate::github::projects_v2::ProjectsV2Client;
 use crate::http_server::{
-    attach_spec_http_response, factory_run_http_response, factory_run_metrics_http_response,
+    attach_implementation_http_response, attach_spec_http_response, factory_run_http_response,
+    factory_run_metrics_http_response, implementation_run_metrics_http_response,
     spec_run_metrics_http_response, FactoryArtifactHttpResponse, FactoryRunHttpResponse,
-    FactoryRunMetricsHttpResponse, FactoryRunQuery, SpecRunMetricsHttpResponse,
+    FactoryRunMetricsHttpResponse, FactoryRunQuery, ImplementationRunMetricsHttpResponse,
+    SpecRunMetricsHttpResponse,
 };
+use crate::implementation::coordinator::{
+    ImplementationCoordinator, ImplementationCoordinatorConfig,
+};
+use crate::implementation::runner::LiveImplementationHarness;
 use crate::spec::coordinator::{SpecCoordinator, SpecCoordinatorConfig};
 use crate::triage::coordinator::{
     EventEmitter, TriageCoordinator, TriageCoordinatorConfig, TriagePollSummary,
@@ -27,9 +33,11 @@ use crate::triage::storage_path::{
     forge_host_from_endpoint, resolve_storage_path, storage_path_for_log,
 };
 use crate::triage::store::{
-    ClaimAttemptRequest, CreatePublicationIntentRequest, FactoryRunStore,
+    A3EligibleApprovedRun, ClaimAttemptRequest, CreatePublicationIntentRequest, FactoryRunStore,
     PendingAutomaticDispatchGuard, SqliteFactoryStore, StoreArtifactRequest,
-    StoreSpecArtifactRequest, StoreSpecTurnRequest, StoredCommentIdentity, UpsertFactoryRunRequest,
+    StoreBundleArtifactRequest, StoreImplementationArtifactRequest, StoreImplementationTurnRequest,
+    StoreSpecArtifactRequest, StoreSpecTurnRequest, StoreValidationCycleRequest,
+    StoredCommentIdentity, UpsertFactoryRunRequest, UpsertImplementationStateRequest,
 };
 
 /// Shared SQLite factory store for coordinator + HTTP reads.
@@ -198,6 +206,178 @@ impl SharedFactoryStore {
         self.with_store_mut(|store| store.finalize_spec_approval(run_id, intent_id, completed_step))
     }
 
+    pub fn claim_implementation_attempt(
+        &self,
+        request: ClaimAttemptRequest,
+    ) -> Result<StageRunRecord> {
+        self.with_store_mut(|store| {
+            store.claim_stage_attempt(
+                crate::implementation::domain::IMPLEMENTATION_STAGE_NAME,
+                request,
+            )
+        })
+    }
+
+    pub fn store_implementation_turn(
+        &self,
+        request: StoreImplementationTurnRequest,
+    ) -> Result<crate::implementation::domain::ImplementationTurnRecord> {
+        self.with_store_mut(|store| store.store_implementation_turn(request))
+    }
+
+    pub fn list_implementation_turns(
+        &self,
+        stage_run_id: &str,
+    ) -> Result<Vec<crate::implementation::domain::ImplementationTurnRecord>> {
+        self.with_store(|store| store.list_implementation_turns(stage_run_id))
+    }
+
+    pub fn store_validation_cycle(
+        &self,
+        request: StoreValidationCycleRequest,
+    ) -> Result<crate::implementation::domain::ValidationCycleRecord> {
+        self.with_store_mut(|store| store.store_validation_cycle(request))
+    }
+
+    pub fn list_validation_cycles(
+        &self,
+        stage_run_id: &str,
+    ) -> Result<Vec<crate::implementation::domain::ValidationCycleRecord>> {
+        self.with_store(|store| store.list_validation_cycles(stage_run_id))
+    }
+
+    pub fn store_implementation_artifact(
+        &self,
+        request: StoreImplementationArtifactRequest,
+    ) -> Result<crate::implementation::domain::ImplementationArtifactRecord> {
+        self.with_store_mut(|store| store.store_implementation_artifact(request))
+    }
+
+    pub fn get_implementation_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<crate::implementation::domain::ImplementationArtifactRecord>> {
+        self.with_store(|store| store.get_implementation_artifact(artifact_id))
+    }
+
+    pub fn list_implementation_artifacts(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::implementation::domain::ImplementationArtifactRecord>> {
+        self.with_store(|store| store.list_implementation_artifacts(run_id))
+    }
+
+    pub fn store_bundle_artifact(
+        &self,
+        request: StoreBundleArtifactRequest,
+    ) -> Result<crate::implementation::domain::BundleArtifactRecord> {
+        self.with_store_mut(|store| store.store_bundle_artifact(request))
+    }
+
+    pub fn get_bundle_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<crate::implementation::domain::BundleArtifactRecord>> {
+        self.with_store(|store| store.get_bundle_artifact(artifact_id))
+    }
+
+    pub fn get_implementation_state(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<crate::implementation::domain::ImplementationRunState>> {
+        self.with_store(|store| store.get_implementation_state(run_id))
+    }
+
+    pub fn upsert_implementation_state(
+        &self,
+        request: UpsertImplementationStateRequest,
+    ) -> Result<crate::implementation::domain::ImplementationRunState> {
+        self.with_store_mut(|store| store.upsert_implementation_state(request))
+    }
+
+    pub fn set_implementation_decision(
+        &self,
+        run_id: &str,
+        decision: crate::implementation::domain::ImplementationDecision,
+        blocker: Option<crate::implementation::domain::ImplementationBlocker>,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.set_implementation_decision(run_id, decision, blocker))
+    }
+
+    pub fn create_implementation_publication_intent(
+        &self,
+        run_id: &str,
+        artifact_id: Option<&str>,
+        kind: crate::implementation::domain::ImplementationPublicationKind,
+        desired_effects: &serde_json::Value,
+    ) -> Result<crate::implementation::domain::ImplementationPublicationIntent> {
+        self.with_store_mut(|store| {
+            store.create_implementation_publication_intent(
+                run_id,
+                artifact_id,
+                kind,
+                desired_effects,
+            )
+        })
+    }
+
+    pub fn get_implementation_publication_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<crate::implementation::domain::ImplementationPublicationIntent>> {
+        self.with_store(|store| store.get_implementation_publication_intent(intent_id))
+    }
+
+    pub fn list_pending_implementation_publications(
+        &self,
+    ) -> Result<Vec<crate::implementation::domain::ImplementationPublicationIntent>> {
+        self.with_store(|store| store.list_pending_implementation_publications())
+    }
+
+    pub fn list_implementation_publications_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::implementation::domain::ImplementationPublicationIntent>> {
+        self.with_store(|store| store.list_implementation_publications_for_run(run_id))
+    }
+
+    pub fn complete_implementation_publication(&self, intent_id: &str, step: &str) -> Result<()> {
+        self.with_store_mut(|store| store.complete_implementation_publication(intent_id, step))
+    }
+
+    pub fn bind_implementation_publication_comment(
+        &self,
+        intent_id: &str,
+        comment_id: &str,
+        publisher_login: &str,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.bind_implementation_publication_comment(intent_id, comment_id, publisher_login)
+        })
+    }
+
+    pub fn store_implementation_attempt_inputs(
+        &self,
+        stage_run_id: &str,
+        inputs: &crate::implementation::domain::ImplementationAttemptInputs,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.store_implementation_attempt_inputs(stage_run_id, inputs))
+    }
+
+    pub fn get_implementation_attempt_inputs(
+        &self,
+        stage_run_id: &str,
+    ) -> Result<Option<crate::implementation::domain::ImplementationAttemptInputs>> {
+        self.with_store(|store| store.get_implementation_attempt_inputs(stage_run_id))
+    }
+
+    pub fn list_a3_eligible_approved_runs(
+        &self,
+        configuration_revision: &str,
+    ) -> Result<Vec<A3EligibleApprovedRun>> {
+        self.with_store(|store| store.list_a3_eligible_approved_runs(configuration_revision))
+    }
+
     fn with_store<T>(&self, f: impl FnOnce(&SqliteFactoryStore) -> Result<T>) -> Result<T> {
         let guard = self
             .inner
@@ -246,6 +426,23 @@ impl SharedFactoryStore {
                 spec_state.as_ref(),
                 spec_publication.as_ref(),
                 &turns,
+            );
+            let implementation_state = store.get_implementation_state(&run.run_id)?;
+            let implementation_artifacts = store.list_implementation_artifacts(&run.run_id)?;
+            let publication = store
+                .list_implementation_publications_for_run(&run.run_id)?
+                .into_iter()
+                .next();
+            let bundle = implementation_state
+                .as_ref()
+                .and_then(|state| state.bundle_artifact_id.as_deref())
+                .and_then(|id| store.get_bundle_artifact(id).ok().flatten());
+            attach_implementation_http_response(
+                &mut response,
+                implementation_state.as_ref(),
+                implementation_artifacts.first(),
+                publication.as_ref(),
+                bundle.as_ref(),
             );
             Ok(Some(response))
         })
@@ -491,6 +688,14 @@ impl FactoryRunQuery for SharedFactoryStore {
             .map_err(|err| err.to_string())
     }
 
+    fn implementation_metrics(
+        &self,
+    ) -> std::result::Result<ImplementationRunMetricsHttpResponse, String> {
+        self.with_store(|store| store.implementation_metrics())
+            .map(implementation_run_metrics_http_response)
+            .map_err(|err| err.to_string())
+    }
+
     fn get_artifact(
         &self,
         run_id: &str,
@@ -564,6 +769,8 @@ impl EventEmitter for EventHubEmitter {
 pub struct TriageRuntime {
     coordinator: Option<TriageCoordinator<SharedFactoryStore, GithubTriageIntake, GithubClient>>,
     spec_coordinator: Option<SpecCoordinator<GithubTriageIntake, GithubClient>>,
+    implementation_coordinator:
+        Option<ImplementationCoordinator<GithubClient, GithubClient, LiveImplementationHarness>>,
     store: SharedFactoryStore,
     sessions: Arc<Mutex<crate::domain::TriageSessionRegistry>>,
 }
@@ -575,7 +782,7 @@ impl TriageRuntime {
     pub fn try_open_dispatch_guard_store(
         config: &ServiceConfig,
     ) -> Result<Option<SharedFactoryStore>> {
-        if config.triage.enabled || config.spec.enabled {
+        if config.triage.enabled || config.spec.enabled || config.implementation.enabled {
             return Ok(None);
         }
         if !matches!(config.tracker.kind.as_deref(), Some("github")) {
@@ -621,7 +828,7 @@ impl TriageRuntime {
         workflow_path: &Path,
         event_hub: Option<EventHub>,
     ) -> Result<Option<Self>> {
-        if !config.triage.enabled && !config.spec.enabled {
+        if !config.triage.enabled && !config.spec.enabled && !config.implementation.enabled {
             return Ok(None);
         }
 
@@ -671,6 +878,7 @@ impl TriageRuntime {
             path = %storage_path_for_log(&storage_path),
             triage_enabled = config.triage.enabled,
             spec_enabled = config.spec.enabled,
+            implementation_enabled = config.implementation.enabled,
             "resolved factory SQLite storage path"
         );
 
@@ -753,16 +961,16 @@ impl TriageRuntime {
             let mut coordinator = SpecCoordinator::new(
                 store.clone(),
                 intake,
-                client,
+                client.clone(),
                 routing,
                 SpecCoordinatorConfig {
-                    forge_host,
-                    repository,
-                    owner_instance,
-                    workflow_dir,
+                    forge_host: forge_host.clone(),
+                    repository: repository.clone(),
+                    owner_instance: owner_instance.clone(),
+                    workflow_dir: workflow_dir.clone(),
                 },
             );
-            if let Some(events) = emitter {
+            if let Some(events) = emitter.clone() {
                 coordinator = coordinator.with_events(events);
             }
             Some(coordinator)
@@ -770,9 +978,28 @@ impl TriageRuntime {
             None
         };
 
+        // Always construct when we have a factory store so reconciliation continues
+        // even if implementation.enabled is false (disabling stops new claims only).
+        let mut implementation_coordinator = ImplementationCoordinator::new(
+            store.clone(),
+            client.clone(),
+            client,
+            ImplementationCoordinatorConfig {
+                forge_host,
+                repository,
+                owner_instance,
+                workflow_dir,
+                storage_path: storage_path.clone(),
+            },
+        );
+        if let Some(events) = emitter {
+            implementation_coordinator = implementation_coordinator.with_events(events);
+        }
+
         Ok(Some(Self {
             coordinator,
             spec_coordinator,
+            implementation_coordinator: Some(implementation_coordinator),
             store,
             sessions,
         }))
@@ -824,6 +1051,36 @@ impl TriageRuntime {
                         event = "spec_poll_failed",
                         error = %error,
                         "spec poll failed; continuing orchestrator loop"
+                    );
+                }
+            }
+        }
+        if let Some(coordinator) = self.implementation_coordinator.as_mut() {
+            match coordinator.poll_once(config).await {
+                Ok(summary) => {
+                    if summary.implementation_enabled
+                        || summary.candidates_seen > 0
+                        || summary.attempts_started > 0
+                    {
+                        tracing::info!(
+                            event = "implementation_poll_completed",
+                            enabled = summary.implementation_enabled,
+                            candidates_seen = summary.candidates_seen,
+                            attempts_started = summary.attempts_started,
+                            attempts_completed = summary.attempts_completed,
+                            attempts_failed = summary.attempts_failed,
+                            stale_skipped = summary.stale_skipped,
+                            preview_published = summary.preview_published,
+                            awaiting_human = summary.awaiting_human,
+                            "implementation poll completed"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "implementation_poll_failed",
+                        error = %error,
+                        "implementation poll failed; continuing orchestrator loop"
                     );
                 }
             }

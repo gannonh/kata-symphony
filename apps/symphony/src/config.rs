@@ -19,6 +19,12 @@ use crate::domain::{
 };
 use crate::error::{Result, SymphonyError};
 use crate::github::auth::{github_token_missing_message, resolve_github_token};
+use crate::implementation::domain::{
+    ImplementationCompletionRoute, ImplementationConfig, ImplementationMode,
+    ImplementationValidationCommand, IMPLEMENTATION_MAX_BUNDLE_BYTES_HARD_CAP,
+    IMPLEMENTATION_VALIDATION_COMMAND_MAX_BYTES, IMPLEMENTATION_VALIDATION_MAX_COMMANDS,
+    IMPLEMENTATION_VALIDATION_NAME_MAX_BYTES,
+};
 use crate::notifications;
 use crate::repo_url::repo_is_remote;
 use crate::spec::domain::{SpecApprovalRoute, SpecConfig, SpecDecisionLabels, SpecPromptsConfig};
@@ -430,6 +436,38 @@ struct RawSpecConfig {
     approval_route: Option<RawRouteMapping>,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawImplementationValidationCommand {
+    name: Option<String>,
+    command: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawImplementationCompletionRoute {
+    state: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawImplementationConfig {
+    enabled: Option<bool>,
+    mode: Option<String>,
+    prompt: Option<String>,
+    repair_prompt: Option<String>,
+    model: Option<String>,
+    max_turns: Option<u32>,
+    invocation_timeout_ms: Option<u64>,
+    max_attempts: Option<u32>,
+    max_validation_cycles: Option<u32>,
+    max_bundle_bytes: Option<u64>,
+    spec_file: Option<String>,
+    validation: Option<Vec<RawImplementationValidationCommand>>,
+    completion_route: Option<RawImplementationCompletionRoute>,
+}
+
 // ── Section extraction helper ─────────────────────────────────────────────────
 
 fn extract_section<T>(normalized: &Value, section: &str) -> Result<T>
@@ -687,6 +725,8 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
     let raw_storage: RawStorageConfig = extract_section(&normalized, "storage")?;
     let raw_triage: RawTriageConfig = extract_section(&normalized, "triage")?;
     let raw_spec: RawSpecConfig = extract_section(&normalized, "spec")?;
+    let raw_implementation: RawImplementationConfig =
+        extract_section(&normalized, "implementation")?;
 
     let defaults = ServiceConfig::default();
     let has_kata_agent_section = normalized.get("kata_agent").is_some();
@@ -1426,6 +1466,87 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
         },
     };
 
+    // ── ImplementationConfig ──────────────────────────────────────────────
+    let impl_defaults = ImplementationConfig::default();
+    let implementation_mode = match raw_implementation
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => impl_defaults.mode,
+        Some("preview") => ImplementationMode::Preview,
+        Some("automatic") => ImplementationMode::Automatic,
+        Some(other) => {
+            return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                "implementation.mode must be 'preview' or 'automatic', got '{other}'"
+            )));
+        }
+    };
+    let validation = raw_implementation
+        .validation
+        .unwrap_or_default()
+        .into_iter()
+        .map(|command| {
+            Ok(ImplementationValidationCommand {
+                name: command
+                    .name
+                    .map(|value| resolve_env(&value))
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_default(),
+                command: command
+                    .command
+                    .map(|value| resolve_env(&value))
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_default(),
+                timeout_ms: command.timeout_ms.unwrap_or(1_800_000),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let completion_route =
+        raw_implementation
+            .completion_route
+            .map(|route| ImplementationCompletionRoute {
+                state: route
+                    .state
+                    .map(|value| resolve_env(&value))
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_default(),
+            });
+    let implementation = ImplementationConfig {
+        enabled: raw_implementation
+            .enabled
+            .unwrap_or(defaults.implementation.enabled),
+        mode: implementation_mode,
+        prompt: config_string(raw_implementation.prompt, &impl_defaults.prompt),
+        repair_prompt: config_string(
+            raw_implementation.repair_prompt,
+            &impl_defaults.repair_prompt,
+        ),
+        model: config_model(raw_implementation.model),
+        max_turns: raw_implementation
+            .max_turns
+            .unwrap_or(defaults.agent.max_turns.max(1)),
+        invocation_timeout_ms: raw_implementation
+            .invocation_timeout_ms
+            .unwrap_or(impl_defaults.invocation_timeout_ms),
+        max_attempts: raw_implementation
+            .max_attempts
+            .unwrap_or(impl_defaults.max_attempts),
+        max_validation_cycles: raw_implementation
+            .max_validation_cycles
+            .unwrap_or(impl_defaults.max_validation_cycles),
+        max_bundle_bytes: raw_implementation
+            .max_bundle_bytes
+            .unwrap_or(impl_defaults.max_bundle_bytes),
+        spec_file: config_string(raw_implementation.spec_file, &impl_defaults.spec_file),
+        validation,
+        completion_route,
+    };
+
     Ok(ServiceConfig {
         tracker,
         polling,
@@ -1444,6 +1565,7 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
         storage,
         triage,
         spec,
+        implementation,
     })
 }
 
@@ -1843,6 +1965,143 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
         }
     }
 
+    if config.implementation.enabled {
+        if tracker_kind != "github" {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "implementation.enabled requires tracker.kind to be 'github' (GitHub Projects v2 only for A3)"
+                    .to_string(),
+            ));
+        }
+
+        if !config.spec.enabled {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "implementation.enabled requires spec.enabled so an A2 approval path exists"
+                    .to_string(),
+            ));
+        }
+
+        for (field, value) in [
+            (
+                "implementation.prompt",
+                config.implementation.prompt.as_str(),
+            ),
+            (
+                "implementation.repair_prompt",
+                config.implementation.repair_prompt.as_str(),
+            ),
+            (
+                "implementation.spec_file",
+                config.implementation.spec_file.as_str(),
+            ),
+        ] {
+            if value.trim().is_empty() {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "{field} must be non-empty when implementation is enabled"
+                )));
+            }
+        }
+
+        for (field, value) in [
+            (
+                "implementation.max_turns",
+                config.implementation.max_turns as u64,
+            ),
+            (
+                "implementation.invocation_timeout_ms",
+                config.implementation.invocation_timeout_ms,
+            ),
+            (
+                "implementation.max_attempts",
+                config.implementation.max_attempts as u64,
+            ),
+            (
+                "implementation.max_validation_cycles",
+                config.implementation.max_validation_cycles as u64,
+            ),
+            (
+                "implementation.max_bundle_bytes",
+                config.implementation.max_bundle_bytes,
+            ),
+        ] {
+            if value == 0 {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "{field} must be greater than 0"
+                )));
+            }
+        }
+
+        if config.implementation.max_bundle_bytes > IMPLEMENTATION_MAX_BUNDLE_BYTES_HARD_CAP {
+            return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                "implementation.max_bundle_bytes must be at most {IMPLEMENTATION_MAX_BUNDLE_BYTES_HARD_CAP} (1 GiB)"
+            )));
+        }
+
+        if config.agent_backend == AgentBackend::Codex && config.implementation.model.is_some() {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "implementation.model is not supported when agent.name is 'codex'".to_string(),
+            ));
+        }
+
+        crate::implementation::artifact::validate_spec_file_path(&config.implementation.spec_file)
+            .map_err(|error| {
+                SymphonyError::InvalidWorkflowConfig(format!(
+                    "implementation.spec_file is invalid: {error}"
+                ))
+            })?;
+
+        let validation = &config.implementation.validation;
+        if validation.is_empty() || validation.len() > IMPLEMENTATION_VALIDATION_MAX_COMMANDS {
+            return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                "implementation.validation must contain 1 to {IMPLEMENTATION_VALIDATION_MAX_COMMANDS} commands when implementation is enabled"
+            )));
+        }
+        let mut seen_names = Vec::new();
+        for (index, command) in validation.iter().enumerate() {
+            if command.name.trim().is_empty()
+                || command.name.len() > IMPLEMENTATION_VALIDATION_NAME_MAX_BYTES
+            {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "implementation.validation[{index}].name must be 1 to {IMPLEMENTATION_VALIDATION_NAME_MAX_BYTES} UTF-8 bytes"
+                )));
+            }
+            if command.command.trim().is_empty()
+                || command.command.len() > IMPLEMENTATION_VALIDATION_COMMAND_MAX_BYTES
+            {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "implementation.validation[{index}].command must be 1 to {IMPLEMENTATION_VALIDATION_COMMAND_MAX_BYTES} UTF-8 bytes"
+                )));
+            }
+            if command.timeout_ms == 0 {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "implementation.validation[{index}].timeout_ms must be greater than 0"
+                )));
+            }
+            let normalized = command.name.trim().to_ascii_lowercase();
+            if seen_names.iter().any(|name: &String| name == &normalized) {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "implementation.validation names must be unique (duplicate '{}')",
+                    command.name.trim()
+                )));
+            }
+            seen_names.push(normalized);
+        }
+
+        if config.implementation.mode == ImplementationMode::Automatic {
+            let state = config
+                .implementation
+                .completion_route
+                .as_ref()
+                .map(|route| route.state.trim())
+                .unwrap_or("");
+            if state.is_empty() {
+                return Err(SymphonyError::InvalidWorkflowConfig(
+                    "implementation.completion_route.state is required when implementation.mode is 'automatic'"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
     Ok(ValidatedServiceConfig(config.clone()))
 }
 // ── Unit tests ────────────────────────────────────────────────────────────────
@@ -2011,5 +2270,120 @@ mod tests {
         let key = ApiKey::new("my-key");
         assert_eq!(&*key, "my-key");
         assert_eq!(key.as_str(), "my-key");
+    }
+
+    fn github_base_yaml() -> String {
+        r#"
+tracker:
+  kind: github
+  api_key: test-token
+  repo_owner: owner
+  repo_name: repo
+  github_project_owner_type: user
+  github_project_number: 1
+agent:
+  name: pi
+  command: pi
+"#
+        .to_string()
+    }
+
+    #[test]
+    fn implementation_defaults_when_section_absent() {
+        let yaml: Value = serde_yaml::from_str(&github_base_yaml()).unwrap();
+        let config = from_workflow(&yaml).unwrap();
+        assert!(!config.implementation.enabled);
+        assert_eq!(config.implementation.mode, ImplementationMode::Preview);
+        assert_eq!(config.implementation.prompt, "prompts/implementation.md");
+        assert!(config.implementation.validation.is_empty());
+    }
+
+    #[test]
+    fn implementation_parses_preview_validation_commands() {
+        let mut yaml = github_base_yaml();
+        yaml.push_str(
+            r#"
+spec:
+  enabled: true
+implementation:
+  enabled: true
+  mode: preview
+  validation:
+    - name: unit
+      command: cargo test
+      timeout_ms: 60000
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        assert!(config.implementation.enabled);
+        assert_eq!(config.implementation.validation.len(), 1);
+        assert_eq!(config.implementation.validation[0].name, "unit");
+        validate(&config).unwrap();
+    }
+
+    #[test]
+    fn implementation_rejects_automatic_without_completion_route() {
+        let mut yaml = github_base_yaml();
+        yaml.push_str(
+            r#"
+spec:
+  enabled: true
+implementation:
+  enabled: true
+  mode: automatic
+  validation:
+    - name: unit
+      command: cargo test
+      timeout_ms: 60000
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("completion_route.state"));
+    }
+
+    #[test]
+    fn implementation_requires_spec_enabled() {
+        let mut yaml = github_base_yaml();
+        yaml.push_str(
+            r#"
+implementation:
+  enabled: true
+  validation:
+    - name: unit
+      command: cargo test
+      timeout_ms: 60000
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("spec.enabled"));
+    }
+
+    #[test]
+    fn implementation_rejects_duplicate_validation_names() {
+        let mut yaml = github_base_yaml();
+        yaml.push_str(
+            r#"
+spec:
+  enabled: true
+implementation:
+  enabled: true
+  validation:
+    - name: unit
+      command: cargo test
+      timeout_ms: 60000
+    - name: UNIT
+      command: cargo clippy
+      timeout_ms: 60000
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("unique"));
     }
 }

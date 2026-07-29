@@ -11,7 +11,7 @@ timestamp: 2026-07-27T16:30:13Z
 
 ## Status
 
-Active — **Next** factory slice after A1 GitHub path completed (PR1–PR3, including [#599](https://github.com/gannonh/kata-symphony/pull/599)) and A2 live UAT accepted. Design ready for PR1 implementation/validation preview; A2 approved-artifact pin is the intake boundary.
+Active — PR1 implementation/validation preview **implemented** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](2026-07-29-a3-pr1-build-report.md), [verify](2026-07-29-a3-pr1-verify-report.md)); review threads resolved. **Next:** PR2 deterministic draft-PR publication and Agent Review handoff.
 
 ## Goal
 

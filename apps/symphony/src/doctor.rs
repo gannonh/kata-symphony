@@ -1319,6 +1319,121 @@ pub fn check_spec(config: &ServiceConfig, workflow_path: &Path) -> Vec<DoctorChe
     results
 }
 
+pub fn check_implementation(
+    config: &ServiceConfig,
+    workflow_path: &Path,
+) -> Vec<DoctorCheckResult> {
+    if !config.implementation.enabled {
+        return vec![DoctorCheckResult::skipped(
+            "Implementation",
+            "implementation.enabled is false — implementation checks skipped",
+        )];
+    }
+    let workflow_dir = workflow_path.parent().unwrap_or(Path::new("."));
+    let mut results = Vec::new();
+    for (kind, configured) in [
+        ("Prompt", config.implementation.prompt.as_str()),
+        (
+            "Repair Prompt",
+            config.implementation.repair_prompt.as_str(),
+        ),
+    ] {
+        let path = resolve_prompt_path(workflow_dir, configured);
+        if path.is_file() {
+            results.push(DoctorCheckResult::pass(
+                format!("Implementation {kind}"),
+                format!("Resolved {}", path.display()),
+            ));
+        } else {
+            results.push(DoctorCheckResult::error(
+                format!("Implementation {kind}"),
+                format!("Missing implementation prompt {}", path.display()),
+            ));
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut unique = true;
+    for command in &config.implementation.validation {
+        let key = command.name.trim().to_ascii_lowercase();
+        if !seen.insert(key) {
+            unique = false;
+            break;
+        }
+    }
+    if config.implementation.validation.is_empty() {
+        results.push(DoctorCheckResult::error(
+            "Implementation Validation",
+            "implementation.validation must list 1–20 uniquely named commands",
+        ));
+    } else if !unique {
+        results.push(DoctorCheckResult::error(
+            "Implementation Validation",
+            "implementation.validation command names must be unique",
+        ));
+    } else {
+        results.push(DoctorCheckResult::pass(
+            "Implementation Validation",
+            format!(
+                "{} validation command(s) configured",
+                config.implementation.validation.len()
+            ),
+        ));
+    }
+
+    if let Some(storage_path) = config
+        .storage
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        let artifact_dir = format!("{storage_path}.artifacts");
+        match std::fs::create_dir_all(&artifact_dir) {
+            Ok(()) => {
+                let probe =
+                    std::path::Path::new(&artifact_dir).join(".symphony-doctor-write-probe");
+                match std::fs::write(&probe, b"ok") {
+                    Ok(()) => {
+                        let _ = std::fs::remove_file(&probe);
+                        results.push(DoctorCheckResult::pass(
+                            "Implementation Artifacts Dir",
+                            format!("Writable {}", artifact_dir),
+                        ));
+                    }
+                    Err(error) => results.push(DoctorCheckResult::error(
+                        "Implementation Artifacts Dir",
+                        format!("Cannot write to {artifact_dir}: {error}"),
+                    )),
+                }
+            }
+            Err(error) => results.push(DoctorCheckResult::error(
+                "Implementation Artifacts Dir",
+                format!("Cannot create {artifact_dir}: {error}"),
+            )),
+        }
+    } else {
+        results.push(DoctorCheckResult::error(
+            "Implementation Artifacts Dir",
+            "storage.path is required to resolve the implementation artifacts directory",
+        ));
+    }
+
+    if !config.spec.enabled {
+        results.push(DoctorCheckResult::error(
+            "Implementation Spec Composition",
+            "implementation.enabled requires spec.enabled (A2 approval path)",
+        ));
+    } else {
+        results.push(DoctorCheckResult::pass(
+            "Implementation Spec Composition",
+            "Spec stage is enabled for A2 approval intake",
+        ));
+    }
+
+    results
+}
+
 pub async fn check_triage_github(config: &ServiceConfig) -> Vec<DoctorCheckResult> {
     let mut results = Vec::new();
 
