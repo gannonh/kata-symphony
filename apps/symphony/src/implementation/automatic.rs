@@ -2,9 +2,7 @@
 
 use crate::error::{Result, SymphonyError};
 use crate::github::client::GithubPullRequest;
-use crate::implementation::branch::{
-    publish_branch, BranchPublishRequest, BRANCH_PUSHED_STEP,
-};
+use crate::implementation::branch::{publish_branch, BranchPublishRequest, BRANCH_PUSHED_STEP};
 use crate::implementation::bundle::artifacts_dir;
 use crate::implementation::comment::{
     extract_implementation_pr_intent_id, pr_marker, render_draft_pr_body,
@@ -1426,8 +1424,7 @@ mod tests {
         });
 
         let intent = reload_intent(&store, &intent.intent_id).unwrap();
-        let publisher =
-            AutomaticImplementationPublisher::new(comments, routing, pulls.clone());
+        let publisher = AutomaticImplementationPublisher::new(comments, routing, pulls.clone());
         let draft = publisher
             .publish_automatic(
                 &store,
@@ -1511,8 +1508,7 @@ mod tests {
         pulls.prs.lock().unwrap()[0].state = "closed".into();
 
         let intent = reload_intent(&store, &intent.intent_id).unwrap();
-        let publisher =
-            AutomaticImplementationPublisher::new(comments, routing.clone(), pulls);
+        let publisher = AutomaticImplementationPublisher::new(comments, routing.clone(), pulls);
         let err = publisher
             .publish_automatic(
                 &store,
