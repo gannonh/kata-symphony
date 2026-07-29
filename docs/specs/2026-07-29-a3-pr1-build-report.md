@@ -22,7 +22,7 @@ Implemented — automated gates Pass; live GitHub/Docker UAT residual (see [veri
 ## Git range
 
 - Base: `54393d2b` (`main`)
-- Head: working tree at report time (branch `cursor/a3-implementation-pr1-4eda`)
+- Head: `440447f1` (`cursor/a3-implementation-pr1-4eda`)
 
 ## Tasks completed
 
