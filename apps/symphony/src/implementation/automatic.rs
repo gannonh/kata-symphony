@@ -329,10 +329,14 @@ where
             .completed_steps
             .iter()
             .any(|step| step == ROUTE_APPLIED_STEP);
+        let pr_verified = intent
+            .completed_steps
+            .iter()
+            .any(|step| step == PR_VERIFIED_STEP);
         let draft = if let Some(existing) =
             store.get_draft_pr_for_implementation_artifact(&request.artifact.artifact_id)?
         {
-            if !route_applied {
+            if !route_applied || !pr_verified {
                 self.reverify_persisted_draft_pr(
                     store,
                     &intent,
@@ -342,6 +346,23 @@ where
                     &desired_head,
                 )
                 .await?;
+            }
+            if !pr_verified {
+                let projection = serde_json::json!({
+                    "step": PR_VERIFIED_STEP,
+                    "pr_number": existing.number,
+                    "pr_url": existing.url,
+                    "head": existing.head,
+                    "base": existing.base,
+                    "head_sha": existing.head_sha,
+                });
+                store.record_implementation_publication_step(
+                    &intent.intent_id,
+                    PR_VERIFIED_STEP,
+                    PublicationStatus::Pending,
+                    &projection,
+                )?;
+                intent = reload_intent(store, &intent.intent_id)?;
             }
             existing
         } else {
@@ -445,7 +466,17 @@ where
                     request.max_pages,
                 )
                 .await?;
-            store.complete_implementation_publication(&intent.intent_id, COMMENT_FINAL_STEP)?;
+            let projection = serde_json::json!({
+                "step": COMMENT_FINAL_STEP,
+                "pr_number": draft.number,
+                "pr_url": draft.url,
+            });
+            store.record_implementation_publication_step(
+                &intent.intent_id,
+                COMMENT_FINAL_STEP,
+                PublicationStatus::Pending,
+                &projection,
+            )?;
         }
 
         Ok(draft)
@@ -1288,14 +1319,15 @@ mod tests {
             routing.state.lock().unwrap().as_deref(),
             Some("Agent Review")
         );
-        assert_eq!(
-            store
-                .get_implementation_publication_intent(&intent.intent_id)
-                .unwrap()
-                .unwrap()
-                .status,
-            PublicationStatus::Applied
-        );
+        let final_intent = store
+            .get_implementation_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(final_intent.status, PublicationStatus::Pending);
+        assert!(final_intent
+            .completed_steps
+            .iter()
+            .any(|step| step == COMMENT_FINAL_STEP));
     }
 
     #[tokio::test]
@@ -1375,14 +1407,15 @@ mod tests {
             .unwrap();
         assert_eq!(draft.number, 55);
         assert_eq!(*pulls.create_calls.lock().unwrap(), 0);
-        assert_eq!(
-            store
-                .get_implementation_publication_intent(&intent.intent_id)
-                .unwrap()
-                .unwrap()
-                .status,
-            PublicationStatus::Applied
-        );
+        let final_intent = store
+            .get_implementation_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(final_intent.status, PublicationStatus::Pending);
+        assert!(final_intent
+            .completed_steps
+            .iter()
+            .any(|step| step == COMMENT_FINAL_STEP));
     }
 
     #[tokio::test]
@@ -1531,6 +1564,89 @@ mod tests {
         assert_eq!(
             reload_intent(&store, &intent.intent_id).unwrap().status,
             PublicationStatus::Conflict
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_draft_pr_recovery_records_missing_verified_step() {
+        let (_dir, store) = open_store();
+        let comments = FakeComments::new("symphony-bot");
+        let routing = FakeRouting::new(vec!["ready-for-agent".into()]);
+        let pulls = FakePulls::new();
+        let (intent, artifact, bundle, manifest) = setup_automatic_fixture(&store).await;
+        skip_branch(&store, &intent.intent_id, &bundle.head_commit);
+
+        let live_pr = GithubPullRequest {
+            number: 55,
+            html_url: "https://github.com/acme/repo/pull/55".into(),
+            draft: true,
+            state: "open".into(),
+            title: "owned".into(),
+            head: GithubPullRequestRef {
+                ref_name: "symphony/_42".into(),
+                sha: bundle.head_commit.clone(),
+            },
+            base: GithubPullRequestRef {
+                ref_name: "main".into(),
+                sha: bundle.base_commit.clone(),
+            },
+            user: None,
+            body: Some(format!("{}\n", pr_marker(&intent.intent_id))),
+        };
+        pulls.prs.lock().unwrap().push(live_pr.clone());
+        store
+            .store_draft_pr_artifact(StoreDraftPrArtifactRequest {
+                run_id: artifact.run_id.clone(),
+                implementation_artifact_id: artifact.artifact_id.clone(),
+                intent_id: intent.intent_id.clone(),
+                number: live_pr.number,
+                url: live_pr.html_url,
+                draft: live_pr.draft,
+                head: live_pr.head.ref_name,
+                base: live_pr.base.ref_name,
+                head_sha: live_pr.head.sha,
+                marker: pr_marker(&intent.intent_id),
+            })
+            .unwrap();
+
+        let publisher =
+            AutomaticImplementationPublisher::new(comments, routing.clone(), pulls.clone());
+        publisher
+            .publish_automatic(
+                &store,
+                AutomaticPublishRequest {
+                    intent: &intent,
+                    issue_number: 42,
+                    issue_title: "Retry",
+                    current_issue_revision: "rev",
+                    run_id: &artifact.run_id,
+                    stage_run_id: &artifact.stage_run_id,
+                    artifact: &artifact,
+                    bundle: &bundle,
+                    manifest: &manifest,
+                    validation: &[],
+                    branch: "symphony/_42",
+                    base_branch: "main",
+                    remote_url: "/tmp/unused",
+                    github_token: None,
+                    repo_owner: "acme",
+                    approval_route_label: "ready-for-agent",
+                    completion_route_state: "Agent Review",
+                    storage_path: Path::new("/tmp/unused-db"),
+                    max_pages: 2,
+                },
+            )
+            .await
+            .unwrap();
+
+        let recovered = reload_intent(&store, &intent.intent_id).unwrap();
+        assert!(recovered
+            .completed_steps
+            .iter()
+            .any(|step| step == PR_VERIFIED_STEP));
+        assert_eq!(
+            routing.state.lock().unwrap().as_deref(),
+            Some("Agent Review")
         );
     }
 
