@@ -1431,6 +1431,57 @@ pub fn check_implementation(
         ));
     }
 
+    if config.implementation.mode == crate::implementation::domain::ImplementationMode::Automatic {
+        match config
+            .implementation
+            .completion_route
+            .as_ref()
+            .map(|route| route.state.trim())
+            .filter(|state| !state.is_empty())
+        {
+            Some(state) => results.push(DoctorCheckResult::pass(
+                "Implementation Completion Route",
+                format!("completion_route.state={state}"),
+            )),
+            None => results.push(DoctorCheckResult::error(
+                "Implementation Completion Route",
+                "implementation.completion_route.state is required when mode is automatic",
+            )),
+        }
+        match (
+            config
+                .tracker
+                .repo_owner
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            config
+                .tracker
+                .repo_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ) {
+            (Some(owner), Some(repo)) => {
+                let forge_host = crate::triage::storage_path::forge_host_from_endpoint(
+                    &config.tracker.endpoint,
+                );
+                results.push(DoctorCheckResult::pass(
+                    "Implementation Publication Repository",
+                    format!("Pinned publish target https://{forge_host}/{owner}/{repo}.git"),
+                ));
+            }
+            _ => results.push(DoctorCheckResult::error(
+                "Implementation Publication Repository",
+                "tracker.repo_owner and tracker.repo_name are required when implementation.mode is automatic",
+            )),
+        }
+        results.push(DoctorCheckResult::warning(
+            "Implementation Draft PR Permissions",
+            "GitHub token presence is validated, but contents:write and pull-request creation must be proven by live UAT",
+        ));
+    }
+
     results
 }
 

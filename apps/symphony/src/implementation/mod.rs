@@ -1,4 +1,6 @@
 pub mod artifact;
+pub mod automatic;
+pub mod branch;
 pub mod bundle;
 pub mod comment;
 pub mod coordinator;

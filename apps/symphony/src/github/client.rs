@@ -107,6 +107,29 @@ pub struct GithubIssueComment {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct GithubPullRequestRef {
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    pub sha: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GithubPullRequest {
+    pub number: u64,
+    pub html_url: String,
+    #[serde(default)]
+    pub draft: bool,
+    pub state: String,
+    pub title: String,
+    pub head: GithubPullRequestRef,
+    pub base: GithubPullRequestRef,
+    #[serde(default)]
+    pub user: Option<GithubUser>,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct GithubClient {
     pub http_client: reqwest::Client,
@@ -423,6 +446,56 @@ impl GithubClient {
         }
 
         self.paginated_get(url.as_ref()).await
+    }
+
+    /// List pull requests. `head` is `owner:branch` when set (GitHub filter form).
+    pub async fn list_pull_requests(
+        &self,
+        state: &str,
+        head: Option<&str>,
+        base: Option<&str>,
+        max_pages: u32,
+    ) -> Result<Vec<GithubPullRequest>> {
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/repos/{}/{}/pulls",
+            self.base_url, self.repo_owner, self.repo_name
+        ))
+        .map_err(|err| SymphonyError::GithubApiRequest(format!("invalid pulls URL: {err}")))?;
+
+        {
+            let mut query = url.query_pairs_mut();
+            query.append_pair("state", state);
+            query.append_pair("per_page", "100");
+            if let Some(head) = head {
+                query.append_pair("head", head);
+            }
+            if let Some(base) = base {
+                query.append_pair("base", base);
+            }
+        }
+
+        self.paginated_get_capped(url.as_ref(), max_pages, "pulls")
+            .await
+    }
+
+    /// Create a pull request. Callers that need draft publication pass `draft: true`.
+    pub async fn create_pull_request(
+        &self,
+        title: &str,
+        body: &str,
+        head: &str,
+        base: &str,
+        draft: bool,
+    ) -> Result<GithubPullRequest> {
+        let path = format!("/repos/{}/{}/pulls", self.repo_owner, self.repo_name);
+        let payload = serde_json::json!({
+            "title": title,
+            "body": body,
+            "head": head,
+            "base": base,
+            "draft": draft,
+        });
+        self.request_json(Method::POST, &path, Some(&payload)).await
     }
 
     async fn request_json<T: DeserializeOwned>(

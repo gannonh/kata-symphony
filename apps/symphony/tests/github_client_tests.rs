@@ -341,3 +341,95 @@ async fn assert_error_status(status: usize, message: &str) {
         other => panic!("expected GithubApiStatus error, got: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn test_list_pull_requests_filters_head_base_state() {
+    let mut server = Server::new_async().await;
+    let client = test_client(&server);
+
+    let mock = server
+        .mock("GET", "/repos/kata-sh/kata-mono/pulls")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("state".into(), "all".into()),
+            Matcher::UrlEncoded("head".into(), "kata-sh:symphony/42".into()),
+            Matcher::UrlEncoded("base".into(), "main".into()),
+            Matcher::UrlEncoded("per_page".into(), "100".into()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "number": 9,
+                "html_url": "https://github.com/kata-sh/kata-mono/pull/9",
+                "draft": true,
+                "state": "open",
+                "title": "impl",
+                "head": { "ref": "symphony/42", "sha": "abc123" },
+                "base": { "ref": "main", "sha": "def456" },
+                "user": { "login": "bot" },
+                "body": "<!-- symphony:implementation-pr:intent -->"
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let prs = client
+        .list_pull_requests("all", Some("kata-sh:symphony/42"), Some("main"), 2)
+        .await
+        .expect("list_pull_requests");
+    mock.assert_async().await;
+    assert_eq!(prs.len(), 1);
+    assert_eq!(prs[0].number, 9);
+    assert!(prs[0].draft);
+    assert_eq!(prs[0].head.ref_name, "symphony/42");
+    assert_eq!(prs[0].head.sha, "abc123");
+}
+
+#[tokio::test]
+async fn test_create_pull_request_posts_draft() {
+    let mut server = Server::new_async().await;
+    let client = test_client(&server);
+
+    let mock = server
+        .mock("POST", "/repos/kata-sh/kata-mono/pulls")
+        .match_header("content-type", Matcher::Regex("application/json".into()))
+        .match_body(Matcher::PartialJson(json!({
+            "title": "Symphony implementation",
+            "body": "Closes #1",
+            "head": "symphony/1",
+            "base": "main",
+            "draft": true
+        })))
+        .with_status(201)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "number": 11,
+                "html_url": "https://github.com/kata-sh/kata-mono/pull/11",
+                "draft": true,
+                "state": "open",
+                "title": "Symphony implementation",
+                "head": { "ref": "symphony/1", "sha": "aaa" },
+                "base": { "ref": "main", "sha": "bbb" },
+                "body": "Closes #1"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let pr = client
+        .create_pull_request(
+            "Symphony implementation",
+            "Closes #1",
+            "symphony/1",
+            "main",
+            true,
+        )
+        .await
+        .expect("create_pull_request");
+    mock.assert_async().await;
+    assert_eq!(pr.number, 11);
+    assert!(pr.draft);
+}

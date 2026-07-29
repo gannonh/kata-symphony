@@ -5,16 +5,21 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::domain::{AgentBackend, ServiceConfig};
 use crate::error::{Result, SymphonyError};
+use crate::github::auth::resolve_github_token;
 use crate::github::client::GithubClient;
 use crate::implementation::artifact::{
     expand_spec_file_path, is_spec_gap, parse_and_validate_manifest, render_approved_spec,
 };
+use crate::implementation::automatic::{
+    resolve_publication_remote, AutomaticImplementationPublisher, AutomaticPublishRequest,
+};
+use crate::implementation::branch::branch_name_for_issue;
 use crate::implementation::bundle::{
     artifacts_dir, cleanup_incomplete_temps, create_result_bundle, store_blob_atomic, BlobSource,
 };
@@ -25,7 +30,7 @@ use crate::implementation::domain::{
     IMPLEMENTATION_STAGE_NAME,
 };
 use crate::implementation::publisher::{
-    DiagnosticPublishRequest, ImplementationPublisher, PreviewPublishRequest,
+    DiagnosticPublishRequest, ImplementationPublisher, PreviewPublishRequest, COMMENT_FINAL_STEP,
 };
 use crate::implementation::runner::{
     assess_postconditions, blob_sha_of_file, resolve_base_commit, ImplementationHarness,
@@ -35,9 +40,9 @@ use crate::implementation::runtime::implementation_configuration_revision;
 use crate::implementation::validation::ValidationExecutor;
 use crate::spec::domain::SpecArtifactRecord;
 use crate::triage::coordinator::EventEmitter;
-use crate::triage::domain::{FactoryError, FactoryEventRecord, StageUsage};
+use crate::triage::domain::{FactoryError, FactoryEventRecord, PublicationStatus, StageUsage};
 use crate::triage::intake::{IntakeComment, IntakeMilestone, TriageIntakeIssue};
-use crate::triage::publisher::TriageCommentPort;
+use crate::triage::publisher::{TriageCommentPort, TriageRoutingPort};
 use crate::triage::runner::{effective_pi_model, TriageHarness, TriageIssueIdentity};
 use crate::triage::runtime::SharedFactoryStore;
 use crate::triage::store::{
@@ -45,6 +50,20 @@ use crate::triage::store::{
     StoreBundleArtifactRequest, StoreImplementationArtifactRequest, StoreImplementationTurnRequest,
     StoreValidationCycleRequest, UpsertImplementationStateRequest,
 };
+
+/// Reconcile attempts an automatic publication intent may consume before it is
+/// terminalized as `Blocked`. Every poll retries each pending intent, so an
+/// unreachable or misconfigured publication target would otherwise issue forge
+/// calls and append event rows forever without ever surfacing to an operator.
+const MAX_AUTOMATIC_PUBLICATION_RETRIES: u32 = 8;
+
+/// First backoff interval between automatic publication reconcile attempts.
+const AUTOMATIC_PUBLICATION_BACKOFF_BASE_SECS: i64 = 30;
+
+/// Ceiling for a single backoff interval. With the base and ceiling above, the
+/// retry budget spans roughly an hour, so transient forge outages recover
+/// without exhausting it.
+const AUTOMATIC_PUBLICATION_BACKOFF_MAX_SECS: i64 = 1_800;
 
 #[derive(Debug, Clone)]
 pub struct ImplementationCoordinatorConfig {
@@ -64,6 +83,8 @@ pub struct ImplementationPollSummary {
     pub attempts_failed: u32,
     pub stale_skipped: u32,
     pub preview_published: u32,
+    pub automatic_published: u32,
+    pub automatic_pending: u32,
     pub awaiting_human: u32,
 }
 
@@ -134,6 +155,8 @@ pub struct ImplementationCoordinator<C, I, H> {
     harness: H,
     config: ImplementationCoordinatorConfig,
     events: Option<Arc<dyn EventEmitter>>,
+    routing: Option<Arc<dyn TriageRoutingPort>>,
+    pulls: Option<Arc<dyn crate::implementation::automatic::ImplementationPullRequestPort>>,
 }
 
 impl<C, I> ImplementationCoordinator<C, I, LiveImplementationHarness>
@@ -154,6 +177,8 @@ where
             harness: LiveImplementationHarness,
             config,
             events: None,
+            routing: None,
+            pulls: None,
         }
     }
 }
@@ -178,11 +203,26 @@ where
             harness,
             config,
             events: None,
+            routing: None,
+            pulls: None,
         }
     }
 
     pub fn with_events(mut self, events: Arc<dyn EventEmitter>) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    pub fn with_routing(mut self, routing: impl TriageRoutingPort + 'static) -> Self {
+        self.routing = Some(Arc::new(routing));
+        self
+    }
+
+    pub fn with_pulls(
+        mut self,
+        pulls: impl crate::implementation::automatic::ImplementationPullRequestPort + 'static,
+    ) -> Self {
+        self.pulls = Some(Arc::new(pulls));
         self
     }
 
@@ -229,10 +269,20 @@ where
                 )
                 .await
             {
-                Ok(CandidateOutcome::StartedCompleted) => {
+                Ok(CandidateOutcome::StartedPreview) => {
                     summary.attempts_started += 1;
                     summary.attempts_completed += 1;
                     summary.preview_published += 1;
+                }
+                Ok(CandidateOutcome::StartedAutomaticPublished) => {
+                    summary.attempts_started += 1;
+                    summary.attempts_completed += 1;
+                    summary.automatic_published += 1;
+                }
+                Ok(CandidateOutcome::StartedAutomaticPending) => {
+                    summary.attempts_started += 1;
+                    summary.attempts_completed += 1;
+                    summary.automatic_pending += 1;
                 }
                 Ok(CandidateOutcome::StartedAwaitingHuman) => {
                     summary.attempts_started += 1;
@@ -266,7 +316,90 @@ where
         for intent in pending {
             match intent.kind {
                 ImplementationPublicationKind::Automatic => {
-                    publisher.defer_automatic_publication(&intent)?;
+                    if intent.retry_count >= MAX_AUTOMATIC_PUBLICATION_RETRIES {
+                        let failure = FactoryError::new(
+                            "publication_retry_exhausted",
+                            "implementation_publication",
+                            format!(
+                                "automatic publication exhausted {} reconcile attempts; last error: {}",
+                                MAX_AUTOMATIC_PUBLICATION_RETRIES,
+                                intent
+                                    .last_error
+                                    .as_ref()
+                                    .map(|last| last.remediation.as_str())
+                                    .unwrap_or("unknown"),
+                            ),
+                            false,
+                            intent.completed_steps.last().cloned(),
+                        );
+                        self.store.set_implementation_publication_error(
+                            &intent.intent_id,
+                            PublicationStatus::Blocked,
+                            failure.clone(),
+                        )?;
+                        self.record_event(
+                            Some(&intent.run_id),
+                            None,
+                            "implementation_publication_blocked",
+                            serde_json::json!({
+                                "intent_id": intent.intent_id,
+                                "retry_count": intent.retry_count,
+                                "error": failure,
+                            }),
+                        )?;
+                        tracing::warn!(
+                            event = "implementation_automatic_publication_retry_exhausted",
+                            intent_id = %intent.intent_id,
+                            retry_count = intent.retry_count,
+                            "automatic publication blocked after exhausting retries"
+                        );
+                        continue;
+                    }
+                    if !automatic_retry_ready(intent.retry_count, intent.updated_at, Utc::now()) {
+                        continue;
+                    }
+                    if let Err(error) = self.reconcile_automatic_publication(service, &intent).await
+                    {
+                        let error_message = error.to_string();
+                        let latest = self
+                            .store
+                            .get_implementation_publication_intent(&intent.intent_id)?;
+                        if let Some(latest) = latest.filter(|latest| {
+                            latest.status == PublicationStatus::Pending
+                                && !latest
+                                    .last_error
+                                    .as_ref()
+                                    .is_some_and(|last| already_recorded(last, &error_message))
+                        }) {
+                            let failure = FactoryError::new(
+                                "publication_retryable",
+                                "implementation_publication",
+                                error_message,
+                                true,
+                                latest.completed_steps.last().cloned(),
+                            );
+                            self.store.set_implementation_publication_error(
+                                &intent.intent_id,
+                                PublicationStatus::Pending,
+                                failure.clone(),
+                            )?;
+                            self.record_event(
+                                Some(&intent.run_id),
+                                None,
+                                "implementation_publication_blocked",
+                                serde_json::json!({
+                                    "intent_id": intent.intent_id,
+                                    "error": failure,
+                                }),
+                            )?;
+                        }
+                        tracing::warn!(
+                            event = "implementation_automatic_publication_failed",
+                            intent_id = %intent.intent_id,
+                            error = %error,
+                            "automatic publication reconcile failed"
+                        );
+                    }
                 }
                 ImplementationPublicationKind::Preview
                 | ImplementationPublicationKind::Diagnostic => {
@@ -339,6 +472,180 @@ where
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn reconcile_automatic_publication(
+        &self,
+        service: &ServiceConfig,
+        intent: &crate::implementation::domain::ImplementationPublicationIntent,
+    ) -> Result<()> {
+        let Some(routing) = self.routing.as_ref() else {
+            return Err(SymphonyError::TriageError(
+                "automatic publication requires TriageRoutingPort".into(),
+            ));
+        };
+        let Some(artifact_id) = intent.artifact_id.as_deref() else {
+            return Err(SymphonyError::TriageError(
+                "automatic publication missing artifact_id".into(),
+            ));
+        };
+        let Some(artifact) = self.store.get_implementation_artifact(artifact_id)? else {
+            return Err(SymphonyError::TriageError(format!(
+                "implementation artifact {artifact_id} missing"
+            )));
+        };
+        let Some(state) = self.store.get_implementation_state(&intent.run_id)? else {
+            return Err(SymphonyError::TriageError(
+                "implementation run state missing".into(),
+            ));
+        };
+        let Some(bundle_id) = state.bundle_artifact_id.as_deref() else {
+            return Err(SymphonyError::TriageError(
+                "automatic publication missing bundle artifact".into(),
+            ));
+        };
+        let Some(bundle) = self.store.get_bundle_artifact(bundle_id)? else {
+            return Err(SymphonyError::TriageError(format!(
+                "bundle artifact {bundle_id} missing"
+            )));
+        };
+        let issue_id = {
+            let run = self.store.get_run_by_id(&intent.run_id)?.ok_or_else(|| {
+                SymphonyError::StorageError(format!("run {} missing", intent.run_id))
+            })?;
+            run.issue_id
+        };
+        let issue = self.issues.fetch_issue(&issue_id).await?;
+        let repo_owner = required_desired_effect(&intent.desired_effects, "repo_owner")?;
+        let repo_name = required_desired_effect(&intent.desired_effects, "repo_name")?;
+        let active_repo_owner = service
+            .tracker
+            .repo_owner
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| SymphonyError::TriageError("tracker.repo_owner required".into()))?;
+        let active_repo_name = service
+            .tracker
+            .repo_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| SymphonyError::TriageError("tracker.repo_name required".into()))?;
+        if active_repo_owner != repo_owner || active_repo_name != repo_name {
+            return Err(SymphonyError::TriageError(format!(
+                "automatic publication repository drift: pinned={repo_owner}/{repo_name} configured={active_repo_owner}/{active_repo_name}"
+            )));
+        }
+        let publication_branch =
+            required_desired_effect(&intent.desired_effects, "publication_branch")?;
+        let base_branch = required_desired_effect(&intent.desired_effects, "base_branch")?;
+        let approval_label =
+            required_desired_effect(&intent.desired_effects, "approval_route_label")?;
+        let completion_state =
+            required_desired_effect(&intent.desired_effects, "completion_route_state")?;
+        let remote_url = resolve_publication_remote(
+            &intent.desired_effects,
+            &self.config.forge_host,
+            repo_owner,
+            repo_name,
+        )?;
+        let github_token = resolve_github_token(&service.tracker)
+            .ok_or(SymphonyError::MissingGithubApiToken)?
+            .token;
+        let validation = last_validation_results(&self.store, &artifact.stage_run_id)?;
+        let publisher_login = self.comments.authenticated_login().await?;
+        let current_revision = implementation_issue_revision(&issue, service, &publisher_login);
+
+        let Some(pulls) = self.pulls.as_ref() else {
+            return Err(SymphonyError::TriageError(
+                "automatic publication requires ImplementationPullRequestPort".into(),
+            ));
+        };
+
+        self.record_event(
+            Some(&intent.run_id),
+            Some(&artifact.stage_run_id),
+            "implementation_publication_started",
+            serde_json::json!({
+                "intent_id": intent.intent_id,
+                "artifact_id": artifact.artifact_id,
+                "bundle_id": bundle.artifact_id,
+            }),
+        )?;
+
+        let publisher = AutomaticImplementationPublisher::new(
+            self.comments.clone(),
+            routing.clone(),
+            pulls.clone(),
+        );
+        let draft = publisher
+            .publish_automatic(
+                &self.store,
+                AutomaticPublishRequest {
+                    intent,
+                    issue_number: issue.issue_number,
+                    issue_title: &issue.title,
+                    current_issue_revision: &current_revision,
+                    run_id: &intent.run_id,
+                    stage_run_id: &artifact.stage_run_id,
+                    artifact: &artifact,
+                    bundle: &bundle,
+                    manifest: &artifact.manifest,
+                    validation: &validation,
+                    branch: publication_branch,
+                    base_branch,
+                    remote_url: &remote_url,
+                    github_token: Some(&github_token),
+                    repo_owner,
+                    approval_route_label: approval_label,
+                    completion_route_state: completion_state,
+                    storage_path: &self.config.storage_path,
+                    max_pages: service
+                        .triage
+                        .max_intake_pages
+                        .max(service.spec.max_intake_pages),
+                },
+            )
+            .await?;
+
+        self.record_event(
+            Some(&intent.run_id),
+            Some(&artifact.stage_run_id),
+            "implementation_pr_created",
+            serde_json::json!({
+                "intent_id": intent.intent_id,
+                "pr_number": draft.number,
+                "pr_url": draft.url,
+            }),
+        )?;
+        self.record_event(
+            Some(&intent.run_id),
+            Some(&artifact.stage_run_id),
+            "implementation_route_applied",
+            serde_json::json!({
+                "intent_id": intent.intent_id,
+                "completion_state": completion_state,
+            }),
+        )?;
+        self.record_event(
+            Some(&intent.run_id),
+            Some(&artifact.stage_run_id),
+            "implementation_completed",
+            serde_json::json!({
+                "intent_id": intent.intent_id,
+                "pr_number": draft.number,
+                "pr_url": draft.url,
+            }),
+        )?;
+        self.store.set_implementation_decision(
+            &intent.run_id,
+            ImplementationDecision::Published,
+            None,
+        )?;
+        self.store
+            .complete_implementation_publication(&intent.intent_id, COMMENT_FINAL_STEP)?;
         Ok(())
     }
 
@@ -523,7 +830,11 @@ where
             )
             .await
         {
-            Ok(AttemptResult::Previewed) => Ok(CandidateOutcome::StartedCompleted),
+            Ok(AttemptResult::Previewed) => Ok(CandidateOutcome::StartedPreview),
+            Ok(AttemptResult::AutomaticPublished) => {
+                Ok(CandidateOutcome::StartedAutomaticPublished)
+            }
+            Ok(AttemptResult::AutomaticPending) => Ok(CandidateOutcome::StartedAutomaticPending),
             Ok(AttemptResult::AwaitingHuman) => Ok(CandidateOutcome::StartedAwaitingHuman),
             Ok(AttemptResult::Failed) => Ok(CandidateOutcome::StartedFailed),
             Err(error) => {
@@ -975,55 +1286,108 @@ where
             })?;
 
         let _ = bundle;
-        let _ =
-            self.store
-                .set_implementation_decision(run_id, ImplementationDecision::Previewed, None);
+        let decision = if service.implementation.mode == ImplementationMode::Automatic {
+            ImplementationDecision::Pending
+        } else {
+            ImplementationDecision::Previewed
+        };
+        let _ = self
+            .store
+            .set_implementation_decision(run_id, decision, None);
 
-        // PR1: always publish preview (even if mode=automatic — automatic deferred).
+        let kind = if service.implementation.mode == ImplementationMode::Automatic {
+            ImplementationPublicationKind::Automatic
+        } else {
+            ImplementationPublicationKind::Preview
+        };
+        let mut desired_effects = serde_json::json!({
+            "mode": service.implementation.mode.as_str(),
+            "changed_paths": assessment.changed_paths,
+        });
+        if kind == ImplementationPublicationKind::Automatic {
+            let repo_owner = service
+                .tracker
+                .repo_owner
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| SymphonyError::TriageError("tracker.repo_owner required".into()))?;
+            let repo_name = service
+                .tracker
+                .repo_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| SymphonyError::TriageError("tracker.repo_name required".into()))?;
+            let base_branch = service.workspace.base_branch.as_deref().unwrap_or("main");
+            let publication_branch =
+                branch_name_for_issue(&service.workspace.branch_prefix, &issue.identifier);
+            let remote_url = intent_remote_url(&self.config.forge_host, repo_owner, repo_name)?;
+            let completion_state = automatic_completion_state(service)?;
+            desired_effects = serde_json::json!({
+                "mode": service.implementation.mode.as_str(),
+                "changed_paths": assessment.changed_paths,
+                "approval_route_label": service.spec.approval_route.label,
+                "completion_route_state": completion_state,
+                "base_branch": base_branch,
+                "publication_branch": publication_branch,
+                "repo_owner": repo_owner,
+                "repo_name": repo_name,
+                "remote_url": remote_url,
+            });
+        }
         let intent = self.store.create_implementation_publication_intent(
             run_id,
             Some(&artifact.artifact_id),
-            ImplementationPublicationKind::Preview,
-            &serde_json::json!({
-                "mode": service.implementation.mode.as_str(),
-                "changed_paths": assessment.changed_paths,
-                "note": if service.implementation.mode == ImplementationMode::Automatic {
-                    Some("automatic publication deferred to PR2")
-                } else {
-                    None
-                },
-            }),
-        )?;
-        let publisher = ImplementationPublisher::new(self.comments.clone());
-        publisher
-            .publish_preview(
-                &self.store,
-                PreviewPublishRequest {
-                    intent: &intent,
-                    issue_number: issue.issue_number,
-                    run_id,
-                    stage_run_id,
-                    artifact: &artifact,
-                    manifest: &manifest,
-                    changed_paths: &assessment.changed_paths,
-                    validation: &validation_results,
-                    max_pages: 5,
-                },
-            )
-            .await?;
-
-        self.record_event(
-            Some(run_id),
-            Some(stage_run_id),
-            "implementation_preview_published",
-            serde_json::json!({
-                "artifact_id": artifact.artifact_id,
-                "intent_id": intent.intent_id,
-                "head_commit": assessment.head_commit,
-            }),
+            kind,
+            &desired_effects,
         )?;
 
-        Ok(AttemptResult::Previewed)
+        if kind == ImplementationPublicationKind::Preview {
+            let publisher = ImplementationPublisher::new(self.comments.clone());
+            publisher
+                .publish_preview(
+                    &self.store,
+                    PreviewPublishRequest {
+                        intent: &intent,
+                        issue_number: issue.issue_number,
+                        run_id,
+                        stage_run_id,
+                        artifact: &artifact,
+                        manifest: &manifest,
+                        changed_paths: &assessment.changed_paths,
+                        validation: &validation_results,
+                        max_pages: 5,
+                    },
+                )
+                .await?;
+
+            self.record_event(
+                Some(run_id),
+                Some(stage_run_id),
+                "implementation_preview_published",
+                serde_json::json!({
+                    "artifact_id": artifact.artifact_id,
+                    "intent_id": intent.intent_id,
+                    "head_commit": assessment.head_commit,
+                }),
+            )?;
+            return Ok(AttemptResult::Previewed);
+        }
+
+        // Automatic: create intent and reconcile immediately (also recoverable via pending list).
+        match self.reconcile_automatic_publication(service, &intent).await {
+            Ok(()) => Ok(AttemptResult::AutomaticPublished),
+            Err(error) => {
+                tracing::warn!(
+                    event = "implementation_automatic_publication_failed",
+                    intent_id = %intent.intent_id,
+                    error = %error,
+                    "automatic publication will retry via pending reconcile"
+                );
+                Ok(AttemptResult::AutomaticPending)
+            }
+        }
     }
 
     fn fail_implementation_attempt(
@@ -1100,7 +1464,9 @@ where
 
 #[derive(Debug)]
 enum CandidateOutcome {
-    StartedCompleted,
+    StartedPreview,
+    StartedAutomaticPublished,
+    StartedAutomaticPending,
     StartedAwaitingHuman,
     StartedFailed,
     Stale,
@@ -1110,6 +1476,8 @@ enum CandidateOutcome {
 #[derive(Debug)]
 enum AttemptResult {
     Previewed,
+    AutomaticPublished,
+    AutomaticPending,
     AwaitingHuman,
     Failed,
 }
@@ -1224,6 +1592,72 @@ fn issue_number_from_run(store: &SharedFactoryStore, run_id: &str) -> Result<u64
     run.issue_id.parse().map_err(|_| {
         SymphonyError::TriageError(format!("issue id {} is not numeric", run.issue_id))
     })
+}
+
+fn intent_remote_url(forge_host: &str, repo_owner: &str, repo_name: &str) -> Result<String> {
+    resolve_publication_remote(&serde_json::Value::Null, forge_host, repo_owner, repo_name)
+}
+
+fn required_desired_effect<'a>(
+    desired_effects: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a str> {
+    desired_effects
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            SymphonyError::TriageError(format!(
+                "automatic publication intent is missing pinned {key}"
+            ))
+        })
+}
+
+/// Whether the intent's stored error already describes this reconcile failure,
+/// so the generic retryable wrapper neither charges the retry budget twice nor
+/// clobbers the specific error code the inner path recorded.
+///
+/// The comparison is a suffix match because `SymphonyError` variants prefix
+/// their payload on `Display` (`"triage error: {0}"`), while `remediation`
+/// holds the unprefixed message.
+fn already_recorded(last: &FactoryError, error_message: &str) -> bool {
+    last.retryable
+        && !last.remediation.is_empty()
+        && error_message.ends_with(last.remediation.as_str())
+}
+
+/// Exponential backoff for the given reconcile attempt count, capped at
+/// [`AUTOMATIC_PUBLICATION_BACKOFF_MAX_SECS`].
+fn automatic_backoff_secs(retry_count: u32) -> i64 {
+    let exponent = retry_count.saturating_sub(1).min(16);
+    AUTOMATIC_PUBLICATION_BACKOFF_BASE_SECS
+        .saturating_mul(1i64 << exponent)
+        .min(AUTOMATIC_PUBLICATION_BACKOFF_MAX_SECS)
+}
+
+/// Whether a pending automatic intent has waited out its backoff. A never-tried
+/// intent (`retry_count == 0`) is always ready, so first publication stays
+/// immediate.
+fn automatic_retry_ready(retry_count: u32, updated_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
+    if retry_count == 0 {
+        return true;
+    }
+    (now - updated_at).num_seconds() >= automatic_backoff_secs(retry_count)
+}
+
+fn automatic_completion_state(service: &ServiceConfig) -> Result<&str> {
+    service
+        .implementation
+        .completion_route
+        .as_ref()
+        .map(|route| route.state.trim())
+        .filter(|state| !state.is_empty())
+        .ok_or_else(|| {
+            SymphonyError::TriageError(
+                "implementation.completion_route.state required when mode is automatic".into(),
+            )
+        })
 }
 
 fn last_validation_results(
@@ -1809,5 +2243,258 @@ mod tests {
             .list_a3_eligible_approved_runs(&configuration_revision)
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn automatic_reconcile_persists_unhandled_retryable_error() {
+        let root = tempdir().unwrap();
+        let workflow = root.path().join("workflow");
+        let db = root.path().join("factory.db");
+        fs::create_dir_all(&workflow).unwrap();
+
+        let store = SharedFactoryStore::open(&db, 5_000).unwrap();
+        let approved = seed_approved(&store, "rev").await;
+        let intent = store
+            .create_implementation_publication_intent(
+                &approved.run_id,
+                None,
+                ImplementationPublicationKind::Automatic,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        let comments = FakeComments::new("symphony-bot");
+        let issues = Arc::new(FakeIssues {
+            issue: Mutex::new(base_issue()),
+        });
+        let mut coordinator = ImplementationCoordinator::with_harness(
+            store.clone(),
+            comments,
+            issues,
+            ImplementationCoordinatorConfig {
+                forge_host: "github.com".into(),
+                repository: "acme/repo".into(),
+                owner_instance: "test".into(),
+                workflow_dir: workflow,
+                storage_path: db,
+            },
+            FakeHarness {
+                repair_touch: false,
+                calls: Mutex::new(0),
+            },
+        );
+
+        coordinator
+            .poll_once(&ServiceConfig::default())
+            .await
+            .unwrap();
+
+        let recovered = store
+            .get_implementation_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.status, PublicationStatus::Pending);
+        assert_eq!(recovered.retry_count, 1);
+        assert_eq!(
+            recovered
+                .last_error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("publication_retryable")
+        );
+    }
+
+    #[test]
+    fn publication_remote_is_derived_from_pinned_forge_identity() {
+        assert_eq!(
+            intent_remote_url("github.com", "acme", "repo").unwrap(),
+            "https://github.com/acme/repo.git"
+        );
+        assert_eq!(
+            intent_remote_url("github.example.com", "acme", "repo.git").unwrap(),
+            "https://github.example.com/acme/repo.git"
+        );
+    }
+
+    #[test]
+    fn automatic_reconciliation_requires_pinned_desired_effects() {
+        let desired = serde_json::json!({
+            "publication_branch": "symphony/KATA-42",
+            "repo_owner": "acme",
+        });
+        assert_eq!(
+            required_desired_effect(&desired, "publication_branch").unwrap(),
+            "symphony/KATA-42"
+        );
+        let err = required_desired_effect(&desired, "repo_name").unwrap_err();
+        assert!(err.to_string().contains("pinned repo_name"));
+    }
+
+    #[test]
+    fn already_recorded_matches_through_the_display_prefix() {
+        let drift = FactoryError::new(
+            "issue_revision_drift",
+            "implementation_publication",
+            "issue revision drifted: approved=a current=b",
+            true,
+            None,
+        );
+        // The inner path stores the unprefixed remediation; the reconcile loop
+        // compares against the Display form, which adds "triage error: ".
+        let displayed =
+            SymphonyError::TriageError("issue revision drifted: approved=a current=b".into())
+                .to_string();
+        assert!(already_recorded(&drift, &displayed));
+        assert!(!already_recorded(&drift, "triage error: something else"));
+
+        // A non-retryable or empty remediation never suppresses recording.
+        let terminal = FactoryError::new(
+            "pr_drift",
+            "implementation_publication",
+            "observed drift",
+            false,
+            None,
+        );
+        assert!(!already_recorded(&terminal, "triage error: observed drift"));
+        let empty = FactoryError::new("x", "implementation_publication", "", true, None);
+        assert!(!already_recorded(&empty, "triage error: anything"));
+    }
+
+    #[test]
+    fn automatic_backoff_grows_then_saturates() {
+        assert_eq!(automatic_backoff_secs(1), 30);
+        assert_eq!(automatic_backoff_secs(2), 60);
+        assert_eq!(automatic_backoff_secs(3), 120);
+        assert_eq!(
+            automatic_backoff_secs(7),
+            AUTOMATIC_PUBLICATION_BACKOFF_MAX_SECS
+        );
+        assert_eq!(
+            automatic_backoff_secs(u32::MAX),
+            AUTOMATIC_PUBLICATION_BACKOFF_MAX_SECS
+        );
+    }
+
+    #[test]
+    fn automatic_retry_waits_out_backoff() {
+        let now = Utc::now();
+        // A never-tried intent publishes immediately.
+        assert!(automatic_retry_ready(0, now, now));
+        // A just-failed intent waits.
+        assert!(!automatic_retry_ready(1, now, now));
+        assert!(!automatic_retry_ready(
+            1,
+            now - chrono::Duration::seconds(29),
+            now
+        ));
+        assert!(automatic_retry_ready(
+            1,
+            now - chrono::Duration::seconds(30),
+            now
+        ));
+        // Later attempts wait proportionally longer.
+        assert!(!automatic_retry_ready(
+            3,
+            now - chrono::Duration::seconds(60),
+            now
+        ));
+        assert!(automatic_retry_ready(
+            3,
+            now - chrono::Duration::seconds(120),
+            now
+        ));
+    }
+
+    #[tokio::test]
+    async fn automatic_publication_blocks_after_exhausting_retries() {
+        let root = tempdir().unwrap();
+        let workflow = root.path().join("workflow");
+        let db = root.path().join("factory.db");
+        fs::create_dir_all(&workflow).unwrap();
+
+        let store = SharedFactoryStore::open(&db, 5_000).unwrap();
+        let approved = seed_approved(&store, "rev").await;
+        let intent = store
+            .create_implementation_publication_intent(
+                &approved.run_id,
+                None,
+                ImplementationPublicationKind::Automatic,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+
+        // Burn the retry budget the way repeated reconcile failures would.
+        for _ in 0..MAX_AUTOMATIC_PUBLICATION_RETRIES {
+            store
+                .set_implementation_publication_error(
+                    &intent.intent_id,
+                    PublicationStatus::Pending,
+                    FactoryError::new(
+                        "publication_retryable",
+                        "implementation_publication",
+                        "forge unreachable",
+                        true,
+                        None,
+                    ),
+                )
+                .unwrap();
+        }
+        let exhausted = store
+            .get_implementation_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(exhausted.retry_count, MAX_AUTOMATIC_PUBLICATION_RETRIES);
+        assert_eq!(exhausted.status, PublicationStatus::Pending);
+
+        let comments = FakeComments::new("symphony-bot");
+        let issues = Arc::new(FakeIssues {
+            issue: Mutex::new(base_issue()),
+        });
+        let mut coordinator = ImplementationCoordinator::with_harness(
+            store.clone(),
+            comments,
+            issues,
+            ImplementationCoordinatorConfig {
+                forge_host: "github.com".into(),
+                repository: "acme/repo".into(),
+                owner_instance: "test".into(),
+                workflow_dir: workflow,
+                storage_path: db,
+            },
+            FakeHarness {
+                repair_touch: false,
+                calls: Mutex::new(0),
+            },
+        );
+
+        coordinator
+            .poll_once(&ServiceConfig::default())
+            .await
+            .unwrap();
+
+        let recovered = store
+            .get_implementation_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.status, PublicationStatus::Blocked);
+        let last_error = recovered.last_error.expect("blocking error recorded");
+        assert_eq!(last_error.code, "publication_retry_exhausted");
+        assert!(!last_error.retryable);
+        assert!(last_error.remediation.contains("forge unreachable"));
+
+        // A blocked intent leaves the pending poll set for good.
+        assert!(store
+            .list_pending_implementation_publications()
+            .unwrap()
+            .iter()
+            .all(|pending| pending.intent_id != intent.intent_id));
+    }
+
+    #[test]
+    fn automatic_completion_route_is_required_before_intent_creation() {
+        let service = ServiceConfig::default();
+        let err = automatic_completion_state(&service).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("implementation.completion_route.state required"));
     }
 }

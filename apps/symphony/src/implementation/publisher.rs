@@ -15,6 +15,10 @@ use crate::triage::runtime::SharedFactoryStore;
 
 pub const PREVIEW_COMMENT_STEP: &str = "preview_comment";
 pub const DIAGNOSTIC_COMMENT_STEP: &str = "diagnostic_comment";
+pub const COMMENT_PENDING_STEP: &str = "comment_pending";
+pub const PR_VERIFIED_STEP: &str = "pr_verified";
+pub const ROUTE_APPLIED_STEP: &str = "route_applied";
+pub const COMMENT_FINAL_STEP: &str = "comment_final";
 
 #[derive(Debug, Clone)]
 pub struct PreviewPublishRequest<'a> {
@@ -142,26 +146,7 @@ where
         Ok(())
     }
 
-    /// PR1: automatic publication is deferred — log and leave pending for PR2.
-    pub fn defer_automatic_publication(
-        &self,
-        intent: &ImplementationPublicationIntent,
-    ) -> Result<()> {
-        if intent.kind != ImplementationPublicationKind::Automatic {
-            return Err(SymphonyError::TriageError(
-                "defer_automatic_publication requires automatic kind".to_string(),
-            ));
-        }
-        tracing::info!(
-            event = "implementation_automatic_publication_deferred",
-            intent_id = %intent.intent_id,
-            run_id = %intent.run_id,
-            "automatic publication deferred to PR2; preview-only in PR1"
-        );
-        Ok(())
-    }
-
-    async fn upsert_marked_comment(
+    pub(crate) async fn upsert_marked_comment(
         &self,
         store: &SharedFactoryStore,
         intent: &ImplementationPublicationIntent,

@@ -345,6 +345,90 @@ impl SharedFactoryStore {
         self.with_store_mut(|store| store.complete_implementation_publication(intent_id, step))
     }
 
+    pub fn record_implementation_publication_step(
+        &self,
+        intent_id: &str,
+        step: &str,
+        status: crate::triage::domain::PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.record_implementation_publication_step(
+                intent_id,
+                step,
+                status,
+                expected_projection,
+            )
+        })
+    }
+
+    pub fn set_implementation_publication_baseline(
+        &self,
+        intent_id: &str,
+        observed_baseline: &serde_json::Value,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.set_implementation_publication_baseline(
+                intent_id,
+                observed_baseline,
+                expected_projection,
+            )
+        })
+    }
+
+    pub fn set_implementation_publication_error(
+        &self,
+        intent_id: &str,
+        status: crate::triage::domain::PublicationStatus,
+        error: crate::triage::domain::FactoryError,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.set_implementation_publication_error(intent_id, status, error)
+        })
+    }
+
+    pub fn set_implementation_publication_waiting(
+        &self,
+        intent_id: &str,
+        status: crate::triage::domain::PublicationStatus,
+        error: crate::triage::domain::FactoryError,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.set_implementation_publication_waiting(intent_id, status, error)
+        })
+    }
+
+    pub fn store_draft_pr_artifact(
+        &self,
+        request: crate::triage::store::StoreDraftPrArtifactRequest,
+    ) -> Result<crate::implementation::domain::DraftPrArtifactRecord> {
+        self.with_store_mut(|store| store.store_draft_pr_artifact(request))
+    }
+
+    pub fn get_draft_pr_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<crate::implementation::domain::DraftPrArtifactRecord>> {
+        self.with_store(|store| store.get_draft_pr_artifact(artifact_id))
+    }
+
+    pub fn get_draft_pr_for_implementation_artifact(
+        &self,
+        implementation_artifact_id: &str,
+    ) -> Result<Option<crate::implementation::domain::DraftPrArtifactRecord>> {
+        self.with_store(|store| {
+            store.get_draft_pr_for_implementation_artifact(implementation_artifact_id)
+        })
+    }
+
+    pub fn get_draft_pr_for_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<crate::implementation::domain::DraftPrArtifactRecord>> {
+        self.with_store(|store| store.get_draft_pr_for_intent(intent_id))
+    }
+
     pub fn bind_implementation_publication_comment(
         &self,
         intent_id: &str,
@@ -437,12 +521,29 @@ impl SharedFactoryStore {
                 .as_ref()
                 .and_then(|state| state.bundle_artifact_id.as_deref())
                 .and_then(|id| store.get_bundle_artifact(id).ok().flatten());
+            let draft_pr = implementation_artifacts
+                .first()
+                .and_then(|artifact| {
+                    store
+                        .get_draft_pr_for_implementation_artifact(&artifact.artifact_id)
+                        .ok()
+                        .flatten()
+                })
+                .or_else(|| {
+                    publication.as_ref().and_then(|intent| {
+                        store
+                            .get_draft_pr_for_intent(&intent.intent_id)
+                            .ok()
+                            .flatten()
+                    })
+                });
             attach_implementation_http_response(
                 &mut response,
                 implementation_state.as_ref(),
                 implementation_artifacts.first(),
                 publication.as_ref(),
                 bundle.as_ref(),
+                draft_pr.as_ref(),
             );
             Ok(Some(response))
         })
@@ -962,7 +1063,7 @@ impl TriageRuntime {
                 store.clone(),
                 intake,
                 client.clone(),
-                routing,
+                routing.clone(),
                 SpecCoordinatorConfig {
                     forge_host: forge_host.clone(),
                     repository: repository.clone(),
@@ -983,7 +1084,7 @@ impl TriageRuntime {
         let mut implementation_coordinator = ImplementationCoordinator::new(
             store.clone(),
             client.clone(),
-            client,
+            client.clone(),
             ImplementationCoordinatorConfig {
                 forge_host,
                 repository,
@@ -991,7 +1092,9 @@ impl TriageRuntime {
                 workflow_dir,
                 storage_path: storage_path.clone(),
             },
-        );
+        )
+        .with_routing(routing.clone())
+        .with_pulls(client);
         if let Some(events) = emitter {
             implementation_coordinator = implementation_coordinator.with_events(events);
         }
@@ -1071,6 +1174,8 @@ impl TriageRuntime {
                             attempts_failed = summary.attempts_failed,
                             stale_skipped = summary.stale_skipped,
                             preview_published = summary.preview_published,
+                            automatic_published = summary.automatic_published,
+                            automatic_pending = summary.automatic_pending,
                             awaiting_human = summary.awaiting_human,
                             "implementation poll completed"
                         );

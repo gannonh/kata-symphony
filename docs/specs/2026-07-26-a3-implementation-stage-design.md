@@ -11,7 +11,7 @@ timestamp: 2026-07-27T16:30:13Z
 
 ## Status
 
-Active — PR1 implementation/validation preview **implemented** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](2026-07-29-a3-pr1-build-report.md), [verify](2026-07-29-a3-pr1-verify-report.md)); review threads resolved. **Next:** PR2 deterministic draft-PR publication and Agent Review handoff.
+Active — PR1 implementation/validation preview **implemented** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](2026-07-29-a3-pr1-build-report.md), [verify](2026-07-29-a3-pr1-verify-report.md)). **PR2** deterministic draft-PR publication and Agent Review handoff **implemented** ([build](2026-07-29-a3-pr2-build-report.md), [verify](2026-07-29-a3-pr2-verify-report.md) Incomplete — live UAT residual). **Next:** live PR2 UAT, then A4.
 
 ## Goal
 

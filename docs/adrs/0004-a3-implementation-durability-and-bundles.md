@@ -11,23 +11,27 @@ timestamp: 2026-07-29T16:00:00Z
 
 ## Status
 
-Accepted — A3 PR1
+Accepted — A3 PR1; extended by A3 PR2 (draft-PR artifacts and progressive publication)
 
 ## Context
 
-A3 turns a pinned A2 approved specification into a validated change bundle and (in PR2) a linked draft GitHub PR. Code-sized Git bundles do not belong in SQLite. Workers must not receive forge mutation credentials. Preview publication must be idempotent without advancing tracker state.
+A3 turns a pinned A2 approved specification into a validated change bundle and (in PR2) a linked draft GitHub PR. Code-sized Git bundles do not belong in SQLite. Workers must not receive forge mutation credentials. Preview publication must be idempotent without advancing tracker state. Automatic publication must reconcile expected branch/PR projections without force-push and must not advance tracker state before a verified draft-PR artifact exists.
 
 ## Decision
 
-1. **Stage-scoped durability.** Implementation attempts reuse `stage_runs` with `stage='implementation'`. Additive tables record attempt inputs, implement/repair turns, validation cycles, implementation-manifest artifacts, bundle metadata, run state, and publication intents (`004_implementation_stage.sql`).
-2. **Content-addressed blobs.** Bundle bytes live at `{storage.path}.artifacts/sha256/<aa>/<digest>` with atomic temp→rename writes. SQLite stores digest, size, and Git metadata only. HTTP never serves paths or bytes.
-3. **Credential-isolated execution.** Local attempts clone from a verified base bundle into a disposable workspace with isolated HOME, disabled push URLs, and an allowlisted environment (model auth only). Docker env builders omit GitHub, Linear, helper, and SSH credentials; repository enter/leave is via verified bundles.
+1. **Stage-scoped durability.** Implementation attempts reuse `stage_runs` with `stage='implementation'`. Additive tables record attempt inputs, implement/repair turns, validation cycles, implementation-manifest artifacts, bundle metadata, run state, and publication intents (`004_implementation_stage.sql`). PR2 adds immutable draft-PR artifacts (`005_implementation_draft_pr.sql`).
+2. **Content-addressed blobs.** Bundle bytes live at `{storage.path}.artifacts/sha256/<aa>/<digest>` with atomic temp→rename writes. SQLite stores digest, size, and Git metadata only. HTTP never serves paths or bytes. Digests are re-verified immediately before branch push.
+3. **Credential-isolated execution.** Local attempts clone from a verified base bundle into a disposable workspace with isolated HOME, disabled push URLs, and an allowlisted environment (model auth only). Docker env builders omit GitHub, Linear, helper, and SSH credentials; repository enter/leave is via verified bundles. Only the trusted publisher pushes branches and creates PRs.
 4. **Preview-only publisher (PR1).** Owned issue comments use `<!-- symphony:implementation:{intent_id} -->` with create-before-record recovery. No branch push, draft PR, label removal, or Projects v2 state change until PR2.
-5. **Dispatch ownership.** A3 claims before legacy candidate fetch. Durable guards cover nonterminal attempts/publications and retained A3 run state so approved A2 work cannot race the legacy worker.
+5. **Automatic publication (PR2).** Progressive `record_implementation_publication_step` updates completed steps without forcing `applied` until the final comment. Branch expected-projection never force-pushes. Draft PRs use `<!-- symphony:implementation-pr:{intent_id} -->`, recover create-before-record by head/base list, and reject foreign, closed, publisher-mismatched, ready, or drifted candidates. A persisted PR absent from a bounded listing remains retryable instead of being misclassified as verified drift. Automatic mode requires a non-empty completion route before intent creation; tracker label removal and `completion_route.state` run only after the draft-PR artifact is stored. Reconcile attempts are bounded: pending automatic intents back off exponentially (30s doubling to a 30m ceiling) keyed on `retry_count`, and after 8 failed attempts the intent is terminalized as `blocked` with a non-retryable `publication_retry_exhausted` error. The budget counts *failed attempts only*. Conditions waiting on an unmet precondition rather than a failure — issue-revision drift, which clears only when a human re-approves the issue — are recorded through `set_implementation_publication_waiting` and never charge the budget, because no code path recovers a `blocked` intent and a normal review delay must not strand a publication permanently. The generic retryable wrapper suppresses itself when the inner path already recorded the same failure, so a single failure is charged once and keeps its specific error code.
+6. **Dispatch ownership.** A3 claims before legacy candidate fetch. Durable guards cover nonterminal attempts/publications and retained A3 run state so approved A2 work cannot race the legacy worker.
+7. **Pinned publication identity and bounded authentication.** Automatic intents capture forge owner, repository, base branch, and publication branch. Recovery rejects active configuration drift and derives the HTTPS remote from that pinned identity. The trusted publisher supplies the GitHub token only through a subprocess-scoped HTTP authorization header; network Git calls disable prompting, time out, and redact credentials. A persisted draft-PR artifact is revalidated against live GitHub state through final-comment publication, and its author must match the authenticated publisher. The intent remains pending through final-comment publication; Symphony records completion events and the published run decision before terminalizing the intent, so restart recovery cannot strand a completed PR behind a pending run.
 
 ## Consequences
 
-- A1/A2 suites remain green; migration is additive.
+- A1/A2 suites remain green; migrations are additive.
+- Configuration changes cannot silently redirect a pending publication or its credentials.
 - Disk growth from retained bundles is operator-visible; GC is deferred.
-- Automatic draft-PR publication and Agent Review handoff remain PR2.
+- A publication target that stays unreachable past the retry budget requires an operator to clear the `blocked` intent; the tradeoff is bounded forge traffic and event-row growth.
+- Live draft-PR / Agent Review UAT remains operator residual after PR2 automation.
 - Live Docker container orchestration beyond the env/bundle contract is residual where no daemon is available.
