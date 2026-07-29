@@ -1193,29 +1193,30 @@ where
         } else {
             ImplementationPublicationKind::Preview
         };
-        let repo_owner = service
-            .tracker
-            .repo_owner
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| SymphonyError::TriageError("tracker.repo_owner required".into()))?;
-        let repo_name = service
-            .tracker
-            .repo_name
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| SymphonyError::TriageError("tracker.repo_name required".into()))?;
-        let base_branch = service.workspace.base_branch.as_deref().unwrap_or("main");
-        let publication_branch =
-            branch_name_for_issue(&service.workspace.branch_prefix, &issue.identifier);
-        let remote_url = intent_remote_url(&self.config.forge_host, repo_owner, repo_name)?;
-        let intent = self.store.create_implementation_publication_intent(
-            run_id,
-            Some(&artifact.artifact_id),
-            kind,
-            &serde_json::json!({
+        let mut desired_effects = serde_json::json!({
+            "mode": service.implementation.mode.as_str(),
+            "changed_paths": assessment.changed_paths,
+        });
+        if kind == ImplementationPublicationKind::Automatic {
+            let repo_owner = service
+                .tracker
+                .repo_owner
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| SymphonyError::TriageError("tracker.repo_owner required".into()))?;
+            let repo_name = service
+                .tracker
+                .repo_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| SymphonyError::TriageError("tracker.repo_name required".into()))?;
+            let base_branch = service.workspace.base_branch.as_deref().unwrap_or("main");
+            let publication_branch =
+                branch_name_for_issue(&service.workspace.branch_prefix, &issue.identifier);
+            let remote_url = intent_remote_url(&self.config.forge_host, repo_owner, repo_name)?;
+            desired_effects = serde_json::json!({
                 "mode": service.implementation.mode.as_str(),
                 "changed_paths": assessment.changed_paths,
                 "approval_route_label": service.spec.approval_route.label,
@@ -1225,7 +1226,13 @@ where
                 "repo_owner": repo_owner,
                 "repo_name": repo_name,
                 "remote_url": remote_url,
-            }),
+            });
+        }
+        let intent = self.store.create_implementation_publication_intent(
+            run_id,
+            Some(&artifact.artifact_id),
+            kind,
+            &desired_effects,
         )?;
 
         if kind == ImplementationPublicationKind::Preview {
