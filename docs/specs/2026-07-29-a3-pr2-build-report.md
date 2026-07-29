@@ -46,7 +46,9 @@ The PR takeover closed the publication-path findings before re-review:
 8. Authenticated-login failures propagate, missing publication intents fail loudly, and doctor reports the pinned publication target without claiming unverified permissions.
 9. Recovered draft-PR artifacts restore a missing `pr_verified` step; final comments remain pending until run state and completion events are durable, then the intent becomes applied.
 10. Unexpected automatic-reconciliation failures persist a structured retryable error and `implementation_publication_blocked` event.
-11. Focused regression tests cover every repaired failure and the preview path remains backward-compatible.
+11. A PR absent from the bounded recovery listing remains retryable, while observed projection drift remains a terminal conflict.
+12. Automatic mode rejects a missing completion route before creating a durable intent.
+13. Focused regression tests cover every repaired failure and the preview path remains backward-compatible.
 
 ## Files changed (primary)
 
@@ -70,7 +72,7 @@ Results (GitHub Actions on the remediated PR head):
 | --- | --- |
 | `cargo fmt --check` | Pass |
 | `cargo clippy -- -D warnings` | Pass |
-| `cargo test` | Pass, including **330** library tests and **14** GitHub client tests |
+| `cargo test` | Pass, including **332** library tests and **14** GitHub client tests |
 | `cargo llvm-cov --fail-under-lines 72` | Pass |
 | GitHub backend validation / golden-path smoke / distributions | Pass |
 | Docker daemon | Unavailable — residual |
