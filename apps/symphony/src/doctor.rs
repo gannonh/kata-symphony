@@ -1448,9 +1448,37 @@ pub fn check_implementation(
                 "implementation.completion_route.state is required when mode is automatic",
             )),
         }
-        results.push(DoctorCheckResult::pass(
+        match (
+            config
+                .tracker
+                .repo_owner
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+            config
+                .tracker
+                .repo_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty()),
+        ) {
+            (Some(owner), Some(repo)) => {
+                let forge_host = crate::triage::storage_path::forge_host_from_endpoint(
+                    &config.tracker.endpoint,
+                );
+                results.push(DoctorCheckResult::pass(
+                    "Implementation Publication Repository",
+                    format!("Pinned publish target https://{forge_host}/{owner}/{repo}.git"),
+                ));
+            }
+            _ => results.push(DoctorCheckResult::error(
+                "Implementation Publication Repository",
+                "tracker.repo_owner and tracker.repo_name are required when implementation.mode is automatic",
+            )),
+        }
+        results.push(DoctorCheckResult::warning(
             "Implementation Draft PR Permissions",
-            "Automatic mode pushes a branch and creates a draft PR using the configured GitHub token; ensure the token can write contents and pull requests",
+            "GitHub token presence is validated, but contents:write and pull-request creation must be proven by live UAT",
         ));
     }
 
