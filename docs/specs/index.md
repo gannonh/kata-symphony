@@ -5,7 +5,7 @@ Roadmap for planned and completed work. Historical Superpowers designs and plans
 # Active
 
 * [Symphony Software Factory Platform PRD](symphony-software-factory-platform-prd.md) - product requirements and vertical-slice roadmap for the full software factory platform
-* [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md) - **Next**; Active design; pinned A2 approved spec → credential-isolated local/Docker implementation → deterministic validation and repair → durable change bundle → linked draft GitHub PR. A1 and A2 prerequisites shipped.
+* [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md) - **Next**; Active; PR1 foundation in progress (domain/store/config/doctor/HTTP stubs); pinned A2 approved spec → credential-isolated local/Docker implementation → deterministic validation and repair → durable change bundle → linked draft GitHub PR
 * [Pi Symphony Extension Design](../superpowers/specs/2026-05-14-pi-symphony-extension-design.md) - Pi extension to init, launch, monitor, and steer Symphony
 * [Wave 4 Shared Context and Diagnostics Plan](../superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md) - dashboard parity for shared context + diagnostics
 

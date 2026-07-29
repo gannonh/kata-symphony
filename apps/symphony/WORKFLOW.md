@@ -111,6 +111,27 @@ server:
 #   approval_route:
 #     label: ready-for-agent
 #     state: Todo
+# Spec-driven implementation stage (A3). Requires a terminal A2 approval pin.
+# Preview mode posts an owned issue comment only; automatic mode (PR2) opens a
+# draft PR and moves the issue to completion_route.state.
+# implementation:
+#   enabled: false
+#   mode: preview
+#   prompt: prompts/implementation.md
+#   repair_prompt: prompts/implementation-repair.md
+#   # model: provider/model-name         # Pi only
+#   max_turns: 20
+#   invocation_timeout_ms: 3600000
+#   max_attempts: 3
+#   max_validation_cycles: 3
+#   max_bundle_bytes: 104857600
+#   spec_file: specs/{issue_identifier}/APPROVED-v{version}.md
+#   validation:
+#     - name: affected-validation
+#       command: pnpm run validate:affected
+#       timeout_ms: 1800000
+#   # completion_route:
+#   #   state: Agent Review
 # notifications:
 #   slack:
 #     webhook_url: $SLACK_WEBHOOK_URL

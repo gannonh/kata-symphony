@@ -1463,6 +1463,7 @@ fn sample_factory_run() -> symphony::http_server::FactoryRunHttpResponse {
             error: None,
         }),
         spec: None,
+        implementation: None,
     }
 }
 

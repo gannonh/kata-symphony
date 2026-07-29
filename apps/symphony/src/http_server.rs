@@ -70,6 +70,9 @@ pub trait FactoryRunQuery: Send + Sync {
     fn spec_metrics(&self) -> Result<SpecRunMetricsHttpResponse, String> {
         Err("spec metrics are not available".to_string())
     }
+    fn implementation_metrics(&self) -> Result<ImplementationRunMetricsHttpResponse, String> {
+        Err("implementation metrics are not available".to_string())
+    }
     fn get_artifact(
         &self,
         _run_id: &str,
@@ -456,6 +459,8 @@ pub struct FactoryRunHttpResponse {
     pub publication: Option<FactoryRunPublicationHttp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spec: Option<FactoryRunSpecHttp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub implementation: Option<FactoryRunImplementationHttp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -674,6 +679,7 @@ pub fn factory_run_http_response(
             error: intent.last_error.clone(),
         }),
         spec: None,
+        implementation: None,
     }
 }
 
@@ -756,6 +762,79 @@ pub fn attach_spec_http_response(
     });
 }
 
+/// PR1 stub: attach a minimal `implementation` object when durable state exists.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunImplementationHttp {
+    pub status: String,
+    pub approved_spec: FactoryRunImplementationApprovedSpecHttp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<FactoryRunImplementationPublicationHttp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<crate::implementation::domain::ImplementationBlocker>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunImplementationApprovedSpecHttp {
+    pub artifact_id: String,
+    pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FactoryRunImplementationPublicationHttp {
+    pub intent_id: String,
+    pub mode: String,
+    pub status: String,
+    pub completed_steps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::triage::domain::FactoryError>,
+}
+
+pub fn attach_implementation_http_response(
+    response: &mut FactoryRunHttpResponse,
+    state: Option<&crate::implementation::domain::ImplementationRunState>,
+    artifact: Option<&crate::implementation::domain::ImplementationArtifactRecord>,
+    publication: Option<&crate::implementation::domain::ImplementationPublicationIntent>,
+) {
+    let Some(state) = state else {
+        return;
+    };
+    response.implementation = Some(FactoryRunImplementationHttp {
+        status: state.decision.as_str().to_string(),
+        approved_spec: FactoryRunImplementationApprovedSpecHttp {
+            artifact_id: state.approved_artifact_id.clone(),
+            version: state.approved_version,
+            file_path: artifact.map(|record| record.approved_spec_path.clone()),
+        },
+        artifact_id: state
+            .successful_artifact_id
+            .clone()
+            .or_else(|| artifact.map(|record| record.artifact_id.clone())),
+        base_commit: artifact.map(|record| record.base_commit.clone()),
+        head_commit: artifact
+            .and_then(|record| record.head_commit.clone())
+            .or_else(|| {
+                artifact
+                    .and_then(|record| record.manifest.head_commit.clone())
+            }),
+        publication: publication.map(|intent| FactoryRunImplementationPublicationHttp {
+            intent_id: intent.intent_id.clone(),
+            mode: intent.kind.as_str().to_string(),
+            status: intent.status.as_str().to_string(),
+            completed_steps: intent.completed_steps.clone(),
+            error: intent.last_error.clone(),
+        }),
+        blocker: state.blocker.clone(),
+    });
+}
+
 pub fn factory_run_metrics_http_response(
     metrics: crate::triage::domain::TriageMetricsAggregate,
 ) -> FactoryRunMetricsHttpResponse {
@@ -798,6 +877,44 @@ pub fn spec_run_metrics_http_response(
         convergence_rate: metrics.convergence_rate,
         revision_requests: metrics.revision_requests,
         approval_latency: metrics.approval_latency,
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ImplementationRunMetricsHttpResponse {
+    #[serde(flatten)]
+    pub base: FactoryRunMetricsHttpResponse,
+    pub eligible_approvals: u64,
+    pub validation_cycles: u64,
+    pub validation_first_pass: u64,
+    pub validation_repairs: u64,
+    pub validation_exhausted: u64,
+    pub spec_gaps: u64,
+    pub preview_publications: u64,
+    pub automatic_publications: u64,
+    pub publication_conflicts: u64,
+    pub local_attempts: u64,
+    pub docker_attempts: u64,
+}
+
+pub fn implementation_run_metrics_http_response(
+    metrics: crate::implementation::domain::ImplementationMetricsAggregate,
+) -> ImplementationRunMetricsHttpResponse {
+    let mut base = factory_run_metrics_http_response(metrics.base);
+    base.stage = crate::implementation::domain::IMPLEMENTATION_STAGE_NAME.to_string();
+    ImplementationRunMetricsHttpResponse {
+        base,
+        eligible_approvals: metrics.eligible_approvals,
+        validation_cycles: metrics.validation_cycles,
+        validation_first_pass: metrics.validation_first_pass,
+        validation_repairs: metrics.validation_repairs,
+        validation_exhausted: metrics.validation_exhausted,
+        spec_gaps: metrics.spec_gaps,
+        preview_publications: metrics.preview_publications,
+        automatic_publications: metrics.automatic_publications,
+        publication_conflicts: metrics.publication_conflicts,
+        local_attempts: metrics.local_attempts,
+        docker_attempts: metrics.docker_attempts,
     }
 }
 
@@ -2521,12 +2638,20 @@ async fn get_factory_run_metrics(
             Ok(metrics) => Json(metrics).into_response(),
             Err(message) => factory_query_failed(&message).into_response(),
         },
+        crate::implementation::domain::IMPLEMENTATION_STAGE_NAME => {
+            match query.implementation_metrics() {
+                Ok(metrics) => Json(metrics).into_response(),
+                Err(message) => factory_query_failed(&message).into_response(),
+            }
+        }
         _ => (
             StatusCode::BAD_REQUEST,
             Json(ApiErrorEnvelope {
                 error: ApiError {
                     code: "invalid_query",
-                    message: "Query parameter 'stage' must be 'triage' or 'spec'".to_string(),
+                    message:
+                        "Query parameter 'stage' must be 'triage', 'spec', or 'implementation'"
+                            .to_string(),
                     status: StatusCode::BAD_REQUEST.as_u16(),
                     details: Some(serde_json::json!({
                         "field": "stage",

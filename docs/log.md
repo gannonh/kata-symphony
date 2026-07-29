@@ -1,5 +1,8 @@
 # Docs Update Log
 
+## 2026-07-29
+* **A3 PR1 foundation**: Symphony implementation-stage module wired (domain/artifact/comment already present; store migration 004, SharedFactoryStore APIs, config/doctor/HTTP stubs, starter prompts, and WORKFLOW comments). Coordinator/runner/validation/bundle/publisher remain stubs for later PR1 slices.
+
 ## 2026-07-27
 * **A1 PR3 shipped; A1 complete**: Roadmap marks A1 GitHub path complete (PR1–PR3, [#599](https://github.com/gannonh/kata-symphony/pull/599)), clears Blocked, and keeps A3 as next. Updated [docs index](/index.md), [specs roadmap](/specs/index.md), A1/A2/A3 designs, PRD, and PR3 build/re-verify reports.
 * **A1 PR2 shipped; A3 next**: Roadmap and OKF entry points mark A1 PR2 shipped ([#598](https://github.com/gannonh/kata-symphony/pull/598)) and promote A3 to Active as the next factory slice. Updated [docs index](/index.md), [specs roadmap](/specs/index.md), A1/A2/A3 designs, and [factory PRD](/specs/symphony-software-factory-platform-prd.md).
