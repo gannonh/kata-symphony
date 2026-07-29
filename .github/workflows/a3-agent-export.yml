@@ -1,0 +1,25 @@
+name: A3 agent export
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Package repository
+        run: tar --exclude=.git -czf /tmp/kata-symphony-source.tgz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kata-symphony-source
+          path: /tmp/kata-symphony-source.tgz
+          if-no-files-found: error
+          retention-days: 1
