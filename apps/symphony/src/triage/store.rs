@@ -3129,7 +3129,8 @@ impl SqliteFactoryStore {
         status: PublicationStatus,
         error: FactoryError,
     ) -> Result<()> {
-        self.conn
+        let changed = self
+            .conn
             .execute(
                 "UPDATE implementation_publication_intents
                  SET status = ?1, last_error_json = ?2,
@@ -3143,6 +3144,11 @@ impl SqliteFactoryStore {
                 ],
             )
             .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "implementation publication intent {intent_id} not found"
+            )));
+        }
         Ok(())
     }
 
@@ -5361,5 +5367,26 @@ mod tests {
         let failed = store.get_stage_run(&attempt.stage_run_id).unwrap().unwrap();
         assert_eq!(failed.status, StageStatus::Failed);
         assert!(failed.error.is_some());
+    }
+
+    #[test]
+    fn implementation_publication_error_rejects_unknown_intent() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let err = store
+            .set_implementation_publication_error(
+                "missing-intent",
+                PublicationStatus::Pending,
+                FactoryError::new(
+                    "retry",
+                    "implementation_publication",
+                    "retry later",
+                    true,
+                    None,
+                ),
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("missing-intent"));
     }
 }
