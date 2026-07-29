@@ -333,14 +333,8 @@ where
         let draft = if let Some(existing) =
             store.get_draft_pr_for_implementation_artifact(&request.artifact.artifact_id)?
         {
-            self.reverify_persisted_draft_pr(
-                store,
-                &intent,
-                &request,
-                &existing,
-                &publisher_login,
-            )
-            .await?;
+            self.reverify_persisted_draft_pr(store, &intent, &request, &existing, &publisher_login)
+                .await?;
             if !pr_verified {
                 let projection = serde_json::json!({
                     "step": PR_VERIFIED_STEP,
@@ -1601,7 +1595,9 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("refusing to replace maintainer divergence"));
+        assert!(err
+            .to_string()
+            .contains("refusing to replace maintainer divergence"));
         assert_eq!(*pulls.create_calls.lock().unwrap(), 0);
         assert_eq!(
             reload_intent(&store, &intent.intent_id).unwrap().status,
