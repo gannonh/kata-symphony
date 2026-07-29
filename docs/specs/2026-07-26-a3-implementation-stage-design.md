@@ -11,7 +11,7 @@ timestamp: 2026-07-27T16:30:13Z
 
 ## Status
 
-Active — PR1 implementation/validation preview **implemented** ([build](2026-07-29-a3-pr1-build-report.md), [verify](2026-07-29-a3-pr1-verify-report.md)). A1 and A2 prerequisites shipped. PR2 (deterministic draft-PR publication and Agent Review handoff) is next.
+Active — PR1 implementation/validation preview **implemented** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](2026-07-29-a3-pr1-build-report.md), [verify](2026-07-29-a3-pr1-verify-report.md)); review threads resolved. **Next:** PR2 deterministic draft-PR publication and Agent Review handoff.
 
 ## Goal
 

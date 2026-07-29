@@ -1,6 +1,7 @@
 # Specs Update Log
 
 ## 2026-07-29
+* **A3 next = PR2**: Specs roadmap / PRD slice table now show PR1 as Implemented ([#606](https://github.com/gannonh/kata-symphony/pull/606)) and PR2 as Next.
 * **A3 PR1 review remediation (#606)**: Validation credential isolation + timeout output tails; discrete `$SYMPHONY_STAGE_INPUT` files; approved-spec verified via `git show HEAD:`; claim-time `pending` run state + eligibility exclude non-`failed` decisions; spawn identity recording; Docker fail-closed; bundle/temp/store hardening.
 * **A3 PR1 implemented**: Preview path (eligibility, local runner, validation/repair, bundles, preview publisher, HTTP/metrics) landed with [build](/specs/2026-07-29-a3-pr1-build-report.md) and [verify](/specs/2026-07-29-a3-pr1-verify-report.md) reports plus [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md). Automated gates Pass; live GitHub/Docker UAT residual. PR2 draft-PR publication is next on the roadmap.
 * **A3 PR1 foundation**: Store migration `004_implementation_stage.sql`, eligibility/guards, config validation, doctor checks, HTTP/metrics stubs, and starter prompts/reference comments landed under `apps/symphony/src/implementation/`. Full coordinator/runner/preview loop still open within PR1.
