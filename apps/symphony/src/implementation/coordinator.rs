@@ -69,6 +69,8 @@ pub struct ImplementationPollSummary {
     pub attempts_failed: u32,
     pub stale_skipped: u32,
     pub preview_published: u32,
+    pub automatic_published: u32,
+    pub automatic_pending: u32,
     pub awaiting_human: u32,
 }
 
@@ -253,10 +255,20 @@ where
                 )
                 .await
             {
-                Ok(CandidateOutcome::StartedCompleted) => {
+                Ok(CandidateOutcome::StartedPreview) => {
                     summary.attempts_started += 1;
                     summary.attempts_completed += 1;
                     summary.preview_published += 1;
+                }
+                Ok(CandidateOutcome::StartedAutomaticPublished) => {
+                    summary.attempts_started += 1;
+                    summary.attempts_completed += 1;
+                    summary.automatic_published += 1;
+                }
+                Ok(CandidateOutcome::StartedAutomaticPending) => {
+                    summary.attempts_started += 1;
+                    summary.attempts_completed += 1;
+                    summary.automatic_pending += 1;
                 }
                 Ok(CandidateOutcome::StartedAwaitingHuman) => {
                     summary.attempts_started += 1;
@@ -727,7 +739,13 @@ where
             )
             .await
         {
-            Ok(AttemptResult::Previewed) => Ok(CandidateOutcome::StartedCompleted),
+            Ok(AttemptResult::Previewed) => Ok(CandidateOutcome::StartedPreview),
+            Ok(AttemptResult::AutomaticPublished) => {
+                Ok(CandidateOutcome::StartedAutomaticPublished)
+            }
+            Ok(AttemptResult::AutomaticPending) => {
+                Ok(CandidateOutcome::StartedAutomaticPending)
+            }
             Ok(AttemptResult::AwaitingHuman) => Ok(CandidateOutcome::StartedAwaitingHuman),
             Ok(AttemptResult::Failed) => Ok(CandidateOutcome::StartedFailed),
             Err(error) => {
@@ -1268,18 +1286,8 @@ where
         }
 
         // Automatic: create intent and reconcile immediately (also recoverable via pending list).
-        self.record_event(
-            Some(run_id),
-            Some(stage_run_id),
-            "implementation_publication_started",
-            serde_json::json!({
-                "artifact_id": artifact.artifact_id,
-                "intent_id": intent.intent_id,
-                "head_commit": assessment.head_commit,
-            }),
-        )?;
         match self.reconcile_automatic_publication(service, &intent).await {
-            Ok(()) => Ok(AttemptResult::Previewed),
+            Ok(()) => Ok(AttemptResult::AutomaticPublished),
             Err(error) => {
                 tracing::warn!(
                     event = "implementation_automatic_publication_failed",
@@ -1287,7 +1295,7 @@ where
                     error = %error,
                     "automatic publication will retry via pending reconcile"
                 );
-                Ok(AttemptResult::Previewed)
+                Ok(AttemptResult::AutomaticPending)
             }
         }
     }
@@ -1366,7 +1374,9 @@ where
 
 #[derive(Debug)]
 enum CandidateOutcome {
-    StartedCompleted,
+    StartedPreview,
+    StartedAutomaticPublished,
+    StartedAutomaticPending,
     StartedAwaitingHuman,
     StartedFailed,
     Stale,
@@ -1376,6 +1386,8 @@ enum CandidateOutcome {
 #[derive(Debug)]
 enum AttemptResult {
     Previewed,
+    AutomaticPublished,
+    AutomaticPending,
     AwaitingHuman,
     Failed,
 }
