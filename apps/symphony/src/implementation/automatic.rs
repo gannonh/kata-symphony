@@ -85,7 +85,10 @@ impl ImplementationPullRequestPort for crate::github::client::GithubClient {
         base: Option<&str>,
         max_pages: u32,
     ) -> Result<Vec<GithubPullRequest>> {
-        GithubClientExt::list(self, state, head, base, max_pages).await
+        crate::github::client::GithubClient::list_pull_requests(
+            self, state, head, base, max_pages,
+        )
+        .await
     }
 
     async fn create_pull_request(
@@ -96,7 +99,10 @@ impl ImplementationPullRequestPort for crate::github::client::GithubClient {
         base: &str,
         draft: bool,
     ) -> Result<GithubPullRequest> {
-        GithubClientExt::create(self, title, body, head, base, draft).await
+        crate::github::client::GithubClient::create_pull_request(
+            self, title, body, head, base, draft,
+        )
+        .await
     }
 }
 
@@ -124,49 +130,6 @@ impl ImplementationPullRequestPort for std::sync::Arc<dyn ImplementationPullRequ
     ) -> Result<GithubPullRequest> {
         (**self)
             .create_pull_request(title, body, head, base, draft)
-            .await
-    }
-}
-
-/// Avoid recursive inherent/trait method name clash.
-trait GithubClientExt {
-    async fn list(
-        &self,
-        state: &str,
-        head: Option<&str>,
-        base: Option<&str>,
-        max_pages: u32,
-    ) -> Result<Vec<GithubPullRequest>>;
-    async fn create(
-        &self,
-        title: &str,
-        body: &str,
-        head: &str,
-        base: &str,
-        draft: bool,
-    ) -> Result<GithubPullRequest>;
-}
-
-impl GithubClientExt for crate::github::client::GithubClient {
-    async fn list(
-        &self,
-        state: &str,
-        head: Option<&str>,
-        base: Option<&str>,
-        max_pages: u32,
-    ) -> Result<Vec<GithubPullRequest>> {
-        self.list_pull_requests(state, head, base, max_pages).await
-    }
-
-    async fn create(
-        &self,
-        title: &str,
-        body: &str,
-        head: &str,
-        base: &str,
-        draft: bool,
-    ) -> Result<GithubPullRequest> {
-        self.create_pull_request(title, body, head, base, draft)
             .await
     }
 }
