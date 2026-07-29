@@ -2191,7 +2191,10 @@ mod tests {
         assert_eq!(recovered.status, PublicationStatus::Pending);
         assert_eq!(recovered.retry_count, 1);
         assert_eq!(
-            recovered.last_error.as_ref().map(|error| error.code.as_str()),
+            recovered
+                .last_error
+                .as_ref()
+                .map(|error| error.code.as_str()),
             Some("publication_retryable")
         );
     }
