@@ -341,7 +341,7 @@ pub fn validate_spec_file_path(path: &str) -> Result<(), ImplementationValidatio
                 "must not contain '..' path segments".to_string(),
             ));
         }
-        if component == ".git" || normalized.iter().any(|part: &&str| *part == ".git") {
+        if component == ".git" || normalized.contains(&".git") {
             return Err(ImplementationValidationError::new(
                 "spec_file",
                 "must not address .git".to_string(),

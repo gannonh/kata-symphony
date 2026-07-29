@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::domain::CodexConfig;
 use crate::error::{Result, SymphonyError};
-use crate::implementation::bundle::{clone_from_bundle, create_base_bundle, verify_bundle};
+use crate::implementation::bundle::{clone_from_bundle, create_base_bundle};
 use crate::implementation::domain::ExecutionProfile;
 use crate::triage::domain::StageUsage;
 use crate::triage::runner::{
@@ -164,9 +164,8 @@ impl ImplementationRunner {
 
         write_stage_inputs(&layout.stage_input_path, &request.stage_inputs)?;
 
-        let usage = harness.run_turn(request, &layout).await.map_err(|error| {
+        let usage = harness.run_turn(request, &layout).await.inspect_err(|_| {
             let _ = fs::remove_dir_all(&layout.attempt_root);
-            error
         })?;
 
         let output_bytes = fs::read(&layout.output_path).map_err(|error| {
@@ -717,11 +716,57 @@ mod tests {
     }
 
     #[test]
-    fn create_base_bundle_roundtrip_for_runner() {
-        let (repo, head) = init_repo();
+    fn docker_bundle_enter_leave_contract_on_host() {
+        // AC6 without a daemon: repository enters via verified base bundle and
+        // leaves via verified result bundle; docker env remains forge-free.
+        let (repo, base) = init_repo();
         let tmp = tempdir().unwrap();
-        let bundle = tmp.path().join("base.bundle");
-        create_base_bundle(repo.path(), &head, &bundle).unwrap();
-        verify_bundle(&bundle).unwrap();
+        let base_bundle = tmp.path().join("base.bundle");
+        create_base_bundle(repo.path(), &base, &base_bundle).unwrap();
+        crate::implementation::bundle::verify_bundle(&base_bundle).unwrap();
+
+        let workspace = tmp.path().join("workspace");
+        clone_from_bundle(&base_bundle, &workspace).unwrap();
+        fs::write(workspace.join("src.rs"), "fn main() {}\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "src.rs"])
+            .current_dir(&workspace)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args([
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "user.name=T",
+                "commit",
+                "-m",
+                "change"
+            ])
+            .current_dir(&workspace)
+            .status()
+            .unwrap()
+            .success());
+        let head = git_stdout(&workspace, &["rev-parse", "HEAD"]).unwrap();
+        let result_bundle = tmp.path().join("result.bundle");
+        crate::implementation::bundle::create_result_bundle(
+            &workspace,
+            &base,
+            &head,
+            &result_bundle,
+        )
+        .unwrap();
+
+        let imported =
+            crate::implementation::bundle::import_bundle_to_temp(&base_bundle, &result_bundle)
+                .unwrap();
+        assert!(imported.path().join("repo").exists() || imported.path().exists());
+
+        let mut parent = HashMap::new();
+        parent.insert("GH_TOKEN".into(), "x".into());
+        parent.insert("ANTHROPIC_API_KEY".into(), "sk".into());
+        let env = docker_credential_isolated_env("/home/w", "/out.json", None, &parent);
+        assert_no_forge_credentials(&env).unwrap();
     }
 }

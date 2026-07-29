@@ -25,9 +25,10 @@ pub const IMPLEMENTATION_VALIDATION_MAX_COMMANDS: usize = 20;
 pub const IMPLEMENTATION_VALIDATION_NAME_MAX_BYTES: usize = 100;
 pub const IMPLEMENTATION_VALIDATION_COMMAND_MAX_BYTES: usize = 4_000;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ImplementationMode {
+    #[default]
     Preview,
     Automatic,
 }
@@ -38,12 +39,6 @@ impl ImplementationMode {
             Self::Preview => "preview",
             Self::Automatic => "automatic",
         }
-    }
-}
-
-impl Default for ImplementationMode {
-    fn default() -> Self {
-        Self::Preview
     }
 }
 

@@ -1,6 +1,7 @@
 # Specs Update Log
 
 ## 2026-07-29
+* **A3 PR1 implemented**: Preview path (eligibility, local runner, validation/repair, bundles, preview publisher, HTTP/metrics) landed with [build](/specs/2026-07-29-a3-pr1-build-report.md) and [verify](/specs/2026-07-29-a3-pr1-verify-report.md) reports plus [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md). Automated gates Pass; live GitHub/Docker UAT residual. PR2 draft-PR publication is next on the roadmap.
 * **A3 PR1 foundation**: Store migration `004_implementation_stage.sql`, eligibility/guards, config validation, doctor checks, HTTP/metrics stubs, and starter prompts/reference comments landed under `apps/symphony/src/implementation/`. Full coordinator/runner/preview loop still open within PR1.
 
 ## 2026-07-27

@@ -1,5 +1,8 @@
 # ADRs Update Log
 
+## 2026-07-29
+* **Accepted**: [ADR-0004 A3 implementation durability and bundles](/adrs/0004-a3-implementation-durability-and-bundles.md) records stage-scoped A3 tables, content-addressed Git bundles beside SQLite, credential-isolated local execution, and preview-only publication before PR2 draft-PR handoff.
+
 ## 2026-07-26
 * **Accepted and linked**: [ADR-0003 A2 spec-stage artifacts and human gates](/adrs/0003-a2-spec-stage-artifacts-and-gates.md) records stage-scoped attempts, fresh-context review turns, immutable spec versions, tracker decisions, and approved-artifact pinning; linked from the accepted [A2 UAT verify report](/specs/2026-07-26-a2-uat-verify-report.md).
 

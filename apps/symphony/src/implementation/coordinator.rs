@@ -1,6 +1,5 @@
 //! A3 eligibility, attempts, repair loop, and reconciliation.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -725,7 +724,6 @@ where
         let max_cycles = service.implementation.max_validation_cycles.max(1);
         let mut validation_results: Vec<ValidationCommandResult> = Vec::new();
         let mut cycles_completed = 0u32;
-        let mut ordinal = 2u32;
 
         for cycle in 1..=max_cycles {
             let outcome = validator
@@ -790,7 +788,7 @@ where
                 return Ok(AttemptResult::Failed);
             }
 
-            // Repair turn in the same workspace.
+            // Repair turn in the same workspace. Ordinal 1 is implement; repairs are cycle+1.
             let repair_inputs = serde_json::json!({
                 "issue": stage_inputs.get("issue"),
                 "approved_spec": approved.artifact,
@@ -809,7 +807,7 @@ where
                 .await?;
             self.store_turn(
                 stage_run_id,
-                ordinal,
+                cycle + 1,
                 ImplementationTurnKind::Repair,
                 harness,
                 model.as_deref(),
@@ -818,7 +816,6 @@ where
                 Some(&turn.output_bytes),
                 None,
             )?;
-            ordinal += 1;
             manifest = parse_and_validate_manifest(&turn.output_bytes, &approved.artifact)
                 .map_err(|error| {
                     SymphonyError::TriageError(format!("repair manifest invalid: {error}"))
@@ -1162,6 +1159,7 @@ mod tests {
     use crate::spec::domain::{SpecArtifact, SpecPublicationKind};
     use crate::triage::runner::AttemptLayout;
     use crate::triage::store::StoreSpecArtifactRequest;
+    use std::collections::HashMap;
     use std::process::Command;
     use std::sync::Mutex;
     use tempfile::tempdir;
