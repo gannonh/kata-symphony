@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::domain::{AgentBackend, ServiceConfig};
 use crate::error::{Result, SymphonyError};
+use crate::github::auth::resolve_github_token;
 use crate::github::client::GithubClient;
 use crate::implementation::artifact::{
     expand_spec_file_path, is_spec_gap, parse_and_validate_manifest, render_approved_spec,
@@ -18,6 +19,7 @@ use crate::implementation::artifact::{
 use crate::implementation::automatic::{
     resolve_publication_remote, AutomaticImplementationPublisher, AutomaticPublishRequest,
 };
+use crate::implementation::branch::branch_name_for_issue;
 use crate::implementation::bundle::{
     artifacts_dir, cleanup_incomplete_temps, create_result_bundle, store_blob_atomic, BlobSource,
 };
@@ -414,46 +416,45 @@ where
             run.issue_id
         };
         let issue = self.issues.fetch_issue(&issue_id).await?;
-        let remote_url =
-            resolve_publication_remote(&intent.desired_effects, service.workspace.repo.as_deref())?;
-        let approval_label = intent
-            .desired_effects
-            .get("approval_route_label")
-            .and_then(|v| v.as_str())
-            .unwrap_or(service.spec.approval_route.label.as_str());
-        let completion_state = intent
-            .desired_effects
-            .get("completion_route_state")
-            .and_then(|v| v.as_str())
-            .or_else(|| {
-                service
-                    .implementation
-                    .completion_route
-                    .as_ref()
-                    .map(|route| route.state.as_str())
-            })
-            .ok_or_else(|| {
-                SymphonyError::TriageError(
-                    "automatic publication requires completion_route.state".into(),
-                )
-            })?;
-        let repo_owner = service
+        let repo_owner = required_desired_effect(&intent.desired_effects, "repo_owner")?;
+        let repo_name = required_desired_effect(&intent.desired_effects, "repo_name")?;
+        let active_repo_owner = service
             .tracker
             .repo_owner
             .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .ok_or_else(|| SymphonyError::TriageError("tracker.repo_owner required".into()))?;
-        let base_branch = intent
-            .desired_effects
-            .get("base_branch")
-            .and_then(|v| v.as_str())
-            .or(service.workspace.base_branch.as_deref())
-            .unwrap_or("main");
+        let active_repo_name = service
+            .tracker
+            .repo_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| SymphonyError::TriageError("tracker.repo_name required".into()))?;
+        if active_repo_owner != repo_owner || active_repo_name != repo_name {
+            return Err(SymphonyError::TriageError(format!(
+                "automatic publication repository drift: pinned={repo_owner}/{repo_name} configured={active_repo_owner}/{active_repo_name}"
+            )));
+        }
+        let publication_branch =
+            required_desired_effect(&intent.desired_effects, "publication_branch")?;
+        let base_branch = required_desired_effect(&intent.desired_effects, "base_branch")?;
+        let approval_label =
+            required_desired_effect(&intent.desired_effects, "approval_route_label")?;
+        let completion_state =
+            required_desired_effect(&intent.desired_effects, "completion_route_state")?;
+        let remote_url = resolve_publication_remote(
+            &intent.desired_effects,
+            &self.config.forge_host,
+            repo_owner,
+            repo_name,
+        )?;
+        let github_token = resolve_github_token(&service.tracker)
+            .ok_or(SymphonyError::MissingGithubApiToken)?
+            .token;
         let validation = last_validation_results(&self.store, &artifact.stage_run_id)?;
-        let publisher_login = self
-            .comments
-            .authenticated_login()
-            .await
-            .unwrap_or_default();
+        let publisher_login = self.comments.authenticated_login().await?;
         let current_revision = implementation_issue_revision(&issue, service, &publisher_login);
 
         let Some(pulls) = self.pulls.as_ref() else {
@@ -484,7 +485,6 @@ where
                 AutomaticPublishRequest {
                     intent,
                     issue_number: issue.issue_number,
-                    issue_identifier: &issue.identifier,
                     issue_title: &issue.title,
                     current_issue_revision: &current_revision,
                     run_id: &intent.run_id,
@@ -493,9 +493,10 @@ where
                     bundle: &bundle,
                     manifest: &artifact.manifest,
                     validation: &validation,
-                    branch_prefix: &service.workspace.branch_prefix,
+                    branch: publication_branch,
                     base_branch,
                     remote_url: &remote_url,
+                    github_token: Some(&github_token),
                     repo_owner,
                     approval_route_label: approval_label,
                     completion_route_state: completion_state,
@@ -1192,6 +1193,24 @@ where
         } else {
             ImplementationPublicationKind::Preview
         };
+        let repo_owner = service
+            .tracker
+            .repo_owner
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| SymphonyError::TriageError("tracker.repo_owner required".into()))?;
+        let repo_name = service
+            .tracker
+            .repo_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| SymphonyError::TriageError("tracker.repo_name required".into()))?;
+        let base_branch = service.workspace.base_branch.as_deref().unwrap_or("main");
+        let publication_branch =
+            branch_name_for_issue(&service.workspace.branch_prefix, &issue.identifier);
+        let remote_url = intent_remote_url(&self.config.forge_host, repo_owner, repo_name)?;
         let intent = self.store.create_implementation_publication_intent(
             run_id,
             Some(&artifact.artifact_id),
@@ -1201,8 +1220,11 @@ where
                 "changed_paths": assessment.changed_paths,
                 "approval_route_label": service.spec.approval_route.label,
                 "completion_route_state": service.implementation.completion_route.as_ref().map(|r| &r.state),
-                "base_branch": service.workspace.base_branch,
-                "remote_url": intent_remote_url(service),
+                "base_branch": base_branch,
+                "publication_branch": publication_branch,
+                "repo_owner": repo_owner,
+                "repo_name": repo_name,
+                "remote_url": remote_url,
             }),
         )?;
 
@@ -1463,13 +1485,29 @@ fn issue_number_from_run(store: &SharedFactoryStore, run_id: &str) -> Result<u64
     })
 }
 
-fn intent_remote_url(service: &ServiceConfig) -> Option<String> {
-    service
-        .workspace
-        .repo
-        .as_ref()
-        .map(|value| value.trim().to_string())
+fn intent_remote_url(forge_host: &str, repo_owner: &str, repo_name: &str) -> Result<String> {
+    resolve_publication_remote(
+        &serde_json::Value::Null,
+        forge_host,
+        repo_owner,
+        repo_name,
+    )
+}
+
+fn required_desired_effect<'a>(
+    desired_effects: &'a serde_json::Value,
+    key: &str,
+) -> Result<&'a str> {
+    desired_effects
+        .get(key)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
         .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            SymphonyError::TriageError(format!(
+                "automatic publication intent is missing pinned {key}"
+            ))
+        })
 }
 
 fn last_validation_results(
@@ -2055,5 +2093,31 @@ mod tests {
             .list_a3_eligible_approved_runs(&configuration_revision)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn publication_remote_is_derived_from_pinned_forge_identity() {
+        assert_eq!(
+            intent_remote_url("github.com", "acme", "repo").unwrap(),
+            "https://github.com/acme/repo.git"
+        );
+        assert_eq!(
+            intent_remote_url("github.example.com", "acme", "repo.git").unwrap(),
+            "https://github.example.com/acme/repo.git"
+        );
+    }
+
+    #[test]
+    fn automatic_reconciliation_requires_pinned_desired_effects() {
+        let desired = serde_json::json!({
+            "publication_branch": "symphony/KATA-42",
+            "repo_owner": "acme",
+        });
+        assert_eq!(
+            required_desired_effect(&desired, "publication_branch").unwrap(),
+            "symphony/KATA-42"
+        );
+        let err = required_desired_effect(&desired, "repo_name").unwrap_err();
+        assert!(err.to_string().contains("pinned repo_name"));
     }
 }
