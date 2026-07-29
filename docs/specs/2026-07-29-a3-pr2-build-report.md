@@ -11,14 +11,14 @@ timestamp: 2026-07-29T18:00:00Z
 
 ## Status
 
-Implemented — automated gates Pass; live GitHub draft-PR / restart UAT residual (see [verify report](2026-07-29-a3-pr2-verify-report.md)). Opened as [#607](https://github.com/gannonh/kata-symphony/pull/607).
+Implemented — review remediation and automated gates Pass; live GitHub draft-PR / restart UAT residual (see [verify report](2026-07-29-a3-pr2-verify-report.md)). Pull request: [#607](https://github.com/gannonh/kata-symphony/pull/607).
 
 ## Spec
 
 - Spec: [`2026-07-26-a3-implementation-stage-design.md`](2026-07-26-a3-implementation-stage-design.md)
 - Scope: PR2 delivery slice (AC 14–16 and related HTTP/events/tests; automated portions of 17–19)
 - Non-goals: live UAT, Docker daemon lifecycle, A4 agent review
-- Branch: `cursor/a3-pr2-draft-pr-publication-4eda` @ `d08697e3`
+- Branch: `cursor/a3-pr2-draft-pr-publication-4eda`
 - Base: `main` @ `878bb4b4` (A3 PR1)
 
 ## Tasks completed
@@ -31,6 +31,19 @@ Implemented — automated gates Pass; live GitHub draft-PR / restart UAT residua
 6. Coordinator automatic mode wiring + `TriageRoutingPort` / pull-request ports
 7. HTTP `pull_request` object; doctor automatic completion_route checks
 8. OKF roadmap/docs updates
+
+## Review remediation
+
+The PR takeover closed the publication-path findings before re-review:
+
+1. Publication intents pin forge owner, repository, base, and resolved branch; reconciliation rejects configuration drift.
+2. The trusted publisher derives a clean HTTPS forge URL instead of reusing the local workspace path.
+3. Git fetch, push, and observation receive the configured GitHub token through a subprocess-only authorization header. Credentials are never stored in the remote URL or Git config.
+4. Network Git commands have a finite timeout, disabled terminal prompting, bounded output capture, and credential/remote redaction.
+5. Persisted draft-PR artifacts are checked against live GitHub state again before tracker routing.
+6. Closed owned PRs no longer poison recovery; retryable issue drift stays pending.
+7. Authenticated-login failures propagate, missing publication intents fail loudly, and doctor reports the pinned publication target without claiming unverified permissions.
+8. Focused regression tests cover every repaired failure and the preview path remains backward-compatible.
 
 ## Files changed (primary)
 
@@ -48,14 +61,15 @@ cd apps/symphony && cargo clippy --lib -- -D warnings
 cd apps/symphony && cargo test --lib
 ```
 
-Results (this environment):
+Results (GitHub Actions on the remediated PR head):
 
 | Gate | Result |
 | --- | --- |
-| `cargo fmt` | Pass |
-| `cargo clippy --lib -- -D warnings` | Pass |
-| `cargo test --lib` | **314** passed |
-| `cargo test --test github_client_tests` | **14** passed (incl. list/create PR) |
+| `cargo fmt --check` | Pass |
+| `cargo clippy -- -D warnings` | Pass |
+| `cargo test` | Pass, including **327** library tests and **14** GitHub client tests |
+| `cargo llvm-cov --fail-under-lines 72` | Pass |
+| GitHub backend validation / golden-path smoke / distributions | Pass |
 | Docker daemon | Unavailable — residual |
 | Live GitHub draft-PR UAT | Not run — residual |
 
