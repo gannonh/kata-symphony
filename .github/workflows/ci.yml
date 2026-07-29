@@ -21,16 +21,6 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Export source bundle for PR takeover
-        run: git bundle create pr607-source.bundle HEAD
-
-      - name: Upload source bundle for PR takeover
-        uses: actions/upload-artifact@v7
-        with:
-          name: pr607-source-bundle
-          path: pr607-source.bundle
-          retention-days: 1
-
       - name: Fetch main branch for --affected comparison
         run: git fetch origin main:main
 
