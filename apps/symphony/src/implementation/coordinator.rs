@@ -366,9 +366,10 @@ where
                             .get_implementation_publication_intent(&intent.intent_id)?;
                         if let Some(latest) = latest.filter(|latest| {
                             latest.status == PublicationStatus::Pending
-                                && !latest.last_error.as_ref().is_some_and(|last| {
-                                    last.retryable && last.remediation == error_message.as_str()
-                                })
+                                && !latest
+                                    .last_error
+                                    .as_ref()
+                                    .is_some_and(|last| already_recorded(last, &error_message))
                         }) {
                             let failure = FactoryError::new(
                                 "publication_retryable",
@@ -1613,6 +1614,19 @@ fn required_desired_effect<'a>(
         })
 }
 
+/// Whether the intent's stored error already describes this reconcile failure,
+/// so the generic retryable wrapper neither charges the retry budget twice nor
+/// clobbers the specific error code the inner path recorded.
+///
+/// The comparison is a suffix match because `SymphonyError` variants prefix
+/// their payload on `Display` (`"triage error: {0}"`), while `remediation`
+/// holds the unprefixed message.
+fn already_recorded(last: &FactoryError, error_message: &str) -> bool {
+    last.retryable
+        && !last.remediation.is_empty()
+        && error_message.ends_with(last.remediation.as_str())
+}
+
 /// Exponential backoff for the given reconcile attempt count, capped at
 /// [`AUTOMATIC_PUBLICATION_BACKOFF_MAX_SECS`].
 fn automatic_backoff_secs(retry_count: u32) -> i64 {
@@ -2313,6 +2327,36 @@ mod tests {
         );
         let err = required_desired_effect(&desired, "repo_name").unwrap_err();
         assert!(err.to_string().contains("pinned repo_name"));
+    }
+
+    #[test]
+    fn already_recorded_matches_through_the_display_prefix() {
+        let drift = FactoryError::new(
+            "issue_revision_drift",
+            "implementation_publication",
+            "issue revision drifted: approved=a current=b",
+            true,
+            None,
+        );
+        // The inner path stores the unprefixed remediation; the reconcile loop
+        // compares against the Display form, which adds "triage error: ".
+        let displayed =
+            SymphonyError::TriageError("issue revision drifted: approved=a current=b".into())
+                .to_string();
+        assert!(already_recorded(&drift, &displayed));
+        assert!(!already_recorded(&drift, "triage error: something else"));
+
+        // A non-retryable or empty remediation never suppresses recording.
+        let terminal = FactoryError::new(
+            "pr_drift",
+            "implementation_publication",
+            "observed drift",
+            false,
+            None,
+        );
+        assert!(!already_recorded(&terminal, "triage error: observed drift"));
+        let empty = FactoryError::new("x", "implementation_publication", "", true, None);
+        assert!(!already_recorded(&empty, "triage error: anything"));
     }
 
     #[test]

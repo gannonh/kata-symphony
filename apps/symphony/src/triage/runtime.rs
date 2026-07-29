@@ -388,6 +388,17 @@ impl SharedFactoryStore {
         })
     }
 
+    pub fn set_implementation_publication_waiting(
+        &self,
+        intent_id: &str,
+        status: crate::triage::domain::PublicationStatus,
+        error: crate::triage::domain::FactoryError,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.set_implementation_publication_waiting(intent_id, status, error)
+        })
+    }
+
     pub fn store_draft_pr_artifact(
         &self,
         request: crate::triage::store::StoreDraftPrArtifactRequest,

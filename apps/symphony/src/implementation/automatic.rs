@@ -192,7 +192,11 @@ where
                 true,
                 None,
             );
-            store.set_implementation_publication_error(
+            // Drift clears only when the issue returns to the approved revision,
+            // which waits on a human. Recording it as a waiting condition keeps it
+            // off the retry budget so a slow re-approval cannot terminalize the
+            // intent as `blocked`.
+            store.set_implementation_publication_waiting(
                 &request.intent.intent_id,
                 PublicationStatus::Pending,
                 error.clone(),
@@ -1878,42 +1882,55 @@ mod tests {
         let pulls = FakePulls::new();
         let (intent, artifact, bundle, manifest) = setup_automatic_fixture(&store).await;
         let publisher = AutomaticImplementationPublisher::new(comments, routing, pulls);
-        let err = publisher
-            .publish_automatic(
-                &store,
-                AutomaticPublishRequest {
-                    intent: &intent,
-                    issue_number: 42,
-                    issue_title: "Retry",
-                    current_issue_revision: "other-rev",
-                    run_id: &artifact.run_id,
-                    stage_run_id: &artifact.stage_run_id,
-                    artifact: &artifact,
-                    bundle: &bundle,
-                    manifest: &manifest,
-                    validation: &[],
-                    branch: "symphony/_42",
-                    base_branch: "main",
-                    remote_url: "/tmp/unused",
-                    github_token: None,
-                    repo_owner: "acme",
-                    approval_route_label: "ready-for-agent",
-                    completion_route_state: "Agent Review",
-                    storage_path: Path::new("/tmp/unused-db"),
-                    max_pages: 2,
-                },
-            )
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("drift"));
-        assert_eq!(
-            store
+
+        // Drift persists until a human re-approves the issue, which can outlast
+        // any retry ceiling. Poll well past that ceiling and assert the intent
+        // never consumes retry budget, so it cannot be terminalized as blocked
+        // and stranded once the revision is remediated.
+        for _ in 0..10 {
+            let err = publisher
+                .publish_automatic(
+                    &store,
+                    AutomaticPublishRequest {
+                        intent: &intent,
+                        issue_number: 42,
+                        issue_title: "Retry",
+                        current_issue_revision: "other-rev",
+                        run_id: &artifact.run_id,
+                        stage_run_id: &artifact.stage_run_id,
+                        artifact: &artifact,
+                        bundle: &bundle,
+                        manifest: &manifest,
+                        validation: &[],
+                        branch: "symphony/_42",
+                        base_branch: "main",
+                        remote_url: "/tmp/unused",
+                        github_token: None,
+                        repo_owner: "acme",
+                        approval_route_label: "ready-for-agent",
+                        completion_route_state: "Agent Review",
+                        storage_path: Path::new("/tmp/unused-db"),
+                        max_pages: 2,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("drift"));
+
+            let recovered = store
                 .get_implementation_publication_intent(&intent.intent_id)
                 .unwrap()
-                .unwrap()
-                .status,
-            PublicationStatus::Pending
-        );
+                .unwrap();
+            assert_eq!(recovered.status, PublicationStatus::Pending);
+            assert_eq!(recovered.retry_count, 0);
+            assert_eq!(
+                recovered
+                    .last_error
+                    .as_ref()
+                    .map(|error| error.code.as_str()),
+                Some("issue_revision_drift")
+            );
+        }
     }
 
     #[test]

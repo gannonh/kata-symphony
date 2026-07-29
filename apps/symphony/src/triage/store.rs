@@ -3152,6 +3152,42 @@ impl SqliteFactoryStore {
         Ok(())
     }
 
+    /// Record a publication condition that is waiting on an unmet precondition
+    /// rather than on a failed attempt, leaving `retry_count` untouched.
+    ///
+    /// Conditions like issue-revision drift clear only when a human re-approves
+    /// the issue, which can take arbitrarily long. Charging them to the retry
+    /// budget consumed by [`Self::set_implementation_publication_error`] would
+    /// let a normal review delay exhaust the budget and terminalize the intent
+    /// as `blocked`, which no code path recovers from.
+    pub fn set_implementation_publication_waiting(
+        &mut self,
+        intent_id: &str,
+        status: PublicationStatus,
+        error: FactoryError,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE implementation_publication_intents
+                 SET status = ?1, last_error_json = ?2, updated_at = ?3
+                 WHERE intent_id = ?4",
+                params![
+                    status.as_str(),
+                    optional_json(&Some(error))?,
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "implementation publication intent {intent_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn store_draft_pr_artifact(
         &mut self,
         request: StoreDraftPrArtifactRequest,
