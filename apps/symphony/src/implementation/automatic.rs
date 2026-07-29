@@ -325,28 +325,24 @@ where
             intent = reload_intent(store, &intent.intent_id)?;
         }
 
-        let route_applied = intent
-            .completed_steps
-            .iter()
-            .any(|step| step == ROUTE_APPLIED_STEP);
         let pr_verified = intent
             .completed_steps
             .iter()
             .any(|step| step == PR_VERIFIED_STEP);
+        let publisher_login = self.comments.authenticated_login().await?;
         let draft = if let Some(existing) =
             store.get_draft_pr_for_implementation_artifact(&request.artifact.artifact_id)?
         {
-            if !route_applied || !pr_verified {
-                self.reverify_persisted_draft_pr(
-                    store,
-                    &intent,
-                    &request,
-                    &existing,
-                    &branch,
-                    &desired_head,
-                )
-                .await?;
-            }
+            self.reverify_persisted_draft_pr(
+                store,
+                &intent,
+                &request,
+                &existing,
+                &branch,
+                &desired_head,
+                &publisher_login,
+            )
+            .await?;
             if !pr_verified {
                 let projection = serde_json::json!({
                     "step": PR_VERIFIED_STEP,
@@ -367,7 +363,14 @@ where
             existing
         } else {
             let pr = self
-                .reconcile_draft_pr(store, &intent, &request, &branch, &desired_head)
+                .reconcile_draft_pr(
+                    store,
+                    &intent,
+                    &request,
+                    &branch,
+                    &desired_head,
+                    &publisher_login,
+                )
                 .await?;
             let record = store.store_draft_pr_artifact(StoreDraftPrArtifactRequest {
                 run_id: request.run_id.to_string(),
@@ -489,6 +492,7 @@ where
         request: &AutomaticPublishRequest<'_>,
         branch: &str,
         desired_head: &str,
+        publisher_login: &str,
     ) -> Result<GithubPullRequest> {
         let head_filter = format!("{}:{}", request.repo_owner, branch);
         let candidates = self
@@ -502,6 +506,7 @@ where
             .await?;
 
         let mut owned: Vec<GithubPullRequest> = Vec::new();
+        let mut closed_owned: Vec<GithubPullRequest> = Vec::new();
         let mut foreign_open = false;
         for pr in candidates {
             let marker_match = pr
@@ -510,13 +515,35 @@ where
                 .and_then(extract_implementation_pr_intent_id)
                 .as_deref()
                 == Some(intent.intent_id.as_str());
-            if marker_match && pr.state == "open" {
-                owned.push(pr);
+            if marker_match {
+                if pr.state == "open" {
+                    owned.push(pr);
+                } else {
+                    closed_owned.push(pr);
+                }
             } else if pr.state == "open" {
                 foreign_open = true;
             }
         }
 
+        if let Some(pr) = closed_owned.first() {
+            let error = FactoryError::new(
+                "closed_owned_pr",
+                "implementation_publication",
+                format!(
+                    "owned PR #{} is {}, refusing to replace maintainer divergence",
+                    pr.number, pr.state
+                ),
+                false,
+                None,
+            );
+            store.set_implementation_publication_error(
+                &intent.intent_id,
+                PublicationStatus::Conflict,
+                error.clone(),
+            )?;
+            return Err(SymphonyError::TriageError(error.remediation));
+        }
         if foreign_open && owned.is_empty() {
             let error = FactoryError::new(
                 "foreign_pr",
@@ -548,20 +575,27 @@ where
             return Err(SymphonyError::TriageError(error.remediation));
         }
         if let Some(pr) = owned.into_iter().next() {
-            return verify_owned_draft_pr(&pr, intent, branch, request.base_branch, desired_head)
-                .inspect_err(|error| {
-                    let _ = store.set_implementation_publication_error(
-                        &intent.intent_id,
-                        PublicationStatus::Conflict,
-                        FactoryError::new(
-                            "pr_drift",
-                            "implementation_publication",
-                            error.to_string(),
-                            false,
-                            None,
-                        ),
-                    );
-                });
+            return verify_owned_draft_pr(
+                &pr,
+                intent,
+                branch,
+                request.base_branch,
+                desired_head,
+                publisher_login,
+            )
+            .inspect_err(|error| {
+                let _ = store.set_implementation_publication_error(
+                    &intent.intent_id,
+                    PublicationStatus::Conflict,
+                    FactoryError::new(
+                        "pr_drift",
+                        "implementation_publication",
+                        error.to_string(),
+                        false,
+                        None,
+                    ),
+                );
+            });
         }
 
         let title = format!(
@@ -587,7 +621,14 @@ where
             .pulls
             .create_pull_request(&title, &body, branch, request.base_branch, true)
             .await?;
-        verify_owned_draft_pr(&created, intent, branch, request.base_branch, desired_head)?;
+        verify_owned_draft_pr(
+            &created,
+            intent,
+            branch,
+            request.base_branch,
+            desired_head,
+            publisher_login,
+        )?;
         Ok(created)
     }
 
@@ -599,6 +640,7 @@ where
         persisted: &DraftPrArtifactRecord,
         branch: &str,
         desired_head: &str,
+        publisher_login: &str,
     ) -> Result<()> {
         let head_filter = format!("{}:{}", request.repo_owner, branch);
         let live = self
@@ -622,7 +664,14 @@ where
                 ))
             })
             .and_then(|pr| {
-                verify_owned_draft_pr(pr, intent, branch, request.base_branch, desired_head)
+                verify_owned_draft_pr(
+                    pr,
+                    intent,
+                    branch,
+                    request.base_branch,
+                    desired_head,
+                    publisher_login,
+                )
             })
             .and_then(|pr| verify_persisted_draft_pr_record(persisted, &pr));
 
@@ -663,6 +712,7 @@ fn verify_owned_draft_pr(
     branch: &str,
     base_branch: &str,
     desired_head: &str,
+    publisher_login: &str,
 ) -> Result<GithubPullRequest> {
     let marker = pr
         .body
@@ -672,6 +722,17 @@ fn verify_owned_draft_pr(
         return Err(SymphonyError::TriageError(
             "draft PR missing ownership marker".into(),
         ));
+    }
+    let author = pr
+        .user
+        .as_ref()
+        .map(|user| user.login.as_str())
+        .unwrap_or("");
+    if !author.eq_ignore_ascii_case(publisher_login) {
+        return Err(SymphonyError::TriageError(format!(
+            "owned PR #{} author {author:?} does not match authenticated publisher {publisher_login}",
+            pr.number
+        )));
     }
     if pr.state != "open" {
         return Err(SymphonyError::TriageError(format!(
@@ -1368,7 +1429,9 @@ mod tests {
                 ref_name: "main".into(),
                 sha: bundle.base_commit.clone(),
             },
-            user: None,
+            user: Some(GithubUser {
+                login: "symphony-bot".into(),
+            }),
             body: Some(body),
         });
 
@@ -1419,7 +1482,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_owned_pr_is_ignored_during_create_before_record_recovery() {
+    async fn copied_marker_from_another_author_is_rejected() {
         let (_dir, store) = open_store();
         let comments = FakeComments::new("symphony-bot");
         let routing = FakeRouting::new(vec!["ready-for-agent".into()]);
@@ -1431,8 +1494,8 @@ mod tests {
             number: 55,
             html_url: "https://github.com/acme/repo/pull/55".into(),
             draft: true,
-            state: "closed".into(),
-            title: "closed owned".into(),
+            state: "open".into(),
+            title: "copied marker".into(),
             head: GithubPullRequestRef {
                 ref_name: "symphony/_42".into(),
                 sha: bundle.head_commit.clone(),
@@ -1441,13 +1504,15 @@ mod tests {
                 ref_name: "main".into(),
                 sha: bundle.base_commit.clone(),
             },
-            user: None,
+            user: Some(GithubUser {
+                login: "human".into(),
+            }),
             body: Some(format!("{}\n", pr_marker(&intent.intent_id))),
         });
 
         let intent = reload_intent(&store, &intent.intent_id).unwrap();
         let publisher = AutomaticImplementationPublisher::new(comments, routing, pulls.clone());
-        let draft = publisher
+        let err = publisher
             .publish_automatic(
                 &store,
                 AutomaticPublishRequest {
@@ -1473,13 +1538,83 @@ mod tests {
                 },
             )
             .await
-            .unwrap();
-        assert_ne!(draft.number, 55);
-        assert_eq!(*pulls.create_calls.lock().unwrap(), 1);
+            .unwrap_err();
+        assert!(err.to_string().contains("authenticated publisher"));
+        assert_eq!(*pulls.create_calls.lock().unwrap(), 0);
+        assert_eq!(
+            reload_intent(&store, &intent.intent_id).unwrap().status,
+            PublicationStatus::Conflict
+        );
     }
 
     #[tokio::test]
-    async fn persisted_draft_pr_is_reverified_before_tracker_handoff() {
+    async fn closed_owned_pr_blocks_create_before_record_recovery() {
+        let (_dir, store) = open_store();
+        let comments = FakeComments::new("symphony-bot");
+        let routing = FakeRouting::new(vec!["ready-for-agent".into()]);
+        let pulls = FakePulls::new();
+        let (intent, artifact, bundle, manifest) = setup_automatic_fixture(&store).await;
+        skip_branch(&store, &intent.intent_id, &bundle.head_commit);
+
+        pulls.prs.lock().unwrap().push(GithubPullRequest {
+            number: 55,
+            html_url: "https://github.com/acme/repo/pull/55".into(),
+            draft: true,
+            state: "closed".into(),
+            title: "closed owned".into(),
+            head: GithubPullRequestRef {
+                ref_name: "symphony/_42".into(),
+                sha: bundle.head_commit.clone(),
+            },
+            base: GithubPullRequestRef {
+                ref_name: "main".into(),
+                sha: bundle.base_commit.clone(),
+            },
+            user: Some(GithubUser {
+                login: "symphony-bot".into(),
+            }),
+            body: Some(format!("{}\n", pr_marker(&intent.intent_id))),
+        });
+
+        let intent = reload_intent(&store, &intent.intent_id).unwrap();
+        let publisher = AutomaticImplementationPublisher::new(comments, routing, pulls.clone());
+        let err = publisher
+            .publish_automatic(
+                &store,
+                AutomaticPublishRequest {
+                    intent: &intent,
+                    issue_number: 42,
+                    issue_title: "Retry",
+                    current_issue_revision: "rev",
+                    run_id: &artifact.run_id,
+                    stage_run_id: &artifact.stage_run_id,
+                    artifact: &artifact,
+                    bundle: &bundle,
+                    manifest: &manifest,
+                    validation: &[],
+                    branch: "symphony/_42",
+                    base_branch: "main",
+                    remote_url: "/tmp/unused",
+                    github_token: None,
+                    repo_owner: "acme",
+                    approval_route_label: "ready-for-agent",
+                    completion_route_state: "Agent Review",
+                    storage_path: Path::new("/tmp/unused-db"),
+                    max_pages: 2,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("refusing to replace maintainer divergence"));
+        assert_eq!(*pulls.create_calls.lock().unwrap(), 0);
+        assert_eq!(
+            reload_intent(&store, &intent.intent_id).unwrap().status,
+            PublicationStatus::Conflict
+        );
+    }
+
+    #[tokio::test]
+    async fn persisted_draft_pr_is_reverified_after_route_handoff() {
         let (_dir, store) = open_store();
         let comments = FakeComments::new("symphony-bot");
         let routing = FakeRouting::new(vec!["ready-for-agent".into()]);
@@ -1501,7 +1636,9 @@ mod tests {
                 ref_name: "main".into(),
                 sha: bundle.base_commit.clone(),
             },
-            user: None,
+            user: Some(GithubUser {
+                login: "symphony-bot".into(),
+            }),
             body: Some(format!("{}\n", pr_marker(&intent.intent_id))),
         };
         pulls.prs.lock().unwrap().push(live_pr.clone());
@@ -1527,10 +1664,19 @@ mod tests {
                 &serde_json::json!({"pr_number": 55}),
             )
             .unwrap();
+        store
+            .record_implementation_publication_step(
+                &intent.intent_id,
+                ROUTE_APPLIED_STEP,
+                PublicationStatus::Pending,
+                &serde_json::json!({"pr_number": 55}),
+            )
+            .unwrap();
         pulls.prs.lock().unwrap()[0].state = "closed".into();
 
         let intent = reload_intent(&store, &intent.intent_id).unwrap();
-        let publisher = AutomaticImplementationPublisher::new(comments, routing.clone(), pulls);
+        let publisher =
+            AutomaticImplementationPublisher::new(comments.clone(), routing.clone(), pulls);
         let err = publisher
             .publish_automatic(
                 &store,
@@ -1561,6 +1707,7 @@ mod tests {
         assert!(err.to_string().contains("not open"));
         assert!(routing.label_removes.lock().unwrap().is_empty());
         assert!(routing.state.lock().unwrap().is_none());
+        assert!(comments.comments.lock().unwrap().is_empty());
         assert_eq!(
             reload_intent(&store, &intent.intent_id).unwrap().status,
             PublicationStatus::Conflict
@@ -1590,7 +1737,9 @@ mod tests {
                 ref_name: "main".into(),
                 sha: bundle.base_commit.clone(),
             },
-            user: None,
+            user: Some(GithubUser {
+                login: "symphony-bot".into(),
+            }),
             body: Some(format!("{}\n", pr_marker(&intent.intent_id))),
         };
         pulls.prs.lock().unwrap().push(live_pr.clone());
