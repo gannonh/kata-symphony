@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS implementation_draft_pr_artifacts (
   artifact_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES factory_runs(run_id) ON DELETE CASCADE,
   implementation_artifact_id TEXT NOT NULL UNIQUE REFERENCES implementation_artifacts(artifact_id) ON DELETE CASCADE,
-  intent_id TEXT NOT NULL REFERENCES implementation_publication_intents(intent_id) ON DELETE CASCADE,
+  intent_id TEXT NOT NULL UNIQUE REFERENCES implementation_publication_intents(intent_id) ON DELETE CASCADE,
   number INTEGER NOT NULL,
   url TEXT NOT NULL,
   draft INTEGER NOT NULL,
