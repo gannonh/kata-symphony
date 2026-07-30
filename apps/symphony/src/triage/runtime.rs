@@ -816,6 +816,50 @@ impl FactoryRunQuery for SharedFactoryStore {
             .map_err(|err| err.to_string())
     }
 
+    fn blocked_publications(
+        &self,
+    ) -> std::result::Result<Vec<crate::http_server::BlockedPublicationHttpResponse>, String> {
+        self.list_blocked_implementation_publications()
+            .map(|intents| {
+                intents
+                    .into_iter()
+                    .map(
+                        |intent| crate::http_server::BlockedPublicationHttpResponse {
+                            intent_id: intent.intent_id,
+                            run_id: intent.run_id,
+                            kind: intent.kind.as_str().to_string(),
+                            retry_count: intent.retry_count,
+                            last_step: intent.completed_steps.last().cloned(),
+                            error_code: intent.last_error.as_ref().map(|error| error.code.clone()),
+                            error_remediation: intent
+                                .last_error
+                                .as_ref()
+                                .map(|error| error.remediation.clone()),
+                            updated_at: intent.updated_at,
+                        },
+                    )
+                    .collect()
+            })
+            .map_err(|err| err.to_string())
+    }
+
+    fn reset_blocked_publication(
+        &self,
+        intent_id: &str,
+        operator: &str,
+    ) -> std::result::Result<crate::http_server::BlockedPublicationResetHttpResponse, String> {
+        self.reset_blocked_implementation_publication(intent_id, operator)
+            .map(
+                |intent| crate::http_server::BlockedPublicationResetHttpResponse {
+                    intent_id: intent.intent_id,
+                    run_id: intent.run_id,
+                    status: intent.status.as_str().to_string(),
+                    completed_steps: intent.completed_steps,
+                },
+            )
+            .map_err(|err| err.to_string())
+    }
+
     fn get_artifact(
         &self,
         run_id: &str,
