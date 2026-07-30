@@ -16,6 +16,7 @@ pub mod ssh;
 pub mod workspace;
 
 pub mod implementation;
+pub mod review;
 pub mod shared_context;
 pub mod spec;
 pub mod starter_assets;
