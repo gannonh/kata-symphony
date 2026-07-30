@@ -237,12 +237,12 @@ A spec-routed issue produces versioned product behavior, technical approach, acc
 
 Implementation consumes the approved artifact version, runs repository validation, and opens a draft PR that links the issue, spec version, factory run, and validation summary.
 
-**Progress (2026-07-29):** **PR1 implemented** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](/specs/2026-07-29-a3-pr1-build-report.md), [verify](/specs/2026-07-29-a3-pr1-verify-report.md), [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md)). **PR2 implemented** ([build](/specs/2026-07-29-a3-pr2-build-report.md), [verify](/specs/2026-07-29-a3-pr2-verify-report.md) Incomplete — live UAT residual). Design: [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md).
+**Progress (2026-07-29):** **PR1 implemented** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](/specs/2026-07-29-a3-pr1-build-report.md), [verify](/specs/2026-07-29-a3-pr1-verify-report.md), [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md)). **PR2 shipped** in [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`) ([build](/specs/2026-07-29-a3-pr2-build-report.md), [verify](/specs/2026-07-29-a3-pr2-verify-report.md) Incomplete — live AC20 UAT deferred by maintainer decision, not executed). Design: [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md). A4 proceeds without the live A3 UAT.
 
 | Slice | Status | Notes |
 | --- | --- | --- |
 | PR1 implementation and validation preview | **Implemented** ([#606](https://github.com/gannonh/kata-symphony/pull/606)) | Local preview path; Docker profile fail-closes pending full container orchestration; live UAT residual |
-| PR2 deterministic draft-PR publication | **Implemented** | Expected-projection branch push, owned draft PR, restart recovery, Agent Review handoff; live UAT residual |
+| PR2 deterministic draft-PR publication | **Shipped** ([#607](https://github.com/gannonh/kata-symphony/pull/607)) | Expected-projection branch push, owned draft PR, restart recovery, Agent Review handoff, bounded publication retries; live UAT deferred |
 
 **Demo:** Approve a spec and watch Symphony produce a draft PR whose description records the intended behavior and evidence.
 

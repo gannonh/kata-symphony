@@ -1,5 +1,9 @@
 # Specs Update Log
 
+## 2026-07-30
+* **A4 spec added**: [A4 Agent Review Stage design](/specs/2026-07-30-a4-agent-review-stage-design.md) promoted to Planned — draft PR to structured, read-only agent review with schema-validated findings and a deterministic comment publisher.
+* **A3 PR2 shipped; live UAT deferred**: [#607](https://github.com/gannonh/kata-symphony/pull/607) merged as `d456c051`. Final remediation bounded automatic publication reconcile retries with exponential backoff and a `blocked` ceiling, and kept issue-revision drift off that budget as a non-budgeted waiting state so a slow human re-approval cannot strand publication. Live AC20 UAT was **not executed** and is deferred by maintainer decision to keep the roadmap moving; the [verify report](/specs/2026-07-29-a3-pr2-verify-report.md) remains Incomplete and is not superseded. A4 proceeds without it.
+
 ## 2026-07-29
 * **A3 PR2 review remediation**: [#607](https://github.com/gannonh/kata-symphony/pull/607) now pins the forge repository/branch, authenticates bounded and redacted Git subprocesses, revalidates persisted draft PRs before routing, preserves retryable recovery, and validates publication configuration in doctor. All original inline findings are addressed; automated gates Pass and live AC20 UAT remains documented as residual.
 * **A3 PR2 implemented**: Deterministic draft-PR publication and Agent Review handoff ([build](/specs/2026-07-29-a3-pr2-build-report.md), [verify](/specs/2026-07-29-a3-pr2-verify-report.md) Incomplete). Automated gates Pass; live UAT residual. Next: live PR2 UAT, then A4.

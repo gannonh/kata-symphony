@@ -11,7 +11,7 @@ timestamp: 2026-07-27T16:30:13Z
 
 ## Status
 
-Active — PR1 implementation/validation preview **implemented** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](2026-07-29-a3-pr1-build-report.md), [verify](2026-07-29-a3-pr1-verify-report.md)). **PR2** deterministic draft-PR publication and Agent Review handoff **implemented** ([build](2026-07-29-a3-pr2-build-report.md), [verify](2026-07-29-a3-pr2-verify-report.md) Incomplete — live UAT residual). **Next:** live PR2 UAT, then A4.
+Complete — PR1 implementation/validation preview **shipped** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](2026-07-29-a3-pr1-build-report.md), [verify](2026-07-29-a3-pr1-verify-report.md)). **PR2** deterministic draft-PR publication and Agent Review handoff **shipped** in [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`) ([build](2026-07-29-a3-pr2-build-report.md), [verify](2026-07-29-a3-pr2-verify-report.md) Incomplete). Live AC20 UAT was **not executed** and is deferred by maintainer decision; the verify report is not superseded. **Next:** [A4 Agent Review Stage](2026-07-30-a4-agent-review-stage-design.md).
 
 ## Goal
 

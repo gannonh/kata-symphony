@@ -5,13 +5,13 @@ Roadmap for planned and completed work. Historical Superpowers designs and plans
 # Active
 
 * [Symphony Software Factory Platform PRD](symphony-software-factory-platform-prd.md) - product requirements and vertical-slice roadmap for the full software factory platform
-* [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md) - Active; **PR1+PR2 implemented** (PR1 [#606](https://github.com/gannonh/kata-symphony/pull/606); [PR2 build](2026-07-29-a3-pr2-build-report.md), [verify](2026-07-29-a3-pr2-verify-report.md) Incomplete; [ADR-0004](../adrs/0004-a3-implementation-durability-and-bundles.md)); **next** live UAT then A4
+* [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md) - Complete; **PR1+PR2 shipped** (PR1 [#606](https://github.com/gannonh/kata-symphony/pull/606); PR2 [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`); [build](2026-07-29-a3-pr2-build-report.md), [verify](2026-07-29-a3-pr2-verify-report.md) Incomplete; [ADR-0004](../adrs/0004-a3-implementation-durability-and-bundles.md)); live AC20 UAT **deferred by maintainer decision** — A4 proceeds without it
 * [Pi Symphony Extension Design](../superpowers/specs/2026-05-14-pi-symphony-extension-design.md) - Pi extension to init, launch, monitor, and steer Symphony
 * [Wave 4 Shared Context and Diagnostics Plan](../superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md) - dashboard parity for shared context + diagnostics
 
 # Planned
 
-* [A4 Agent Review](symphony-software-factory-platform-prd.md) - **Next** factory slice after A3 live UAT
+* [A4 Agent Review Stage](2026-07-30-a4-agent-review-stage-design.md) - **Next** factory slice; draft PR to structured, read-only agent review ([PRD A4](symphony-software-factory-platform-prd.md))
 
 # Blocked
 
@@ -19,7 +19,7 @@ _(none)_
 
 # Completed (recent)
 
-* A3 PR2 deterministic draft-PR publication — automated gates Pass ([build](2026-07-29-a3-pr2-build-report.md); [verify](2026-07-29-a3-pr2-verify-report.md) Incomplete — live UAT residual)
+* A3 PR2 deterministic draft-PR publication — shipped in [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`) ([build](2026-07-29-a3-pr2-build-report.md); [verify](2026-07-29-a3-pr2-verify-report.md) Incomplete — live AC20 UAT deferred, not executed)
 * A3 PR1 implementation and validation preview — shipped in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](2026-07-29-a3-pr1-build-report.md), [verify](2026-07-29-a3-pr1-verify-report.md))
 * A1 GitHub Issue Triage — GitHub path complete: PR1 [#587](https://github.com/gannonh/kata-symphony/pull/587), PR2 [#598](https://github.com/gannonh/kata-symphony/pull/598), PR3 [#599](https://github.com/gannonh/kata-symphony/pull/599) (`c52d23dc`); Linear triage deferred ([design](2026-07-16-a1-github-issue-triage-design.md); [ADR-0001](../adrs/0001-a1-triage-durability-and-isolation.md), [ADR-0002](../adrs/0002-triage-process-recovery-identity.md))
 * A2 Spec Stage — live UAT accepted on `uat-symphony` Project #16 ([verify](2026-07-26-a2-uat-verify-report.md); [ADR-0003](../adrs/0003-a2-spec-stage-artifacts-and-gates.md))

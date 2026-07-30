@@ -1,5 +1,8 @@
 # Docs Update Log
 
+## 2026-07-30
+* **A3 PR2 shipped, A4 planned**: Roadmap and PRD mark A3 PR2 shipped in [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`) and promote [A4 Agent Review Stage](/specs/2026-07-30-a4-agent-review-stage-design.md) as the next factory slice. Live AC20 UAT was not executed and is deferred by maintainer decision; the verify report stays Incomplete rather than claiming acceptance.
+
 ## 2026-07-29
 * **A3 PR2 review remediation**: [#607](https://github.com/gannonh/kata-symphony/pull/607) pins publication identity, uses bounded/redacted token-authenticated Git subprocesses, verifies live PR state before Agent Review routing, and keeps retryable recovery pending. All original inline findings are addressed; automated gates Pass, with live AC20 UAT still residual.
 * **A3 PR2 implemented**: Draft-PR publication / Agent Review handoff automation complete ([build](/specs/2026-07-29-a3-pr2-build-report.md); [verify](/specs/2026-07-29-a3-pr2-verify-report.md) Incomplete). Next: live UAT, then A4.
