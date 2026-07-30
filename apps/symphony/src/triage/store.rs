@@ -31,12 +31,13 @@ use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 /// Embedded migrations, applied in order while the exclusive store lock is held.
-const MIGRATIONS: [&str; 5] = [
+const MIGRATIONS: [&str; 6] = [
     include_str!("migrations/001_init.sql"),
     include_str!("migrations/002_route_observations.sql"),
     include_str!("migrations/003_spec_stage.sql"),
     include_str!("migrations/004_implementation_stage.sql"),
     include_str!("migrations/005_implementation_draft_pr.sql"),
+    include_str!("migrations/006_review_stage.sql"),
 ];
 
 #[derive(Debug, Clone)]
