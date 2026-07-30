@@ -3187,9 +3187,15 @@ impl SqliteFactoryStore {
     /// pull request owned by someone else, where blindly re-attempting could
     /// publish twice; clearing one needs a human to establish what actually
     /// changed on the forge first.
+    /// The reset and its audit event commit together. Recording the
+    /// intervention is part of the operation, not a follow-up: a partial commit
+    /// would leave the intent pending while the caller saw an error, and the
+    /// obvious retry would then report "not blocked" against a timeline that
+    /// never recorded who cleared it or what error was discarded.
     pub fn reset_blocked_implementation_publication(
         &mut self,
         intent_id: &str,
+        operator: &str,
     ) -> Result<ImplementationPublicationIntent> {
         let Some(intent) = self.get_implementation_publication_intent(intent_id)? else {
             return Err(SymphonyError::StorageError(format!(
@@ -3203,18 +3209,50 @@ impl SqliteFactoryStore {
                 intent.status.as_str()
             )));
         }
-        self.conn
+
+        let payload = bounded_json(&serde_json::json!({
+            "intent_id": intent.intent_id,
+            "operator": operator,
+            "cleared_error": intent.last_error,
+            "completed_steps": intent.completed_steps,
+        }))?;
+        let now = Self::now();
+        let tx = self.conn.transaction().map_err(storage_error)?;
+        let changed = tx
             .execute(
                 "UPDATE implementation_publication_intents
                  SET status = ?1, last_error_json = NULL, retry_count = 0, updated_at = ?2
-                 WHERE intent_id = ?3",
+                 WHERE intent_id = ?3 AND status = ?4",
                 params![
                     PublicationStatus::Pending.as_str(),
-                    ts(Self::now()),
+                    ts(now),
                     intent_id,
+                    PublicationStatus::Blocked.as_str(),
                 ],
             )
             .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::TriageError(format!(
+                "implementation publication intent {intent_id} changed status concurrently; \
+                 re-run list-blocked and retry"
+            )));
+        }
+        tx.execute(
+            "INSERT INTO factory_events (
+                event_id, run_id, stage_run_id, event_type, timestamp, payload_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                new_id(),
+                Some(intent.run_id.as_str()),
+                None::<String>,
+                "implementation_publication_reset",
+                ts(now),
+                payload,
+            ],
+        )
+        .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+
         self.get_implementation_publication_intent(intent_id)?
             .ok_or_else(|| {
                 SymphonyError::StorageError(format!(

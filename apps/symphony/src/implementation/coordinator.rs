@@ -2503,6 +2503,22 @@ mod tests {
         // Durable progress survives the reset so publication resumes, not restarts.
         assert_eq!(reset.completed_steps, recovered.completed_steps);
 
+        // The audit event commits with the reset, not after it, and carries the
+        // error that was cleared so the timeline explains the intervention.
+        let audit = rusqlite::Connection::open(root.path().join("factory.db")).unwrap();
+        let (count, payload): (u64, String) = audit
+            .query_row(
+                "SELECT COUNT(*), COALESCE(MAX(payload_json), '')
+                 FROM factory_events
+                 WHERE event_type = 'implementation_publication_reset'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert!(payload.contains("\"operator\":\"operator\""));
+        assert!(payload.contains("publication_retry_exhausted"));
+
         assert!(store
             .list_pending_implementation_publications()
             .unwrap()

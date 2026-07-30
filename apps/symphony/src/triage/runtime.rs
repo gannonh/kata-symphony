@@ -403,22 +403,7 @@ impl SharedFactoryStore {
         operator: &str,
     ) -> Result<crate::implementation::domain::ImplementationPublicationIntent> {
         self.with_store_mut(|store| {
-            let previous = store.get_implementation_publication_intent(intent_id)?;
-            let intent = store.reset_blocked_implementation_publication(intent_id)?;
-            store.record_event(crate::triage::domain::FactoryEventRecord {
-                event_id: uuid::Uuid::new_v4().to_string(),
-                run_id: Some(intent.run_id.clone()),
-                stage_run_id: None,
-                event_type: "implementation_publication_reset".to_string(),
-                timestamp: chrono::Utc::now(),
-                payload: serde_json::json!({
-                    "intent_id": intent.intent_id,
-                    "operator": operator,
-                    "cleared_error": previous.and_then(|prior| prior.last_error),
-                    "completed_steps": intent.completed_steps,
-                }),
-            })?;
-            Ok(intent)
+            store.reset_blocked_implementation_publication(intent_id, operator)
         })
     }
 
