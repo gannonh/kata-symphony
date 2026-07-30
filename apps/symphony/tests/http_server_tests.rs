@@ -1363,6 +1363,17 @@ struct FakeFactoryRunQuery {
     by_issue: BTreeMap<String, symphony::http_server::FactoryRunHttpResponse>,
     metrics: Option<symphony::http_server::FactoryRunMetricsHttpResponse>,
     spec_metrics: Option<symphony::http_server::SpecRunMetricsHttpResponse>,
+    /// `None` leaves the trait default in place, standing in for an implementor
+    /// that does not serve publication recovery at all.
+    blocked_publications: Option<Vec<symphony::http_server::BlockedPublicationHttpResponse>>,
+    /// Keyed by intent id; `Err` carries the store's message so the route's
+    /// status-code mapping can be exercised.
+    resets: BTreeMap<
+        String,
+        Result<symphony::http_server::BlockedPublicationResetHttpResponse, String>,
+    >,
+    /// Records the operator each reset was attributed to.
+    reset_operators: Arc<std::sync::Mutex<Vec<(String, String)>>>,
 }
 
 impl symphony::http_server::FactoryRunQuery for FakeFactoryRunQuery {
@@ -1392,6 +1403,56 @@ impl symphony::http_server::FactoryRunQuery for FakeFactoryRunQuery {
         self.spec_metrics
             .clone()
             .ok_or_else(|| "spec metrics unavailable".to_string())
+    }
+
+    fn blocked_publications(
+        &self,
+    ) -> Result<Vec<symphony::http_server::BlockedPublicationHttpResponse>, String> {
+        match &self.blocked_publications {
+            Some(blocked) => Ok(blocked.clone()),
+            None => Err("blocked publications unavailable".to_string()),
+        }
+    }
+
+    fn reset_blocked_publication(
+        &self,
+        intent_id: &str,
+        operator: &str,
+    ) -> Result<symphony::http_server::BlockedPublicationResetHttpResponse, String> {
+        self.reset_operators
+            .lock()
+            .expect("reset operators lock")
+            .push((intent_id.to_string(), operator.to_string()));
+        self.resets.get(intent_id).cloned().unwrap_or_else(|| {
+            Err(format!(
+                "implementation publication intent {intent_id} not found"
+            ))
+        })
+    }
+}
+
+fn sample_blocked_publication() -> symphony::http_server::BlockedPublicationHttpResponse {
+    symphony::http_server::BlockedPublicationHttpResponse {
+        intent_id: "intent-blocked-1".to_string(),
+        run_id: "run-7".to_string(),
+        kind: "draft_pr".to_string(),
+        retry_count: 5,
+        last_step: Some("comment_pending".to_string()),
+        error_code: Some("publication_retry_exhausted".to_string()),
+        error_remediation: Some("Restore forge write access, then reset.".to_string()),
+        updated_at: Utc
+            .with_ymd_and_hms(2026, 7, 30, 9, 15, 0)
+            .single()
+            .expect("timestamp"),
+    }
+}
+
+fn sample_publication_reset() -> symphony::http_server::BlockedPublicationResetHttpResponse {
+    symphony::http_server::BlockedPublicationResetHttpResponse {
+        intent_id: "intent-blocked-1".to_string(),
+        run_id: "run-7".to_string(),
+        status: "pending".to_string(),
+        completed_steps: vec!["comment_pending".to_string()],
     }
 }
 
@@ -1743,4 +1804,312 @@ async fn test_factory_run_metrics_stage_validation() {
         payload["tokens_by_harness_model"]["pi/model-a"]["total_tokens"],
         1100
     );
+}
+
+// ── Publication recovery: routes and the CLI client that calls them ────
+//
+// The orchestrator holds an exclusive lock on the durable store for its whole
+// lifetime, so `symphony publication list-blocked` / `reset` cannot open the
+// store while Symphony runs — the exact moment an operator needs them. These
+// routes serve recovery from the process that owns the store, and the tests
+// below cover both the routes and the client in `publication_recovery`.
+
+/// Serve `app` on an ephemeral loopback port and return its base URL.
+async fn serve_router(app: axum::Router) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("ephemeral port should bind");
+    let port = listener.local_addr().expect("local addr").port();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// A loopback base URL with nothing listening on it.
+async fn unused_base_url() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("ephemeral port should bind");
+    let port = listener.local_addr().expect("local addr").port();
+    drop(listener);
+    format!("http://127.0.0.1:{port}")
+}
+
+#[tokio::test]
+async fn test_blocked_publications_route_returns_the_blocked_set() {
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        blocked_publications: Some(vec![sample_blocked_publication()]),
+        ..Default::default()
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/publications/blocked")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = body_json(response).await;
+    assert_eq!(payload["blocked"][0]["intent_id"], "intent-blocked-1");
+    assert_eq!(payload["blocked"][0]["retry_count"], 5);
+    assert_eq!(payload["blocked"][0]["last_step"], "comment_pending");
+    assert_eq!(
+        payload["blocked"][0]["error_code"],
+        "publication_retry_exhausted"
+    );
+}
+
+#[tokio::test]
+async fn test_blocked_publications_route_reports_an_unavailable_implementor() {
+    let app = router_with_factory_query(FakeFactoryRunQuery::default());
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/publications/blocked")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let payload = body_json(response).await;
+    assert_eq!(payload["error"]["code"], "blocked_publications_unavailable");
+}
+
+#[tokio::test]
+async fn test_publication_reset_route_records_the_operator() {
+    let operators = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        resets: BTreeMap::from([(
+            "intent-blocked-1".to_string(),
+            Ok(sample_publication_reset()),
+        )]),
+        reset_operators: Arc::clone(&operators),
+        ..Default::default()
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/publications/intent-blocked-1/reset?operator=ada")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = body_json(response).await;
+    assert_eq!(payload["status"], "pending");
+    assert_eq!(payload["completed_steps"][0], "comment_pending");
+    assert_eq!(
+        operators.lock().expect("operators lock").as_slice(),
+        [("intent-blocked-1".to_string(), "ada".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn test_publication_reset_route_defaults_an_absent_operator() {
+    let operators = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        resets: BTreeMap::from([(
+            "intent-blocked-1".to_string(),
+            Ok(sample_publication_reset()),
+        )]),
+        reset_operators: Arc::clone(&operators),
+        ..Default::default()
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/publications/intent-blocked-1/reset")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        operators.lock().expect("operators lock")[0].1,
+        "unknown".to_string()
+    );
+}
+
+#[tokio::test]
+async fn test_publication_reset_route_maps_store_errors_to_status_codes() {
+    // An operator mistake and a fault must not look alike to a client: only the
+    // latter is worth retrying.
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        resets: BTreeMap::from([
+            (
+                "missing".to_string(),
+                Err("implementation publication intent missing not found".to_string()),
+            ),
+            (
+                "already-pending".to_string(),
+                Err("intent already-pending is pending, not blocked".to_string()),
+            ),
+            (
+                "raced".to_string(),
+                Err("intent raced changed status concurrently; re-run list-blocked".to_string()),
+            ),
+            (
+                "broken".to_string(),
+                Err("storage error: disk went away".to_string()),
+            ),
+        ]),
+        ..Default::default()
+    });
+
+    let cases = [
+        ("missing", StatusCode::NOT_FOUND),
+        ("already-pending", StatusCode::CONFLICT),
+        ("raced", StatusCode::CONFLICT),
+        ("broken", StatusCode::INTERNAL_SERVER_ERROR),
+    ];
+
+    for (intent_id, expected) in cases {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/api/v1/publications/{intent_id}/reset"))
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), expected, "intent {intent_id}");
+        let payload = body_json(response).await;
+        assert_eq!(payload["error"]["code"], "publication_reset_failed");
+        assert_eq!(payload["error"]["details"]["intent_id"], intent_id);
+    }
+}
+
+#[tokio::test]
+async fn test_publication_recovery_client_reads_blocked_intents_over_http() {
+    let base_url = serve_router(router_with_factory_query(FakeFactoryRunQuery {
+        blocked_publications: Some(vec![sample_blocked_publication()]),
+        ..Default::default()
+    }))
+    .await;
+
+    let blocked = symphony::publication_recovery::fetch_blocked_publications(&base_url)
+        .await
+        .expect("blocked intents should be served");
+
+    assert_eq!(blocked, vec![sample_blocked_publication()]);
+}
+
+#[tokio::test]
+async fn test_publication_recovery_client_reads_an_empty_blocked_set() {
+    let base_url = serve_router(router_with_factory_query(FakeFactoryRunQuery {
+        blocked_publications: Some(Vec::new()),
+        ..Default::default()
+    }))
+    .await;
+
+    let blocked = symphony::publication_recovery::fetch_blocked_publications(&base_url)
+        .await
+        .expect("an empty set is a successful answer");
+
+    assert!(blocked.is_empty());
+    assert_eq!(
+        symphony::publication_recovery::format_blocked_publications(&blocked),
+        "no blocked publication intents"
+    );
+}
+
+#[tokio::test]
+async fn test_publication_recovery_client_resets_over_http() {
+    let operators = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let base_url = serve_router(router_with_factory_query(FakeFactoryRunQuery {
+        resets: BTreeMap::from([(
+            "intent-blocked-1".to_string(),
+            Ok(sample_publication_reset()),
+        )]),
+        reset_operators: Arc::clone(&operators),
+        ..Default::default()
+    }))
+    .await;
+
+    let reset = symphony::publication_recovery::reset_blocked_publication(
+        &base_url,
+        "intent-blocked-1",
+        "ada",
+    )
+    .await
+    .expect("reset should be served");
+
+    assert_eq!(reset, sample_publication_reset());
+    // The operator reaches the store as the audit event's attribution.
+    assert_eq!(
+        operators.lock().expect("operators lock").as_slice(),
+        [("intent-blocked-1".to_string(), "ada".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn test_publication_recovery_client_surfaces_a_refused_reset_without_falling_back() {
+    // A reachable orchestrator that refuses the reset is an answer, not an
+    // outage: falling back to the store here would only produce a lock error.
+    let base_url = serve_router(router_with_factory_query(FakeFactoryRunQuery {
+        resets: BTreeMap::from([(
+            "intent-blocked-1".to_string(),
+            Err("intent intent-blocked-1 is conflict, not blocked".to_string()),
+        )]),
+        ..Default::default()
+    }))
+    .await;
+
+    let error = symphony::publication_recovery::reset_blocked_publication(
+        &base_url,
+        "intent-blocked-1",
+        "ada",
+    )
+    .await
+    .expect_err("a refused reset should surface");
+
+    assert!(!error.is_unreachable(), "{error}");
+    assert!(error.message().contains("not blocked"), "{error}");
+    assert!(error.message().contains("409"), "{error}");
+}
+
+#[tokio::test]
+async fn test_publication_recovery_client_falls_back_when_nothing_is_listening() {
+    // This is the fallback trigger: Symphony is not running, so no lock is held
+    // and the CLI can open the durable store directly.
+    let base_url = unused_base_url().await;
+
+    let list_error = symphony::publication_recovery::fetch_blocked_publications(&base_url)
+        .await
+        .expect_err("nothing is listening");
+    assert!(list_error.is_unreachable(), "{list_error}");
+    assert!(list_error.message().contains(&base_url), "{list_error}");
+
+    let reset_error =
+        symphony::publication_recovery::reset_blocked_publication(&base_url, "intent-1", "ada")
+            .await
+            .expect_err("nothing is listening");
+    assert!(reset_error.is_unreachable(), "{reset_error}");
+
+    // And the fallback's own failure explains the lock rather than leaking it.
+    let message = symphony::publication_recovery::store_unavailable_message(
+        &reset_error,
+        "could not acquire exclusive triage store lock /data/factory.sqlite3.lock: locked",
+    );
+    assert!(message.contains("server.host and server.port"), "{message}");
 }

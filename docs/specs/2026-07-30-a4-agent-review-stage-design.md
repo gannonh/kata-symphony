@@ -251,7 +251,7 @@ A3's live AC20 UAT was never executed. A4 consumes A3's draft-PR artifacts, so a
 
 ### No operator recovery from `blocked`
 
-**Resolved before A4 PR1.** A3 shipped with terminal `blocked` intents and no code path out; clearing one required direct SQLite edits. `symphony publication list-blocked` and `symphony publication reset <intent-id>` now close that, preserving completed steps so publication resumes, and recording the intervention on the run timeline. A4 extends the same command surface to review intents; it must not introduce a terminal state without one.
+**Resolved before A4 PR1.** A3 shipped with terminal `blocked` intents and no code path out; clearing one required direct SQLite edits. `symphony publication list-blocked` and `symphony publication reset <intent-id>` now close that, preserving completed steps so publication resumes, and recording the intervention on the run timeline. Both commands go through the orchestrator's admin HTTP surface (`GET /api/v1/publications/blocked`, `POST /api/v1/publications/{intent_id}/reset?operator=`) and fall back to the durable store only when nothing answers — the store's exclusive lock is held while Symphony runs, which is precisely when recovery is needed. A4 extends the same command surface and the same HTTP-first shape to review intents; it must not introduce a terminal state without one, nor a recovery command that only works while Symphony is stopped.
 
 ### Review findings are wrong or noisy
 
