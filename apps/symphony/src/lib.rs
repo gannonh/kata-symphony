@@ -30,6 +30,7 @@ pub mod logging;
 pub mod notifications;
 pub mod orchestrator;
 pub mod pi_agent;
+pub mod publication_recovery;
 mod session_summary;
 pub mod tui;
 

@@ -1,5 +1,9 @@
 # ADRs Update Log
 
+## 2026-07-30
+* **Updated**: [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md) records that publication recovery is served over the admin HTTP surface with a direct-store fallback. A store-only command could never work while Symphony ran, because the orchestrator holds the store's exclusive lock for its lifetime — the exact moment a blocked intent is discovered.
+* **Updated**: [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md) now documents the operator recovery path for a `blocked` publication intent (`symphony publication list-blocked` / `reset`), closing the gap where the ADR promised operator recovery that no code path provided. `conflict` remains deliberately terminal.
+
 ## 2026-07-29
 * **Updated**: [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md) bounds automatic publication reconcile attempts with exponential backoff and a retry ceiling that terminalizes an exhausted intent as `blocked` instead of retrying forever on every poll; the ceiling counts failed attempts only, so issue-revision drift awaiting human re-approval cannot exhaust it and strand publication.
 * **Updated**: [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md) now pins automatic publication identity, scopes Git token use to bounded subprocesses, and requires live PR revalidation before tracker handoff.

@@ -74,6 +74,33 @@ pub enum CliCommand {
         #[arg(long)]
         input: Option<String>,
     },
+    /// Inspect and recover implementation publication intents
+    Publication {
+        #[command(subcommand)]
+        action: PublicationAction,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
+pub enum PublicationAction {
+    /// List publication intents blocked after exhausting reconcile retries
+    ListBlocked {
+        /// Path to WORKFLOW.md (defaults to .symphony/WORKFLOW.md, then WORKFLOW.md)
+        #[arg(long)]
+        workflow: Option<String>,
+    },
+    /// Return a blocked publication intent to pending so reconciliation resumes
+    ///
+    /// Completed publication steps are preserved, so publication continues from
+    /// where it stopped. Fix the underlying cause first — a reset intent that
+    /// still cannot publish will simply exhaust its retries again.
+    Reset {
+        /// Intent id, as reported by `symphony publication list-blocked`
+        intent_id: String,
+        /// Path to WORKFLOW.md (defaults to .symphony/WORKFLOW.md, then WORKFLOW.md)
+        #[arg(long)]
+        workflow: Option<String>,
+    },
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -625,6 +652,13 @@ pub fn resolve_workflow_path(cli: &Cli) -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(resolve_default_workflow_path),
         Some(CliCommand::Helper { workflow, .. }) => PathBuf::from(workflow),
+        Some(CliCommand::Publication { action }) => match action {
+            PublicationAction::ListBlocked { workflow }
+            | PublicationAction::Reset { workflow, .. } => workflow
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(resolve_default_workflow_path),
+        },
         Some(CliCommand::Init { .. }) => resolve_default_workflow_path(),
         None => cli
             .workflow_path
@@ -898,6 +932,193 @@ fn run_doctor(workflow_path: &Path) -> Result<i32, String> {
         Ok(1)
     } else {
         Ok(0)
+    }
+}
+
+/// Load the effective workflow config for a publication recovery command.
+#[cfg(not(test))]
+fn load_publication_config(workflow_path: &Path) -> std::result::Result<ServiceConfig, String> {
+    RuntimeBootstrapDeps::load_startup_context(workflow_path)
+        .map(|context| context.effective_config)
+        .map_err(|err| err.to_string())
+}
+
+/// Open the durable factory store for the workflow's configured tracker repo.
+///
+/// Fails while Symphony runs: the orchestrator holds an exclusive lock on the
+/// store for its lifetime. Callers try the admin HTTP surface first and treat
+/// this as the fallback for when nothing is listening.
+#[cfg(not(test))]
+fn open_factory_store_for_config(
+    config: &ServiceConfig,
+) -> std::result::Result<symphony::triage::runtime::SharedFactoryStore, String> {
+    use symphony::triage::storage_path::{forge_host_from_endpoint, resolve_storage_path};
+
+    let owner = config
+        .tracker
+        .repo_owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "tracker.repo_owner required".to_string())?;
+    let repo = config
+        .tracker
+        .repo_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "tracker.repo_name required".to_string())?;
+    let forge_host = forge_host_from_endpoint(&config.tracker.endpoint);
+    let storage_path = resolve_storage_path(&config.storage, &forge_host, owner, repo);
+    if !storage_path.exists() {
+        return Err(format!(
+            "no durable factory store at {}; run Symphony against this workflow first",
+            storage_path.display()
+        ));
+    }
+    symphony::triage::runtime::SharedFactoryStore::open(
+        &storage_path,
+        config.storage.busy_timeout_ms,
+    )
+    .map_err(|err| err.to_string())
+}
+
+/// The operator identity recorded on a reset, for the run timeline audit event.
+#[cfg(not(test))]
+fn publication_operator() -> String {
+    std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// Drive a recovery request to completion on the ambient tokio runtime.
+#[cfg(not(test))]
+fn block_on_recovery<F: Future>(future: F) -> std::result::Result<F::Output, String> {
+    let runtime = tokio::runtime::Handle::try_current()
+        .map_err(|err| format!("missing tokio runtime for publication recovery: {err}"))?;
+    Ok(tokio::task::block_in_place(|| runtime.block_on(future)))
+}
+
+/// Recover blocked publication intents, preferring the running orchestrator.
+///
+/// The store is locked by Symphony while it runs, so the admin HTTP surface is
+/// tried first and the direct-store path is the fallback for when nothing
+/// answers. See `symphony::publication_recovery`.
+#[cfg(not(test))]
+fn run_publication(action: &PublicationAction, workflow_path: &Path, cli: &Cli) -> i32 {
+    use symphony::http_server::FactoryRunQuery;
+    use symphony::publication_recovery as recovery;
+
+    let config = match load_publication_config(workflow_path) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    let base_url = match effective_http_binding(&config, cli) {
+        Some(binding) => recovery::admin_base_url(&binding.host, binding.port),
+        None => recovery::admin_base_url("127.0.0.1", recovery::DEFAULT_ADMIN_PORT),
+    };
+
+    match action {
+        PublicationAction::ListBlocked { .. } => {
+            let served = match block_on_recovery(recovery::fetch_blocked_publications(&base_url)) {
+                Ok(served) => served,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return 1;
+                }
+            };
+            let http_error = match served {
+                Ok(blocked) => {
+                    println!("{}", recovery::format_blocked_publications(&blocked));
+                    return 0;
+                }
+                Err(err) if err.is_unreachable() => err,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return 1;
+                }
+            };
+
+            let store = match open_factory_store_for_config(&config) {
+                Ok(store) => store,
+                Err(store_error) => {
+                    eprintln!(
+                        "{}",
+                        recovery::store_unavailable_message(&http_error, &store_error)
+                    );
+                    return 1;
+                }
+            };
+            match store.blocked_publications() {
+                Ok(blocked) => {
+                    println!("{}", recovery::format_blocked_publications(&blocked));
+                    0
+                }
+                Err(err) => {
+                    eprintln!("{err}");
+                    1
+                }
+            }
+        }
+        PublicationAction::Reset { intent_id, .. } => {
+            let operator = publication_operator();
+            let served = match block_on_recovery(recovery::reset_blocked_publication(
+                &base_url, intent_id, &operator,
+            )) {
+                Ok(served) => served,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return 1;
+                }
+            };
+            let http_error = match served {
+                Ok(reset) => {
+                    println!(
+                        "{}",
+                        recovery::format_publication_reset(
+                            &reset,
+                            recovery::RecoverySource::RunningOrchestrator
+                        )
+                    );
+                    return 0;
+                }
+                Err(err) if err.is_unreachable() => err,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return 1;
+                }
+            };
+
+            let store = match open_factory_store_for_config(&config) {
+                Ok(store) => store,
+                Err(store_error) => {
+                    eprintln!(
+                        "{}",
+                        recovery::store_unavailable_message(&http_error, &store_error)
+                    );
+                    return 1;
+                }
+            };
+            match store.reset_blocked_publication(intent_id, &operator) {
+                Ok(reset) => {
+                    println!(
+                        "{}",
+                        recovery::format_publication_reset(
+                            &reset,
+                            recovery::RecoverySource::DirectStore
+                        )
+                    );
+                    0
+                }
+                Err(err) => {
+                    eprintln!("{err}");
+                    1
+                }
+            }
+        }
     }
 }
 
@@ -1234,6 +1455,11 @@ fn run_entrypoint(args: impl IntoIterator<Item = OsString>) -> i32 {
     }) = &cli.command
     {
         return run_helper(Path::new(workflow), operation, input.as_deref());
+    }
+
+    if let Some(CliCommand::Publication { action }) = &cli.command {
+        let workflow_path = resolve_workflow_path(&cli);
+        return run_publication(action, &workflow_path, &cli);
     }
 
     let mut deps = RuntimeBootstrapDeps::default();

@@ -80,6 +80,23 @@ pub trait FactoryRunQuery: Send + Sync {
     ) -> Result<Option<FactoryArtifactHttpResponse>, String> {
         Ok(None)
     }
+
+    /// Publication intents terminalized as `blocked`, for operator recovery.
+    ///
+    /// The orchestrator holds an exclusive lock on the store for its lifetime,
+    /// so an external process cannot read this while Symphony runs. Recovery is
+    /// served here, by the process that owns the store.
+    fn blocked_publications(&self) -> Result<Vec<BlockedPublicationHttpResponse>, String> {
+        Err("blocked publications are not available".to_string())
+    }
+
+    fn reset_blocked_publication(
+        &self,
+        _intent_id: &str,
+        _operator: &str,
+    ) -> Result<BlockedPublicationResetHttpResponse, String> {
+        Err("publication reset is not available".to_string())
+    }
 }
 
 // ── Trait implementations for orchestrator types ───────────────────────
@@ -437,6 +454,12 @@ struct FactoryRunsListQuery {
 }
 
 #[derive(Debug, Deserialize, Default)]
+struct PublicationResetQuery {
+    /// Recorded on the run timeline so the intervention is attributable.
+    operator: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Default)]
 struct FactoryRunsMetricsQuery {
     stage: Option<String>,
 }
@@ -550,6 +573,29 @@ pub struct FactoryRunSpecPublicationHttp {
     pub retry_count: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<crate::triage::domain::FactoryError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BlockedPublicationHttpResponse {
+    pub intent_id: String,
+    pub run_id: String,
+    pub kind: String,
+    pub retry_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_step: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_remediation: Option<String>,
+    pub updated_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BlockedPublicationResetHttpResponse {
+    pub intent_id: String,
+    pub run_id: String,
+    pub status: String,
+    pub completed_steps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1056,6 +1102,14 @@ pub fn build_router(state: HttpServerState) -> Router {
         .route("/api/v1/factory-runs", get(get_factory_runs))
         .route("/api/v1/{issue_identifier}", get(get_issue))
         .route("/api/v1/refresh", post(post_refresh))
+        .route(
+            "/api/v1/publications/blocked",
+            get(get_blocked_publications),
+        )
+        .route(
+            "/api/v1/publications/{intent_id}/reset",
+            post(post_publication_reset),
+        )
         .fallback(api_not_found)
         .method_not_allowed_fallback(api_method_not_allowed)
         .with_state(state)
@@ -2959,6 +3013,84 @@ async fn post_steer(
             }),
         )
             .into_response(),
+    }
+}
+
+async fn get_blocked_publications(State(state): State<HttpServerState>) -> impl IntoResponse {
+    let Some(query) = state.factory_run_query.as_ref() else {
+        return factory_store_unavailable().into_response();
+    };
+    match query.blocked_publications() {
+        Ok(blocked) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "blocked": blocked })),
+        )
+            .into_response(),
+        Err(message) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorEnvelope {
+                error: ApiError {
+                    code: "blocked_publications_unavailable",
+                    message,
+                    status: StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                    details: None,
+                },
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn post_publication_reset(
+    State(state): State<HttpServerState>,
+    Path(intent_id): Path<String>,
+    Query(params): Query<PublicationResetQuery>,
+) -> impl IntoResponse {
+    let Some(query) = state.factory_run_query.as_ref() else {
+        return factory_store_unavailable().into_response();
+    };
+    let operator = params
+        .operator
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+
+    match query.reset_blocked_publication(&intent_id, operator) {
+        Ok(reset) => {
+            tracing::info!(
+                event = "http_publication_reset",
+                intent_id = %reset.intent_id,
+                run_id = %reset.run_id,
+                operator = %operator,
+                "operator reset a blocked publication intent"
+            );
+            (StatusCode::OK, Json(reset)).into_response()
+        }
+        Err(message) => {
+            // "not blocked" and "not found" are operator mistakes, not faults.
+            let not_recoverable =
+                message.contains("not blocked") || message.contains("changed status");
+            let status = if message.contains("not found") {
+                StatusCode::NOT_FOUND
+            } else if not_recoverable {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            (
+                status,
+                Json(ApiErrorEnvelope {
+                    error: ApiError {
+                        code: "publication_reset_failed",
+                        message,
+                        status: status.as_u16(),
+                        details: Some(serde_json::json!({ "intent_id": intent_id })),
+                    },
+                }),
+            )
+                .into_response()
+        }
     }
 }
 

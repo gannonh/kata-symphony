@@ -388,6 +388,25 @@ impl SharedFactoryStore {
         })
     }
 
+    pub fn list_blocked_implementation_publications(
+        &self,
+    ) -> Result<Vec<crate::implementation::domain::ImplementationPublicationIntent>> {
+        self.with_store(|store| store.list_blocked_implementation_publications())
+    }
+
+    /// Operator recovery for a blocked publication intent. Records the
+    /// intervention on the run timeline so the reset is auditable alongside the
+    /// failures that caused it.
+    pub fn reset_blocked_implementation_publication(
+        &self,
+        intent_id: &str,
+        operator: &str,
+    ) -> Result<crate::implementation::domain::ImplementationPublicationIntent> {
+        self.with_store_mut(|store| {
+            store.reset_blocked_implementation_publication(intent_id, operator)
+        })
+    }
+
     pub fn set_implementation_publication_waiting(
         &self,
         intent_id: &str,
@@ -794,6 +813,50 @@ impl FactoryRunQuery for SharedFactoryStore {
     ) -> std::result::Result<ImplementationRunMetricsHttpResponse, String> {
         self.with_store(|store| store.implementation_metrics())
             .map(implementation_run_metrics_http_response)
+            .map_err(|err| err.to_string())
+    }
+
+    fn blocked_publications(
+        &self,
+    ) -> std::result::Result<Vec<crate::http_server::BlockedPublicationHttpResponse>, String> {
+        self.list_blocked_implementation_publications()
+            .map(|intents| {
+                intents
+                    .into_iter()
+                    .map(
+                        |intent| crate::http_server::BlockedPublicationHttpResponse {
+                            intent_id: intent.intent_id,
+                            run_id: intent.run_id,
+                            kind: intent.kind.as_str().to_string(),
+                            retry_count: intent.retry_count,
+                            last_step: intent.completed_steps.last().cloned(),
+                            error_code: intent.last_error.as_ref().map(|error| error.code.clone()),
+                            error_remediation: intent
+                                .last_error
+                                .as_ref()
+                                .map(|error| error.remediation.clone()),
+                            updated_at: intent.updated_at,
+                        },
+                    )
+                    .collect()
+            })
+            .map_err(|err| err.to_string())
+    }
+
+    fn reset_blocked_publication(
+        &self,
+        intent_id: &str,
+        operator: &str,
+    ) -> std::result::Result<crate::http_server::BlockedPublicationResetHttpResponse, String> {
+        self.reset_blocked_implementation_publication(intent_id, operator)
+            .map(
+                |intent| crate::http_server::BlockedPublicationResetHttpResponse {
+                    intent_id: intent.intent_id,
+                    run_id: intent.run_id,
+                    status: intent.status.as_str().to_string(),
+                    completed_steps: intent.completed_steps,
+                },
+            )
             .map_err(|err| err.to_string())
     }
 

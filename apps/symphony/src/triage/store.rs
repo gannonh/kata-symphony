@@ -3152,6 +3152,120 @@ impl SqliteFactoryStore {
         Ok(())
     }
 
+    /// List publication intents terminalized as `blocked`, oldest first.
+    ///
+    /// These have left the reconcile poll set permanently, so this is the only
+    /// way an operator can discover the intent ids that need recovery.
+    pub fn list_blocked_implementation_publications(
+        &self,
+    ) -> Result<Vec<ImplementationPublicationIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+                    retry_count, last_error_json, comment_id, publisher_login,
+                    desired_effects_json, observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 FROM implementation_publication_intents
+                 WHERE status = 'blocked' ORDER BY created_at ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], implementation_publication_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    /// Operator recovery: return a `blocked` publication intent to `pending` so
+    /// the reconcile loop picks it up again.
+    ///
+    /// Completed steps are preserved, so progressive publication resumes where
+    /// it stopped rather than redoing durable work.
+    ///
+    /// Deliberately scoped to `blocked`. `conflict` records observed drift or a
+    /// pull request owned by someone else, where blindly re-attempting could
+    /// publish twice; clearing one needs a human to establish what actually
+    /// changed on the forge first.
+    /// The reset and its audit event commit together. Recording the
+    /// intervention is part of the operation, not a follow-up: a partial commit
+    /// would leave the intent pending while the caller saw an error, and the
+    /// obvious retry would then report "not blocked" against a timeline that
+    /// never recorded who cleared it or what error was discarded.
+    pub fn reset_blocked_implementation_publication(
+        &mut self,
+        intent_id: &str,
+        operator: &str,
+    ) -> Result<ImplementationPublicationIntent> {
+        let Some(intent) = self.get_implementation_publication_intent(intent_id)? else {
+            return Err(SymphonyError::StorageError(format!(
+                "implementation publication intent {intent_id} not found"
+            )));
+        };
+        if intent.status != PublicationStatus::Blocked {
+            return Err(SymphonyError::TriageError(format!(
+                "implementation publication intent {intent_id} is {}, not blocked; \
+                 only a blocked intent can be reset",
+                intent.status.as_str()
+            )));
+        }
+
+        let payload = bounded_json(&serde_json::json!({
+            "intent_id": intent.intent_id,
+            "operator": operator,
+            "cleared_error": intent.last_error,
+            "completed_steps": intent.completed_steps,
+        }))?;
+        let now = Self::now();
+        let tx = self.conn.transaction().map_err(storage_error)?;
+        let changed = tx
+            .execute(
+                "UPDATE implementation_publication_intents
+                 SET status = ?1, last_error_json = NULL, retry_count = 0, updated_at = ?2
+                 WHERE intent_id = ?3 AND status = ?4",
+                params![
+                    PublicationStatus::Pending.as_str(),
+                    ts(now),
+                    intent_id,
+                    PublicationStatus::Blocked.as_str(),
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::TriageError(format!(
+                "implementation publication intent {intent_id} changed status concurrently; \
+                 re-run list-blocked and retry"
+            )));
+        }
+        tx.execute(
+            "INSERT INTO factory_events (
+                event_id, run_id, stage_run_id, event_type, timestamp, payload_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                new_id(),
+                Some(intent.run_id.as_str()),
+                None::<String>,
+                "implementation_publication_reset",
+                ts(now),
+                payload,
+            ],
+        )
+        .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+
+        // Deliberately not a reload. The transaction has committed, so a fallible
+        // read here would put an already-durable reset behind a failure the caller
+        // cannot distinguish from a failed one — and the retry would then be
+        // refused with "not blocked". Return what the transaction just wrote.
+        Ok(ImplementationPublicationIntent {
+            status: PublicationStatus::Pending,
+            retry_count: 0,
+            last_error: None,
+            updated_at: now,
+            ..intent
+        })
+    }
+
     /// Record a publication condition that is waiting on an unmet precondition
     /// rather than on a failed attempt, leaving `retry_count` untouched.
     ///
