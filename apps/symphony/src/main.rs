@@ -85,9 +85,9 @@ pub enum CliCommand {
 pub enum PublicationAction {
     /// List publication intents blocked after exhausting reconcile retries
     ListBlocked {
-        /// Path to WORKFLOW.md
-        #[arg(long, default_value = "WORKFLOW.md")]
-        workflow: String,
+        /// Path to WORKFLOW.md (defaults to .symphony/WORKFLOW.md, then WORKFLOW.md)
+        #[arg(long)]
+        workflow: Option<String>,
     },
     /// Return a blocked publication intent to pending so reconciliation resumes
     ///
@@ -97,9 +97,9 @@ pub enum PublicationAction {
     Reset {
         /// Intent id, as reported by `symphony publication list-blocked`
         intent_id: String,
-        /// Path to WORKFLOW.md
-        #[arg(long, default_value = "WORKFLOW.md")]
-        workflow: String,
+        /// Path to WORKFLOW.md (defaults to .symphony/WORKFLOW.md, then WORKFLOW.md)
+        #[arg(long)]
+        workflow: Option<String>,
     },
 }
 
@@ -653,8 +653,11 @@ pub fn resolve_workflow_path(cli: &Cli) -> PathBuf {
             .unwrap_or_else(resolve_default_workflow_path),
         Some(CliCommand::Helper { workflow, .. }) => PathBuf::from(workflow),
         Some(CliCommand::Publication { action }) => match action {
-            PublicationAction::ListBlocked { workflow } => PathBuf::from(workflow),
-            PublicationAction::Reset { workflow, .. } => PathBuf::from(workflow),
+            PublicationAction::ListBlocked { workflow }
+            | PublicationAction::Reset { workflow, .. } => workflow
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(resolve_default_workflow_path),
         },
         Some(CliCommand::Init { .. }) => resolve_default_workflow_path(),
         None => cli
@@ -972,10 +975,10 @@ fn open_factory_store_for_workflow(
 }
 
 #[cfg(not(test))]
-fn run_publication(action: &PublicationAction) -> i32 {
+fn run_publication(action: &PublicationAction, workflow_path: &Path) -> i32 {
     match action {
-        PublicationAction::ListBlocked { workflow } => {
-            let store = match open_factory_store_for_workflow(Path::new(workflow)) {
+        PublicationAction::ListBlocked { .. } => {
+            let store = match open_factory_store_for_workflow(workflow_path) {
                 Ok(store) => store,
                 Err(err) => {
                     eprintln!("{err}");
@@ -1012,11 +1015,8 @@ fn run_publication(action: &PublicationAction) -> i32 {
             println!("\nreset one with: symphony publication reset <intent-id>");
             0
         }
-        PublicationAction::Reset {
-            intent_id,
-            workflow,
-        } => {
-            let store = match open_factory_store_for_workflow(Path::new(workflow)) {
+        PublicationAction::Reset { intent_id, .. } => {
+            let store = match open_factory_store_for_workflow(workflow_path) {
                 Ok(store) => store,
                 Err(err) => {
                     eprintln!("{err}");
@@ -1385,7 +1385,8 @@ fn run_entrypoint(args: impl IntoIterator<Item = OsString>) -> i32 {
     }
 
     if let Some(CliCommand::Publication { action }) = &cli.command {
-        return run_publication(action);
+        let workflow_path = resolve_workflow_path(&cli);
+        return run_publication(action, &workflow_path);
     }
 
     let mut deps = RuntimeBootstrapDeps::default();
