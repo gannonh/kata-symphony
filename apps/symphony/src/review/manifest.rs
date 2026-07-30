@@ -219,9 +219,7 @@ pub fn parse_and_validate_review_manifest(
                 "{label}: acceptance_criterion must not be empty when present"
             ));
         }
-        if !finding.confidence.is_finite()
-            || !(0.0..=1.0).contains(&finding.confidence)
-        {
+        if !finding.confidence.is_finite() || !(0.0..=1.0).contains(&finding.confidence) {
             violations.push(format!(
                 "{label}: confidence must be a finite number from 0 through 1"
             ));
@@ -272,7 +270,9 @@ mod tests {
         })
     }
 
-    fn validate(value: &serde_json::Value) -> Result<ReviewFindingsManifest, ManifestValidationError> {
+    fn validate(
+        value: &serde_json::Value,
+    ) -> Result<ReviewFindingsManifest, ManifestValidationError> {
         parse_and_validate_review_manifest(&value.to_string(), HEAD, BASE, &files(), 50)
     }
 
@@ -354,8 +354,7 @@ mod tests {
     #[test]
     fn rejects_a_manifest_for_a_different_head() {
         let mut value = valid_manifest();
-        value["reviewed_head_sha"] =
-            serde_json::json!("cccccccccccccccccccccccccccccccccccccccc");
+        value["reviewed_head_sha"] = serde_json::json!("cccccccccccccccccccccccccccccccccccccccc");
 
         let error = validate(&value).expect_err("head is pinned");
         assert!(error.to_string().contains("pinned head"));
@@ -370,9 +369,8 @@ mod tests {
             .expect("findings array")
             .push(duplicate);
 
-        let error =
-            parse_and_validate_review_manifest(&value.to_string(), HEAD, BASE, &files(), 1)
-                .expect_err("duplicate and limit violations");
+        let error = parse_and_validate_review_manifest(&value.to_string(), HEAD, BASE, &files(), 1)
+            .expect_err("duplicate and limit violations");
         assert!(error.to_string().contains("configured maximum"));
         assert!(error.to_string().contains("duplicated"));
     }
