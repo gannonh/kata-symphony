@@ -3253,12 +3253,17 @@ impl SqliteFactoryStore {
         .map_err(storage_error)?;
         tx.commit().map_err(storage_error)?;
 
-        self.get_implementation_publication_intent(intent_id)?
-            .ok_or_else(|| {
-                SymphonyError::StorageError(format!(
-                    "implementation publication intent {intent_id} missing after reset"
-                ))
-            })
+        // Deliberately not a reload. The transaction has committed, so a fallible
+        // read here would put an already-durable reset behind a failure the caller
+        // cannot distinguish from a failed one — and the retry would then be
+        // refused with "not blocked". Return what the transaction just wrote.
+        Ok(ImplementationPublicationIntent {
+            status: PublicationStatus::Pending,
+            retry_count: 0,
+            last_error: None,
+            updated_at: now,
+            ..intent
+        })
     }
 
     /// Record a publication condition that is waiting on an unmet precondition
