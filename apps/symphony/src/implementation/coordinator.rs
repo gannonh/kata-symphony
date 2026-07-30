@@ -2487,6 +2487,37 @@ mod tests {
             .unwrap()
             .iter()
             .all(|pending| pending.intent_id != intent.intent_id));
+
+        // ...until an operator recovers it, which is the only way back.
+        let blocked = store.list_blocked_implementation_publications().unwrap();
+        assert!(blocked
+            .iter()
+            .any(|entry| entry.intent_id == intent.intent_id));
+
+        let reset = store
+            .reset_blocked_implementation_publication(&intent.intent_id, "operator")
+            .unwrap();
+        assert_eq!(reset.status, PublicationStatus::Pending);
+        assert_eq!(reset.retry_count, 0);
+        assert!(reset.last_error.is_none());
+        // Durable progress survives the reset so publication resumes, not restarts.
+        assert_eq!(reset.completed_steps, recovered.completed_steps);
+
+        assert!(store
+            .list_pending_implementation_publications()
+            .unwrap()
+            .iter()
+            .any(|pending| pending.intent_id == intent.intent_id));
+        assert!(store
+            .list_blocked_implementation_publications()
+            .unwrap()
+            .is_empty());
+
+        // Resetting something that is not blocked is refused, not silently applied.
+        let err = store
+            .reset_blocked_implementation_publication(&intent.intent_id, "operator")
+            .unwrap_err();
+        assert!(err.to_string().contains("not blocked"));
     }
 
     #[test]

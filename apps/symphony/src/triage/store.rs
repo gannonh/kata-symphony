@@ -3152,6 +3152,77 @@ impl SqliteFactoryStore {
         Ok(())
     }
 
+    /// List publication intents terminalized as `blocked`, oldest first.
+    ///
+    /// These have left the reconcile poll set permanently, so this is the only
+    /// way an operator can discover the intent ids that need recovery.
+    pub fn list_blocked_implementation_publications(
+        &self,
+    ) -> Result<Vec<ImplementationPublicationIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+                    retry_count, last_error_json, comment_id, publisher_login,
+                    desired_effects_json, observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 FROM implementation_publication_intents
+                 WHERE status = 'blocked' ORDER BY created_at ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], implementation_publication_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    /// Operator recovery: return a `blocked` publication intent to `pending` so
+    /// the reconcile loop picks it up again.
+    ///
+    /// Completed steps are preserved, so progressive publication resumes where
+    /// it stopped rather than redoing durable work.
+    ///
+    /// Deliberately scoped to `blocked`. `conflict` records observed drift or a
+    /// pull request owned by someone else, where blindly re-attempting could
+    /// publish twice; clearing one needs a human to establish what actually
+    /// changed on the forge first.
+    pub fn reset_blocked_implementation_publication(
+        &mut self,
+        intent_id: &str,
+    ) -> Result<ImplementationPublicationIntent> {
+        let Some(intent) = self.get_implementation_publication_intent(intent_id)? else {
+            return Err(SymphonyError::StorageError(format!(
+                "implementation publication intent {intent_id} not found"
+            )));
+        };
+        if intent.status != PublicationStatus::Blocked {
+            return Err(SymphonyError::TriageError(format!(
+                "implementation publication intent {intent_id} is {}, not blocked; \
+                 only a blocked intent can be reset",
+                intent.status.as_str()
+            )));
+        }
+        self.conn
+            .execute(
+                "UPDATE implementation_publication_intents
+                 SET status = ?1, last_error_json = NULL, retry_count = 0, updated_at = ?2
+                 WHERE intent_id = ?3",
+                params![
+                    PublicationStatus::Pending.as_str(),
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        self.get_implementation_publication_intent(intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "implementation publication intent {intent_id} missing after reset"
+                ))
+            })
+    }
+
     /// Record a publication condition that is waiting on an unmet precondition
     /// rather than on a failed attempt, leaving `retry_count` untouched.
     ///

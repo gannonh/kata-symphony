@@ -32,6 +32,6 @@ A3 turns a pinned A2 approved specification into a validated change bundle and (
 - A1/A2 suites remain green; migrations are additive.
 - Configuration changes cannot silently redirect a pending publication or its credentials.
 - Disk growth from retained bundles is operator-visible; GC is deferred.
-- A publication target that stays unreachable past the retry budget requires an operator to clear the `blocked` intent; the tradeoff is bounded forge traffic and event-row growth.
+- A publication target that stays unreachable past the retry budget requires an operator to clear the `blocked` intent; the tradeoff is bounded forge traffic and event-row growth. Recovery is `symphony publication list-blocked` then `symphony publication reset <intent-id>`, which returns the intent to `pending` with `retry_count` cleared while preserving completed steps, so publication resumes rather than restarts. The reset is recorded as an `implementation_publication_reset` event on the run timeline. Reset is scoped to `blocked`; `conflict` stays terminal because it records observed drift or foreign pull-request ownership, where re-attempting could publish twice.
 - Live draft-PR / Agent Review UAT remains operator residual after PR2 automation.
 - Live Docker container orchestration beyond the env/bundle contract is residual where no daemon is available.

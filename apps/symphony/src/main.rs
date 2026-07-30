@@ -74,6 +74,33 @@ pub enum CliCommand {
         #[arg(long)]
         input: Option<String>,
     },
+    /// Inspect and recover implementation publication intents
+    Publication {
+        #[command(subcommand)]
+        action: PublicationAction,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand, PartialEq, Eq)]
+pub enum PublicationAction {
+    /// List publication intents blocked after exhausting reconcile retries
+    ListBlocked {
+        /// Path to WORKFLOW.md
+        #[arg(long, default_value = "WORKFLOW.md")]
+        workflow: String,
+    },
+    /// Return a blocked publication intent to pending so reconciliation resumes
+    ///
+    /// Completed publication steps are preserved, so publication continues from
+    /// where it stopped. Fix the underlying cause first — a reset intent that
+    /// still cannot publish will simply exhaust its retries again.
+    Reset {
+        /// Intent id, as reported by `symphony publication list-blocked`
+        intent_id: String,
+        /// Path to WORKFLOW.md
+        #[arg(long, default_value = "WORKFLOW.md")]
+        workflow: String,
+    },
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -625,6 +652,10 @@ pub fn resolve_workflow_path(cli: &Cli) -> PathBuf {
             .map(PathBuf::from)
             .unwrap_or_else(resolve_default_workflow_path),
         Some(CliCommand::Helper { workflow, .. }) => PathBuf::from(workflow),
+        Some(CliCommand::Publication { action }) => match action {
+            PublicationAction::ListBlocked { workflow } => PathBuf::from(workflow),
+            PublicationAction::Reset { workflow, .. } => PathBuf::from(workflow),
+        },
         Some(CliCommand::Init { .. }) => resolve_default_workflow_path(),
         None => cli
             .workflow_path
@@ -898,6 +929,123 @@ fn run_doctor(workflow_path: &Path) -> Result<i32, String> {
         Ok(1)
     } else {
         Ok(0)
+    }
+}
+
+/// Open the durable factory store for the workflow's configured tracker repo.
+#[cfg(not(test))]
+fn open_factory_store_for_workflow(
+    workflow_path: &Path,
+) -> std::result::Result<symphony::triage::runtime::SharedFactoryStore, String> {
+    use symphony::triage::storage_path::{forge_host_from_endpoint, resolve_storage_path};
+
+    let context =
+        RuntimeBootstrapDeps::load_startup_context(workflow_path).map_err(|err| err.to_string())?;
+    let config = context.effective_config;
+    let owner = config
+        .tracker
+        .repo_owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "tracker.repo_owner required".to_string())?;
+    let repo = config
+        .tracker
+        .repo_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "tracker.repo_name required".to_string())?;
+    let forge_host = forge_host_from_endpoint(&config.tracker.endpoint);
+    let storage_path = resolve_storage_path(&config.storage, &forge_host, owner, repo);
+    if !storage_path.exists() {
+        return Err(format!(
+            "no durable factory store at {}; run Symphony against this workflow first",
+            storage_path.display()
+        ));
+    }
+    symphony::triage::runtime::SharedFactoryStore::open(
+        &storage_path,
+        config.storage.busy_timeout_ms,
+    )
+    .map_err(|err| err.to_string())
+}
+
+#[cfg(not(test))]
+fn run_publication(action: &PublicationAction) -> i32 {
+    match action {
+        PublicationAction::ListBlocked { workflow } => {
+            let store = match open_factory_store_for_workflow(Path::new(workflow)) {
+                Ok(store) => store,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return 1;
+                }
+            };
+            let blocked = match store.list_blocked_implementation_publications() {
+                Ok(blocked) => blocked,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return 1;
+                }
+            };
+            if blocked.is_empty() {
+                println!("no blocked publication intents");
+                return 0;
+            }
+            println!("{} blocked publication intent(s):", blocked.len());
+            for intent in &blocked {
+                let reason = intent
+                    .last_error
+                    .as_ref()
+                    .map(|error| format!("{} — {}", error.code, error.remediation))
+                    .unwrap_or_else(|| "unknown".to_string());
+                println!(
+                    "  {}  run={}  retries={}  last_step={}\n    {}",
+                    intent.intent_id,
+                    intent.run_id,
+                    intent.retry_count,
+                    intent.completed_steps.last().map_or("none", String::as_str),
+                    reason
+                );
+            }
+            println!("\nreset one with: symphony publication reset <intent-id>");
+            0
+        }
+        PublicationAction::Reset {
+            intent_id,
+            workflow,
+        } => {
+            let store = match open_factory_store_for_workflow(Path::new(workflow)) {
+                Ok(store) => store,
+                Err(err) => {
+                    eprintln!("{err}");
+                    return 1;
+                }
+            };
+            let operator = std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "unknown".to_string());
+            match store.reset_blocked_implementation_publication(intent_id, &operator) {
+                Ok(intent) => {
+                    println!(
+                        "reset {} to pending (run {}, {} completed step(s) preserved)",
+                        intent.intent_id,
+                        intent.run_id,
+                        intent.completed_steps.len()
+                    );
+                    println!(
+                        "reconciliation resumes on the next poll; fix the underlying cause first \
+                         or it will exhaust its retries again"
+                    );
+                    0
+                }
+                Err(err) => {
+                    eprintln!("{err}");
+                    1
+                }
+            }
+        }
     }
 }
 
@@ -1234,6 +1382,10 @@ fn run_entrypoint(args: impl IntoIterator<Item = OsString>) -> i32 {
     }) = &cli.command
     {
         return run_helper(Path::new(workflow), operation, input.as_deref());
+    }
+
+    if let Some(CliCommand::Publication { action }) = &cli.command {
+        return run_publication(action);
     }
 
     let mut deps = RuntimeBootstrapDeps::default();

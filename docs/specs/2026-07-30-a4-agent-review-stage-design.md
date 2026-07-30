@@ -166,7 +166,7 @@ This section encodes what [#607](https://github.com/gannonh/kata-symphony/pull/6
 
 - Reconcile attempts are bounded with exponential backoff and a retry ceiling that terminalizes as `blocked`.
 - **The budget counts failed attempts only.** A condition waiting on an unmet precondition — the PR being temporarily unavailable, a head SHA that has moved and awaits a fresh cycle, a human still editing — is recorded as a *waiting* state that does not charge the budget. Charging a human-paced wait to a failure budget strands work permanently.
-- Terminal `blocked` intents **must have a documented operator recovery path** before A4 ships. A3 currently has none — see [Inherited risk](#inherited-risk-from-the-deferred-a3-uat).
+- Terminal `blocked` intents **must have a documented operator recovery path**. A3's landed first, as `symphony publication list-blocked` / `symphony publication reset <intent-id>`; A4 extends the same command to review intents rather than inventing a second mechanism.
 - Error deduplication must compare like with like. `SymphonyError` variants prefix their payload on `Display`; comparing that rendered string against a raw `FactoryError::remediation` never matches, silently double-charging the retry budget and clobbering specific error codes with a generic one.
 
 ## Configuration
@@ -251,7 +251,7 @@ A3's live AC20 UAT was never executed. A4 consumes A3's draft-PR artifacts, so a
 
 ### No operator recovery from `blocked`
 
-A3 ships with terminal `blocked` intents and no code path out — clearing one requires direct SQLite edits. A4 adds more terminal states. Mitigation: deliver the operator recovery path (command or endpoint) as part of A4 PR2, covering both A3 and A4 intents.
+**Resolved before A4 PR1.** A3 shipped with terminal `blocked` intents and no code path out; clearing one required direct SQLite edits. `symphony publication list-blocked` and `symphony publication reset <intent-id>` now close that, preserving completed steps so publication resumes, and recording the intervention on the run timeline. A4 extends the same command surface to review intents; it must not introduce a terminal state without one.
 
 ### Review findings are wrong or noisy
 
