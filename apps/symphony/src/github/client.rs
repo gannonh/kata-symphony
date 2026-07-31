@@ -130,6 +130,21 @@ pub struct GithubPullRequest {
     pub body: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+pub struct GithubPullRequestFile {
+    pub filename: String,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default)]
+    pub additions: u32,
+    #[serde(default)]
+    pub deletions: u32,
+    #[serde(default)]
+    pub changes: u32,
+    #[serde(default)]
+    pub patch: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct GithubClient {
     pub http_client: reqwest::Client,
@@ -475,6 +490,33 @@ impl GithubClient {
         }
 
         self.paginated_get_capped(url.as_ref(), max_pages, "pulls")
+            .await
+    }
+
+    /// Fetch the current metadata for one pull request, including its pinned
+    /// base/head SHAs and description.
+    pub async fn get_pull_request(&self, number: u64) -> Result<GithubPullRequest> {
+        let path = format!(
+            "/repos/{}/{}/pulls/{number}",
+            self.repo_owner, self.repo_name
+        );
+        self.request_json(Method::GET, &path, None).await
+    }
+
+    /// List all changed files for a pull request. A4 uses the patch hunks to
+    /// preserve the right-side ranges that GitHub accepts for review anchors.
+    pub async fn list_pull_request_files(
+        &self,
+        number: u64,
+        max_pages: u32,
+    ) -> Result<Vec<GithubPullRequestFile>> {
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/repos/{}/{}/pulls/{number}/files",
+            self.base_url, self.repo_owner, self.repo_name
+        ))
+        .map_err(|err| SymphonyError::GithubApiRequest(format!("invalid pull files URL: {err}")))?;
+        url.query_pairs_mut().append_pair("per_page", "100");
+        self.paginated_get_capped(url.as_ref(), max_pages, "pull files")
             .await
     }
 

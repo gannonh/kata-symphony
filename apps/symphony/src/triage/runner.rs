@@ -161,6 +161,89 @@ pub struct AttemptLayout {
     pub home_dir: PathBuf,
 }
 
+/// Raw output from a credential-isolated, integrity-checked worker turn. A4
+/// uses this instead of the A1 triage artifact parser because its output has a
+/// separate strict manifest schema.
+#[derive(Debug, Clone)]
+pub(crate) struct IsolatedRawTurnResult {
+    pub output_bytes: Vec<u8>,
+    pub usage: StageUsage,
+}
+
+pub(crate) async fn run_isolated_raw_turn(
+    request: &TriageRunnerRequest,
+    stage_inputs: &serde_json::Value,
+) -> Result<IsolatedRawTurnResult> {
+    if let Err(message) = validate_request(request) {
+        return Err(SymphonyError::TriageError(message));
+    }
+    let layout = prepare_attempt(request)
+        .map_err(|outcome| SymphonyError::TriageError(runner_outcome_message(&outcome)))?;
+    let result = async {
+        let baseline = integrity::capture_baseline(&layout.workspace_path).map_err(|error| {
+            SymphonyError::TriageError(format!("worker baseline failed: {error}"))
+        })?;
+        write_json_file(
+            layout.stage_input_path.join("review-context.json"),
+            stage_inputs,
+        )?;
+        let usage = match request.harness {
+            TriageHarness::Pi => run_pi_turn(request, &layout).await,
+            TriageHarness::Codex => run_codex_turn(request, &layout).await,
+        }
+        .map_err(|outcome| SymphonyError::TriageError(runner_outcome_message(&outcome)))?;
+        let output_bytes = fs::read(&layout.output_path).map_err(|error| {
+            SymphonyError::TriageError(format!(
+                "worker did not write output at {}: {error}",
+                layout.output_path.display()
+            ))
+        })?;
+        integrity::check_repository_integrity(&layout.workspace_path, &baseline).map_err(
+            |error| {
+                SymphonyError::TriageError(format!(
+                    "read-only review worker modified the repository: {error}"
+                ))
+            },
+        )?;
+        Ok(IsolatedRawTurnResult {
+            output_bytes,
+            usage,
+        })
+    }
+    .await;
+    match (result, cleanup_isolated_attempt(&layout)) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(cleanup_error)) => Err(SymphonyError::TriageError(format!(
+            "isolated worker cleanup failed: {cleanup_error}"
+        ))),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(SymphonyError::TriageError(format!(
+            "{error}; isolated worker cleanup also failed: {cleanup_error}"
+        ))),
+    }
+}
+
+fn cleanup_isolated_attempt(layout: &AttemptLayout) -> std::result::Result<(), String> {
+    let mut errors = Vec::new();
+    if let Err(error) = scrub_isolated_home(&layout.home_dir) {
+        errors.push(format!(
+            "failed to scrub {}: {error}",
+            layout.home_dir.display()
+        ));
+    }
+    if let Err(error) = fs::remove_dir_all(&layout.attempt_root) {
+        errors.push(format!(
+            "failed to remove attempt root {}: {error}",
+            layout.attempt_root.display()
+        ));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
 pub struct TriageRunner;
 
 impl TriageRunner {
@@ -370,7 +453,7 @@ fn runner_outcome_message(outcome: &TriageRunnerOutcome) -> String {
     }
 }
 
-fn validate_request(request: &TriageRunnerRequest) -> std::result::Result<(), String> {
+pub(crate) fn validate_request(request: &TriageRunnerRequest) -> std::result::Result<(), String> {
     if request.command.is_empty() {
         return Err("triage command cannot be empty".to_string());
     }
@@ -389,7 +472,7 @@ fn validate_request(request: &TriageRunnerRequest) -> std::result::Result<(), St
     Ok(())
 }
 
-fn prepare_attempt(
+pub(crate) fn prepare_attempt(
     request: &TriageRunnerRequest,
 ) -> std::result::Result<AttemptLayout, TriageRunnerOutcome> {
     let attempt_root = request.workspace_root.join(format!(
@@ -509,7 +592,7 @@ fn report_spawn(
     });
 }
 
-fn scrub_isolated_home(home_dir: &Path) -> std::io::Result<()> {
+pub(crate) fn scrub_isolated_home(home_dir: &Path) -> std::io::Result<()> {
     if home_dir.exists() {
         fs::remove_dir_all(home_dir)?;
     }
@@ -1930,5 +2013,34 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
             Some("/tmp/stage-input")
         );
         assert_eq!(env.get(MODEL_ENV).map(String::as_str), Some("m"));
+    }
+
+    #[test]
+    fn cleanup_isolated_attempt_reports_root_removal_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let attempt_root = temp.path().join("attempt");
+        let home_dir = attempt_root.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+        let layout = AttemptLayout {
+            attempt_root: attempt_root.clone(),
+            workspace_path: attempt_root.join("workspace"),
+            output_path: attempt_root.join("result.json"),
+            stage_input_path: attempt_root.join("stage-input"),
+            home_dir: home_dir.clone(),
+        };
+
+        cleanup_isolated_attempt(&layout).unwrap();
+        assert!(!attempt_root.exists());
+        assert!(!home_dir.exists());
+
+        let missing_layout = AttemptLayout {
+            attempt_root: temp.path().join("missing"),
+            workspace_path: PathBuf::new(),
+            output_path: PathBuf::new(),
+            stage_input_path: PathBuf::new(),
+            home_dir: PathBuf::new(),
+        };
+        let error = cleanup_isolated_attempt(&missing_layout).unwrap_err();
+        assert!(error.contains("failed to remove attempt root"));
     }
 }

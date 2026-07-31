@@ -9,16 +9,19 @@ use crate::event_stream::EventHub;
 use crate::github::client::GithubClient;
 use crate::github::projects_v2::ProjectsV2Client;
 use crate::http_server::{
-    attach_implementation_http_response, attach_spec_http_response, factory_run_http_response,
-    factory_run_metrics_http_response, implementation_run_metrics_http_response,
+    attach_implementation_http_response, attach_review_http_response, attach_spec_http_response,
+    factory_run_http_response, factory_run_metrics_http_response,
+    implementation_run_metrics_http_response, review_run_metrics_http_response,
     spec_run_metrics_http_response, FactoryArtifactHttpResponse, FactoryRunHttpResponse,
     FactoryRunMetricsHttpResponse, FactoryRunQuery, ImplementationRunMetricsHttpResponse,
-    SpecRunMetricsHttpResponse,
+    ReviewRunMetricsHttpResponse, SpecRunMetricsHttpResponse,
 };
 use crate::implementation::coordinator::{
     ImplementationCoordinator, ImplementationCoordinatorConfig,
 };
 use crate::implementation::runner::LiveImplementationHarness;
+use crate::review::coordinator::{ReviewCoordinator, ReviewCoordinatorConfig};
+use crate::review::worker::LiveReviewWorker;
 use crate::spec::coordinator::{SpecCoordinator, SpecCoordinatorConfig};
 use crate::triage::coordinator::{
     EventEmitter, TriageCoordinator, TriageCoordinatorConfig, TriagePollSummary,
@@ -37,7 +40,8 @@ use crate::triage::store::{
     PendingAutomaticDispatchGuard, SqliteFactoryStore, StoreArtifactRequest,
     StoreBundleArtifactRequest, StoreImplementationArtifactRequest, StoreImplementationTurnRequest,
     StoreSpecArtifactRequest, StoreSpecTurnRequest, StoreValidationCycleRequest,
-    StoredCommentIdentity, UpsertFactoryRunRequest, UpsertImplementationStateRequest,
+    StoredCommentIdentity, UpdateReviewAttemptRequest, UpsertFactoryRunRequest,
+    UpsertImplementationStateRequest,
 };
 
 /// Shared SQLite factory store for coordinator + HTTP reads.
@@ -481,6 +485,101 @@ impl SharedFactoryStore {
         self.with_store(|store| store.list_a3_eligible_approved_runs(configuration_revision))
     }
 
+    pub fn claim_review_attempt(&self, request: ClaimAttemptRequest) -> Result<StageRunRecord> {
+        self.with_store_mut(|store| {
+            store.claim_stage_attempt(crate::review::domain::REVIEW_STAGE_NAME, request)
+        })
+    }
+
+    pub fn list_a4_eligible_review_runs(
+        &self,
+        max_attempts: u32,
+    ) -> Result<Vec<crate::triage::store::A4EligibleReviewRun>> {
+        self.with_store(|store| store.list_a4_eligible_review_runs(max_attempts))
+    }
+
+    pub fn store_review_attempt_inputs(
+        &self,
+        request: crate::triage::store::StoreReviewAttemptRequest,
+    ) -> Result<crate::review::domain::ReviewAttemptRecord> {
+        self.with_store_mut(|store| store.store_review_attempt_inputs(request))
+    }
+
+    pub fn update_review_attempt(&self, request: UpdateReviewAttemptRequest<'_>) -> Result<()> {
+        self.with_store_mut(|store| store.update_review_attempt(request))
+    }
+
+    pub fn store_review_artifact(
+        &self,
+        request: crate::triage::store::StoreReviewArtifactRequest,
+    ) -> Result<crate::review::domain::ReviewFindingsArtifactRecord> {
+        self.with_store_mut(|store| store.store_review_artifact(request))
+    }
+
+    pub fn get_review_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<crate::review::domain::ReviewFindingsArtifactRecord>> {
+        self.with_store(|store| store.get_review_artifact(artifact_id))
+    }
+
+    pub fn create_review_publication_intent(
+        &self,
+        run_id: &str,
+        artifact_id: &str,
+        kind: &str,
+        desired_effects: &serde_json::Value,
+    ) -> Result<crate::review::domain::ReviewPublicationIntent> {
+        self.with_store_mut(|store| {
+            store.create_review_publication_intent(run_id, artifact_id, kind, desired_effects)
+        })
+    }
+
+    pub fn list_pending_review_publications(
+        &self,
+    ) -> Result<Vec<crate::review::domain::ReviewPublicationIntent>> {
+        self.with_store(|store| store.list_pending_review_publications())
+    }
+
+    pub fn get_review_publication_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<crate::review::domain::ReviewPublicationIntent>> {
+        self.with_store(|store| store.get_review_publication_intent(intent_id))
+    }
+
+    pub fn complete_review_publication(&self, intent_id: &str, step: &str) -> Result<()> {
+        self.with_store_mut(|store| store.complete_review_publication(intent_id, step))
+    }
+
+    pub fn bind_review_publication_comment(
+        &self,
+        intent_id: &str,
+        comment_id: &str,
+        publisher_login: &str,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.bind_review_publication_comment(intent_id, comment_id, publisher_login)
+        })
+    }
+
+    pub fn clear_review_publication_comment(&self, intent_id: &str) -> Result<()> {
+        self.with_store_mut(|store| store.clear_review_publication_comment(intent_id))
+    }
+
+    pub fn set_review_publication_error(
+        &self,
+        intent_id: &str,
+        status: PublicationStatus,
+        error: FactoryError,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.set_review_publication_error(intent_id, status, error))
+    }
+
+    pub fn review_metrics(&self) -> Result<crate::review::domain::ReviewMetricsAggregate> {
+        self.with_store(|store| store.review_metrics())
+    }
+
     fn with_store<T>(&self, f: impl FnOnce(&SqliteFactoryStore) -> Result<T>) -> Result<T> {
         let guard = self
             .inner
@@ -563,6 +662,17 @@ impl SharedFactoryStore {
                 publication.as_ref(),
                 bundle.as_ref(),
                 draft_pr.as_ref(),
+            );
+            let review_artifacts = store.list_review_artifacts(&run.run_id)?;
+            let review_artifact = review_artifacts.first();
+            let review_publication = store
+                .list_review_publications_for_run(&run.run_id)?
+                .into_iter()
+                .next();
+            attach_review_http_response(
+                &mut response,
+                review_artifact,
+                review_publication.as_ref(),
             );
             Ok(Some(response))
         })
@@ -816,6 +926,12 @@ impl FactoryRunQuery for SharedFactoryStore {
             .map_err(|err| err.to_string())
     }
 
+    fn review_metrics(&self) -> std::result::Result<ReviewRunMetricsHttpResponse, String> {
+        self.with_store(|store| store.review_metrics())
+            .map(review_run_metrics_http_response)
+            .map_err(|err| err.to_string())
+    }
+
     fn blocked_publications(
         &self,
     ) -> std::result::Result<Vec<crate::http_server::BlockedPublicationHttpResponse>, String> {
@@ -935,6 +1051,7 @@ pub struct TriageRuntime {
     spec_coordinator: Option<SpecCoordinator<GithubTriageIntake, GithubClient>>,
     implementation_coordinator:
         Option<ImplementationCoordinator<GithubClient, GithubClient, LiveImplementationHarness>>,
+    review_coordinator: Option<ReviewCoordinator<GithubClient, LiveReviewWorker>>,
     store: SharedFactoryStore,
     sessions: Arc<Mutex<crate::domain::TriageSessionRegistry>>,
 }
@@ -946,7 +1063,11 @@ impl TriageRuntime {
     pub fn try_open_dispatch_guard_store(
         config: &ServiceConfig,
     ) -> Result<Option<SharedFactoryStore>> {
-        if config.triage.enabled || config.spec.enabled || config.implementation.enabled {
+        if config.triage.enabled
+            || config.spec.enabled
+            || config.implementation.enabled
+            || config.review.enabled
+        {
             return Ok(None);
         }
         if !matches!(config.tracker.kind.as_deref(), Some("github")) {
@@ -992,7 +1113,11 @@ impl TriageRuntime {
         workflow_path: &Path,
         event_hub: Option<EventHub>,
     ) -> Result<Option<Self>> {
-        if !config.triage.enabled && !config.spec.enabled && !config.implementation.enabled {
+        if !config.triage.enabled
+            && !config.spec.enabled
+            && !config.implementation.enabled
+            && !config.review.enabled
+        {
             return Ok(None);
         }
 
@@ -1060,6 +1185,7 @@ impl TriageRuntime {
         };
 
         let projects = ProjectsV2Client::new(client.clone());
+        let review_projects = projects.clone();
         let managed_labels = config
             .triage
             .routes
@@ -1149,23 +1275,48 @@ impl TriageRuntime {
             client.clone(),
             client.clone(),
             ImplementationCoordinatorConfig {
-                forge_host,
-                repository,
-                owner_instance,
-                workflow_dir,
+                forge_host: forge_host.clone(),
+                repository: repository.clone(),
+                owner_instance: owner_instance.clone(),
+                workflow_dir: workflow_dir.clone(),
                 storage_path: storage_path.clone(),
             },
         )
         .with_routing(routing.clone())
-        .with_pulls(client);
-        if let Some(events) = emitter {
+        .with_pulls(client.clone());
+        if let Some(events) = emitter.clone() {
             implementation_coordinator = implementation_coordinator.with_events(events);
+        }
+
+        let mut review_coordinator = ReviewCoordinator::new(
+            store.clone(),
+            client.clone(),
+            client.clone(),
+            review_projects,
+            LiveReviewWorker,
+            ReviewCoordinatorConfig {
+                forge_host: forge_host.clone(),
+                repository: repository.clone(),
+                owner_instance: owner_instance.clone(),
+                workflow_dir: workflow_dir.clone(),
+                project_owner: owner.to_string(),
+                project_number,
+                max_pages: config
+                    .triage
+                    .max_intake_pages
+                    .max(config.spec.max_intake_pages)
+                    .max(1),
+            },
+        );
+        if let Some(events) = emitter {
+            review_coordinator = review_coordinator.with_events(events);
         }
 
         Ok(Some(Self {
             coordinator,
             spec_coordinator,
             implementation_coordinator: Some(implementation_coordinator),
+            review_coordinator: Some(review_coordinator),
             store,
             sessions,
         }))
@@ -1249,6 +1400,36 @@ impl TriageRuntime {
                         event = "implementation_poll_failed",
                         error = %error,
                         "implementation poll failed; continuing orchestrator loop"
+                    );
+                }
+            }
+        }
+        if let Some(coordinator) = self.review_coordinator.as_mut() {
+            match coordinator.poll_once(config).await {
+                Ok(summary) => {
+                    if summary.review_enabled
+                        || summary.candidates_seen > 0
+                        || summary.attempts_started > 0
+                    {
+                        tracing::info!(
+                            event = "review_poll_completed",
+                            enabled = summary.review_enabled,
+                            candidates_seen = summary.candidates_seen,
+                            attempts_started = summary.attempts_started,
+                            attempts_completed = summary.attempts_completed,
+                            attempts_failed = summary.attempts_failed,
+                            waiting = summary.waiting,
+                            preview_published = summary.preview_published,
+                            blocked = summary.blocked,
+                            "review poll completed"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "review_poll_failed",
+                        error = %error,
+                        "review poll failed; continuing orchestrator loop"
                     );
                 }
             }

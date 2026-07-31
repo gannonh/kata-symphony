@@ -1362,6 +1362,7 @@ struct FakeFactoryRunQuery {
     by_id: BTreeMap<String, symphony::http_server::FactoryRunHttpResponse>,
     by_issue: BTreeMap<String, symphony::http_server::FactoryRunHttpResponse>,
     metrics: Option<symphony::http_server::FactoryRunMetricsHttpResponse>,
+    review_metrics: Option<symphony::http_server::ReviewRunMetricsHttpResponse>,
     spec_metrics: Option<symphony::http_server::SpecRunMetricsHttpResponse>,
     /// `None` leaves the trait default in place, standing in for an implementor
     /// that does not serve publication recovery at all.
@@ -1403,6 +1404,14 @@ impl symphony::http_server::FactoryRunQuery for FakeFactoryRunQuery {
         self.spec_metrics
             .clone()
             .ok_or_else(|| "spec metrics unavailable".to_string())
+    }
+
+    fn review_metrics(
+        &self,
+    ) -> Result<symphony::http_server::ReviewRunMetricsHttpResponse, String> {
+        self.review_metrics
+            .clone()
+            .ok_or_else(|| "review metrics unavailable".to_string())
     }
 
     fn blocked_publications(
@@ -1525,6 +1534,7 @@ fn sample_factory_run() -> symphony::http_server::FactoryRunHttpResponse {
         }),
         spec: None,
         implementation: None,
+        review: None,
     }
 }
 
@@ -1696,10 +1706,32 @@ async fn test_factory_run_metrics_stage_validation() {
     };
     let app = router_with_factory_query(FakeFactoryRunQuery {
         metrics: Some(metrics.clone()),
+        review_metrics: Some(symphony::http_server::ReviewRunMetricsHttpResponse {
+            base: symphony::http_server::FactoryRunMetricsHttpResponse {
+                stage: "review".to_string(),
+                ..metrics.clone()
+            },
+            blocked_publications: 1,
+            preview_publications: 1,
+            findings: 0,
+            no_findings: 1,
+        }),
         ..Default::default()
     });
 
     let bad_stage = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs/metrics?stage=unknown")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(bad_stage.status(), StatusCode::BAD_REQUEST);
+
+    let review = app
         .clone()
         .oneshot(
             Request::builder()
@@ -1709,7 +1741,11 @@ async fn test_factory_run_metrics_stage_validation() {
         )
         .await
         .expect("response");
-    assert_eq!(bad_stage.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(review.status(), StatusCode::OK);
+    let review_payload = body_json(review).await;
+    assert_eq!(review_payload["stage"], "review");
+    assert_eq!(review_payload["blocked_publications"], 1);
+    assert_eq!(review_payload["no_findings"], 1);
 
     let missing_stage = app
         .clone()
