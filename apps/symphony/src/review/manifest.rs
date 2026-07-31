@@ -58,21 +58,45 @@ pub struct ReviewFindingsManifest {
     pub findings: Vec<ReviewFinding>,
 }
 
+/// An inclusive line range that GitHub accepts on the right side of the PR diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviewedLineRange {
+    pub start: u32,
+    pub end: u32,
+}
+
+impl ReviewedLineRange {
+    pub fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
+    }
+
+    fn contains(self, start: u32, end: u32) -> bool {
+        self.start <= start && end <= self.end
+    }
+}
+
 /// A changed file as it exists at the reviewed head SHA.
 ///
-/// A zero line count represents a deleted file. It may appear in the diff, but
-/// cannot accept a right-side finding anchor.
+/// A zero line count and empty right-side ranges represent a deleted file. The
+/// ranges include changed and context lines accepted by GitHub for review
+/// comments, so validated findings remain publishable by PR2.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewedFile {
     pub path: String,
     pub line_count: u32,
+    pub right_side_ranges: Vec<ReviewedLineRange>,
 }
 
 impl ReviewedFile {
-    pub fn new(path: impl Into<String>, line_count: u32) -> Self {
+    pub fn new(
+        path: impl Into<String>,
+        line_count: u32,
+        right_side_ranges: Vec<ReviewedLineRange>,
+    ) -> Self {
         Self {
             path: path.into(),
             line_count,
+            right_side_ranges,
         }
     }
 }
@@ -160,9 +184,9 @@ pub fn parse_and_validate_review_manifest(
         ));
     }
 
-    let file_lines: BTreeMap<&str, u32> = changed_files
+    let reviewed_files: BTreeMap<&str, &ReviewedFile> = changed_files
         .iter()
-        .map(|file| (file.path.as_str(), file.line_count))
+        .map(|file| (file.path.as_str(), file))
         .collect();
     let mut finding_ids = BTreeSet::new();
 
@@ -178,7 +202,7 @@ pub fn parse_and_validate_review_manifest(
             violations.push(format!("{label}: finding_id is duplicated"));
         }
 
-        let Some(line_count) = file_lines.get(finding.path.as_str()).copied() else {
+        let Some(file) = reviewed_files.get(finding.path.as_str()).copied() else {
             violations.push(format!(
                 "{label}: path {} is absent from the reviewed diff",
                 finding.path
@@ -186,19 +210,34 @@ pub fn parse_and_validate_review_manifest(
             continue;
         };
 
-        if finding.line == 0 || finding.line > line_count {
+        let line_resolves = finding.line > 0 && finding.line <= file.line_count;
+        if !line_resolves {
             violations.push(format!(
-                "{label}: line {} does not resolve in {} at the reviewed head (1..={line_count})",
-                finding.line, finding.path
+                "{label}: line {} does not resolve in {} at the reviewed head (1..={})",
+                finding.line, finding.path, file.line_count
             ));
         }
-        if let Some(end_line) = finding.end_line {
-            if end_line < finding.line || end_line > line_count {
-                violations.push(format!(
-                    "{label}: end_line {end_line} must be between line {} and {line_count}",
-                    finding.line
-                ));
-            }
+
+        let end_line = finding.end_line.unwrap_or(finding.line);
+        let end_resolves = end_line >= finding.line && end_line <= file.line_count;
+        if finding.end_line.is_some() && !end_resolves {
+            violations.push(format!(
+                "{label}: end_line {end_line} must be between line {} and {}",
+                finding.line, file.line_count
+            ));
+        }
+
+        if line_resolves
+            && end_resolves
+            && !file
+                .right_side_ranges
+                .iter()
+                .any(|range| range.contains(finding.line, end_line))
+        {
+            violations.push(format!(
+                "{label}: anchor {}..={end_line} is absent from the right side of the reviewed diff for {}",
+                finding.line, finding.path
+            ));
         }
 
         for (field, value) in [
@@ -242,8 +281,12 @@ mod tests {
 
     fn files() -> Vec<ReviewedFile> {
         vec![
-            ReviewedFile::new("src/lib.rs", 40),
-            ReviewedFile::new("src/deleted.rs", 0),
+            ReviewedFile::new(
+                "src/lib.rs",
+                40,
+                vec![ReviewedLineRange::new(10, 20), ReviewedLineRange::new(30, 35)],
+            ),
+            ReviewedFile::new("src/deleted.rs", 0, vec![]),
         ]
     }
 
@@ -311,6 +354,26 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_anchor_outside_the_right_side_diff_ranges() {
+        let mut value = valid_manifest();
+        value["findings"][0]["line"] = serde_json::json!(25);
+        value["findings"][0]["end_line"] = serde_json::json!(25);
+
+        let error = validate(&value).expect_err("anchor must be publishable in the diff");
+        assert!(error.to_string().contains("right side of the reviewed diff"));
+    }
+
+    #[test]
+    fn rejects_a_multiline_anchor_that_crosses_a_diff_range_boundary() {
+        let mut value = valid_manifest();
+        value["findings"][0]["line"] = serde_json::json!(18);
+        value["findings"][0]["end_line"] = serde_json::json!(22);
+
+        let error = validate(&value).expect_err("anchor must fit one diff range");
+        assert!(error.to_string().contains("right side of the reviewed diff"));
+    }
+
+    #[test]
     fn rejects_a_deleted_file_anchor() {
         let mut value = valid_manifest();
         value["findings"][0]["path"] = serde_json::json!("src/deleted.rs");
@@ -340,6 +403,24 @@ mod tests {
 
         let error = validate(&value).expect_err("affirmation conflicts with findings");
         assert!(error.to_string().contains("when findings are present"));
+    }
+
+    #[test]
+    fn accepts_kebab_case_category_vocabulary() {
+        let mut value = valid_manifest();
+        value["findings"][0]["category"] = serde_json::json!("spec-conformance");
+        let manifest = validate(&value).expect("spec-conformance category");
+        assert_eq!(
+            manifest.findings[0].category,
+            ReviewFindingCategory::SpecConformance
+        );
+
+        value["findings"][0]["category"] = serde_json::json!("test-coverage");
+        let manifest = validate(&value).expect("test-coverage category");
+        assert_eq!(
+            manifest.findings[0].category,
+            ReviewFindingCategory::TestCoverage
+        );
     }
 
     #[test]
