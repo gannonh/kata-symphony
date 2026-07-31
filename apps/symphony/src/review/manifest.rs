@@ -284,7 +284,10 @@ mod tests {
             ReviewedFile::new(
                 "src/lib.rs",
                 40,
-                vec![ReviewedLineRange::new(10, 20), ReviewedLineRange::new(30, 35)],
+                vec![
+                    ReviewedLineRange::new(10, 20),
+                    ReviewedLineRange::new(30, 35),
+                ],
             ),
             ReviewedFile::new("src/deleted.rs", 0, vec![]),
         ]
@@ -360,7 +363,9 @@ mod tests {
         value["findings"][0]["end_line"] = serde_json::json!(25);
 
         let error = validate(&value).expect_err("anchor must be publishable in the diff");
-        assert!(error.to_string().contains("right side of the reviewed diff"));
+        assert!(error
+            .to_string()
+            .contains("right side of the reviewed diff"));
     }
 
     #[test]
