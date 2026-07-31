@@ -541,6 +541,13 @@ impl SharedFactoryStore {
         self.with_store(|store| store.list_pending_review_publications())
     }
 
+    pub fn get_review_publication_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<crate::review::domain::ReviewPublicationIntent>> {
+        self.with_store(|store| store.get_review_publication_intent(intent_id))
+    }
+
     pub fn complete_review_publication(&self, intent_id: &str, step: &str) -> Result<()> {
         self.with_store_mut(|store| store.complete_review_publication(intent_id, step))
     }
