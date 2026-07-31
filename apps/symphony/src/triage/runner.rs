@@ -205,17 +205,43 @@ pub(crate) async fn run_isolated_raw_turn(
                 ))
             },
         )?;
-        scrub_isolated_home(&layout.home_dir).map_err(|error| {
-            SymphonyError::TriageError(format!("failed to scrub isolated worker home: {error}"))
-        })?;
         Ok(IsolatedRawTurnResult {
             output_bytes,
             usage,
         })
     }
     .await;
-    let _ = fs::remove_dir_all(&layout.attempt_root);
-    result
+    match (result, cleanup_isolated_attempt(&layout)) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(cleanup_error)) => Err(SymphonyError::TriageError(format!(
+            "isolated worker cleanup failed: {cleanup_error}"
+        ))),
+        (Err(error), Ok(())) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(SymphonyError::TriageError(format!(
+            "{error}; isolated worker cleanup also failed: {cleanup_error}"
+        ))),
+    }
+}
+
+fn cleanup_isolated_attempt(layout: &AttemptLayout) -> std::result::Result<(), String> {
+    let mut errors = Vec::new();
+    if let Err(error) = scrub_isolated_home(&layout.home_dir) {
+        errors.push(format!(
+            "failed to scrub {}: {error}",
+            layout.home_dir.display()
+        ));
+    }
+    if let Err(error) = fs::remove_dir_all(&layout.attempt_root) {
+        errors.push(format!(
+            "failed to remove attempt root {}: {error}",
+            layout.attempt_root.display()
+        ));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 pub struct TriageRunner;
@@ -1987,5 +2013,34 @@ printf '%s' '{artifact}' > "$SYMPHONY_STAGE_OUTPUT"
             Some("/tmp/stage-input")
         );
         assert_eq!(env.get(MODEL_ENV).map(String::as_str), Some("m"));
+    }
+
+    #[test]
+    fn cleanup_isolated_attempt_reports_root_removal_failures() {
+        let temp = tempfile::tempdir().unwrap();
+        let attempt_root = temp.path().join("attempt");
+        let home_dir = attempt_root.join("home");
+        fs::create_dir_all(&home_dir).unwrap();
+        let layout = AttemptLayout {
+            attempt_root: attempt_root.clone(),
+            workspace_path: attempt_root.join("workspace"),
+            output_path: attempt_root.join("result.json"),
+            stage_input_path: attempt_root.join("stage-input"),
+            home_dir: home_dir.clone(),
+        };
+
+        cleanup_isolated_attempt(&layout).unwrap();
+        assert!(!attempt_root.exists());
+        assert!(!home_dir.exists());
+
+        let missing_layout = AttemptLayout {
+            attempt_root: temp.path().join("missing"),
+            workspace_path: PathBuf::new(),
+            output_path: PathBuf::new(),
+            stage_input_path: PathBuf::new(),
+            home_dir: PathBuf::new(),
+        };
+        let error = cleanup_isolated_attempt(&missing_layout).unwrap_err();
+        assert!(error.contains("failed to remove attempt root"));
     }
 }

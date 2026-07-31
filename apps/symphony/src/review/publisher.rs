@@ -91,6 +91,11 @@ where
                     .await?
                 {
                     comment_id = recovered;
+                    store.bind_review_publication_comment(
+                        &intent.intent_id,
+                        &comment_id.to_string(),
+                        &publisher_login,
+                    )?;
                     self.comments.get_comment(comment_id).await?
                 } else {
                     let created = self.comments.create_comment(issue_number, body).await?;
@@ -482,6 +487,51 @@ mod tests {
             .unwrap();
         assert_eq!(comments.comments.lock().unwrap().len(), 1);
         assert_eq!(*comments.create_count.lock().unwrap(), 1);
+        assert_eq!(*comments.update_count.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn missing_bound_comment_recovers_and_rebinds_owned_marker() {
+        let (_dir, store) = open_store();
+        let comments = FakeComments::new("symphony-bot");
+        let publisher = ReviewPublisher::new(comments.clone());
+        let (artifact, intent) = setup_preview_fixture(&store).await;
+        store
+            .bind_review_publication_comment(&intent.intent_id, "999", "symphony-bot")
+            .unwrap();
+        let marker = format!(
+            "{REVIEW_COMMENT_MARKER_PREFIX}{}{REVIEW_COMMENT_MARKER_SUFFIX}",
+            intent.intent_id
+        );
+        comments.comments.lock().unwrap().insert(
+            701,
+            GithubIssueComment {
+                id: 701,
+                user: Some(GithubUser {
+                    login: "symphony-bot".to_string(),
+                }),
+                body: Some(marker),
+                html_url: None,
+                created_at: None,
+                updated_at: None,
+            },
+        );
+        let bound_intent = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+
+        publisher
+            .publish_preview(&store, &bound_intent, &artifact, 42, 2)
+            .await
+            .unwrap();
+
+        let persisted = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.comment_id.as_deref(), Some("701"));
+        assert_eq!(*comments.create_count.lock().unwrap(), 0);
         assert_eq!(*comments.update_count.lock().unwrap(), 1);
     }
 }
