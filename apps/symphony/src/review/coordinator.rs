@@ -269,7 +269,7 @@ where
             let _ = self.store.fail_attempt(&stage.stage_run_id, factory_error);
             return Err(error);
         }
-        let result = async {
+        let result: Result<ProcessOutcome, SymphonyError> = async {
             self.record_event(
             Some(&candidate.run_id),
             Some(&stage.stage_run_id),
@@ -305,8 +305,8 @@ where
                 title: pull.title.clone(),
             },
             codex: (service.agent_backend == AgentBackend::Codex).then(|| service.codex.clone()),
-            diff,
-            pull_request_body: pull.body.unwrap_or_default(),
+            diff: diff.clone(),
+            pull_request_body: pull.body.clone().unwrap_or_default(),
             approved_spec: spec.artifact.clone(),
             implementation_manifest: implementation.manifest.clone(),
         };

@@ -73,7 +73,7 @@ pub trait FactoryRunQuery: Send + Sync {
     fn implementation_metrics(&self) -> Result<ImplementationRunMetricsHttpResponse, String> {
         Err("implementation metrics are not available".to_string())
     }
-    fn review_metrics(&self) -> Result<FactoryRunMetricsHttpResponse, String> {
+    fn review_metrics(&self) -> Result<ReviewRunMetricsHttpResponse, String> {
         Err("review metrics are not available".to_string())
     }
     fn get_artifact(
@@ -1042,6 +1042,30 @@ pub struct ImplementationRunMetricsHttpResponse {
     pub publication_conflicts: u64,
     pub local_attempts: u64,
     pub docker_attempts: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewRunMetricsHttpResponse {
+    #[serde(flatten)]
+    pub base: FactoryRunMetricsHttpResponse,
+    pub blocked_publications: u64,
+    pub preview_publications: u64,
+    pub findings: u64,
+    pub no_findings: u64,
+}
+
+pub fn review_run_metrics_http_response(
+    metrics: crate::review::domain::ReviewMetricsAggregate,
+) -> ReviewRunMetricsHttpResponse {
+    let mut base = factory_run_metrics_http_response(metrics.base);
+    base.stage = crate::review::domain::REVIEW_STAGE_NAME.to_string();
+    ReviewRunMetricsHttpResponse {
+        base,
+        blocked_publications: metrics.blocked_publications,
+        preview_publications: metrics.preview_publications,
+        findings: metrics.findings,
+        no_findings: metrics.no_findings,
+    }
 }
 
 pub fn implementation_run_metrics_http_response(

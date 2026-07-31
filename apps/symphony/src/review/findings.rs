@@ -128,4 +128,18 @@ mod tests {
         assert_eq!(result[0].line_count, 0);
         assert!(result[0].right_side_ranges.is_empty());
     }
+
+    #[test]
+    fn treats_missing_patches_as_unanchorable() {
+        let files = vec![GithubPullRequestFile {
+            filename: "large.rs".into(),
+            status: "modified".into(),
+            additions: 20,
+            patch: None,
+            ..Default::default()
+        }];
+        let result = reviewed_files(&files);
+        assert_eq!(result[0].line_count, 0);
+        assert!(result[0].right_side_ranges.is_empty());
+    }
 }

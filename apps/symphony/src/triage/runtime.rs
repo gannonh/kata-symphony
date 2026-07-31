@@ -12,9 +12,9 @@ use crate::http_server::{
     attach_implementation_http_response, attach_review_http_response, attach_spec_http_response,
     factory_run_http_response,
     factory_run_metrics_http_response, implementation_run_metrics_http_response,
-    spec_run_metrics_http_response, FactoryArtifactHttpResponse, FactoryRunHttpResponse,
-    FactoryRunMetricsHttpResponse, FactoryRunQuery, ImplementationRunMetricsHttpResponse,
-    SpecRunMetricsHttpResponse,
+    review_run_metrics_http_response, spec_run_metrics_http_response, FactoryArtifactHttpResponse,
+    FactoryRunHttpResponse, FactoryRunMetricsHttpResponse, FactoryRunQuery,
+    ImplementationRunMetricsHttpResponse, ReviewRunMetricsHttpResponse, SpecRunMetricsHttpResponse,
 };
 use crate::implementation::coordinator::{
     ImplementationCoordinator, ImplementationCoordinatorConfig,
@@ -940,16 +940,9 @@ impl FactoryRunQuery for SharedFactoryStore {
             .map_err(|err| err.to_string())
     }
 
-    fn review_metrics(&self) -> std::result::Result<FactoryRunMetricsHttpResponse, String> {
+    fn review_metrics(&self) -> std::result::Result<ReviewRunMetricsHttpResponse, String> {
         self.with_store(|store| store.review_metrics())
-            .map(|metrics| {
-                let mut base = factory_run_metrics_http_response(metrics.base);
-                base.stage = crate::review::domain::REVIEW_STAGE_NAME.to_string();
-                base.total_attempts = metrics.total_attempts;
-                base.completed_attempts = metrics.completed_attempts;
-                base.failed_attempts = metrics.failed_attempts;
-                base
-            })
+            .map(review_run_metrics_http_response)
             .map_err(|err| err.to_string())
     }
 
