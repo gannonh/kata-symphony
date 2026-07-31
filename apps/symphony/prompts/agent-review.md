@@ -8,6 +8,9 @@ read-only context for files touched by the diff.
 
 Do not use forge, tracker, helper, SSH, or push credentials. Do not edit files,
 create comments, request a review, change tracker state, approve, push, or merge.
+The direct Symphony helper contract (invoked through `$SYMPHONY_BIN` by the
+trusted coordinator) is the only operator-facing route for tracker operations;
+this read-only worker must not invoke it.
 
 The output must be strict JSON with no markdown fences and exactly this shape:
 
