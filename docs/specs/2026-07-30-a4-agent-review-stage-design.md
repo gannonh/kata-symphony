@@ -121,7 +121,7 @@ Each finding carries:
 
 Manifest-level fields record the reviewed head SHA, the base SHA, a spec-conformance summary, and an explicit `no_findings` affirmation when the manifest is empty — so "found nothing" is distinguishable from "failed to review."
 
-**Validation rules:** every `path` must appear in the reviewed diff; every anchor must resolve within that file at the reviewed SHA; severities and categories must be in the closed vocabulary; a non-empty manifest must not set `no_findings`. A violation is a bounded re-prompt with structured feedback, capped, then blocked with an actionable error.
+**Validation rules:** every `path` must appear in the reviewed diff; every anchor must resolve within that file at the reviewed SHA and fit wholly within one valid right-side diff range (changed or context lines accepted by GitHub); severities and categories must be in the closed vocabulary; a non-empty manifest must not set `no_findings`. A violation is a bounded re-prompt with structured feedback, capped, then blocked with an actionable error.
 
 ## Durable findings storage
 
