@@ -269,7 +269,7 @@ where
             let _ = self.store.fail_attempt(&stage.stage_run_id, factory_error);
             return Err(error);
         }
-        let result: Result<ProcessOutcome, SymphonyError> = async {
+        let result: Result<ProcessOutcome> = async {
             self.record_event(
             Some(&candidate.run_id),
             Some(&stage.stage_run_id),
