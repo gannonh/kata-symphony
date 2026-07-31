@@ -55,7 +55,11 @@ fn review_defaults_validate_and_explicit_routes_parse() {
     assert!(config.review.enabled);
     assert_eq!(config.review.max_attempts, 4);
     assert_eq!(
-        config.review.completion_route.as_ref().map(|route| route.state.as_str()),
+        config
+            .review
+            .completion_route
+            .as_ref()
+            .map(|route| route.state.as_str()),
         Some("Human Review")
     );
     validate(&config).expect("complete automatic review configuration should validate");
