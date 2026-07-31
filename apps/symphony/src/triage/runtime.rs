@@ -40,6 +40,7 @@ use crate::triage::store::{
     PendingAutomaticDispatchGuard, SqliteFactoryStore, StoreArtifactRequest,
     StoreBundleArtifactRequest, StoreImplementationArtifactRequest, StoreImplementationTurnRequest,
     StoreSpecArtifactRequest, StoreSpecTurnRequest, StoreValidationCycleRequest,
+    UpdateReviewAttemptRequest,
     StoredCommentIdentity, UpsertFactoryRunRequest, UpsertImplementationStateRequest,
 };
 
@@ -507,27 +508,8 @@ impl SharedFactoryStore {
         self.with_store_mut(|store| store.store_review_attempt_inputs(request))
     }
 
-    pub fn update_review_attempt(
-        &self,
-        attempt_id: &str,
-        status: &str,
-        reprompt_count: u32,
-        worker_turn: Option<&serde_json::Value>,
-        manifest: Option<&serde_json::Value>,
-        validation_result: Option<&serde_json::Value>,
-        error: Option<&FactoryError>,
-    ) -> Result<()> {
-        self.with_store_mut(|store| {
-            store.update_review_attempt(
-                attempt_id,
-                status,
-                reprompt_count,
-                worker_turn,
-                manifest,
-                validation_result,
-                error,
-            )
-        })
+    pub fn update_review_attempt(&self, request: UpdateReviewAttemptRequest<'_>) -> Result<()> {
+        self.with_store_mut(|store| store.update_review_attempt(request))
     }
 
     pub fn store_review_artifact(

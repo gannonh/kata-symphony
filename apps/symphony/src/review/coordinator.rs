@@ -25,7 +25,7 @@ use crate::triage::publisher::TriageCommentPort;
 use crate::triage::runtime::SharedFactoryStore;
 use crate::triage::store::{
     A4EligibleReviewRun, ClaimAttemptRequest, FactoryRunStore, StoreReviewArtifactRequest,
-    StoreReviewAttemptRequest,
+    StoreReviewAttemptRequest, UpdateReviewAttemptRequest,
 };
 use crate::triage::runner::TriageIssueIdentity;
 
@@ -129,7 +129,7 @@ where
                     && item
                         .repository
                         .as_deref()
-                        .map_or(true, |repository| {
+                        .is_none_or(|repository| {
                             repository.eq_ignore_ascii_case(&candidate.repository)
                         })
                     && item
@@ -327,18 +327,18 @@ where
                 Ok(result) => result,
                 Err(error) => {
                     last_error = Some(format!("worker invocation failed: {error}"));
-                    self.store.update_review_attempt(
-                        &attempt_id,
-                        "running",
-                        reprompt + 1,
-                        None,
-                        None,
-                        Some(&serde_json::json!({
+                    self.store.update_review_attempt(UpdateReviewAttemptRequest {
+                        attempt_id: &attempt_id,
+                        status: "running",
+                        reprompt_count: reprompt + 1,
+                        worker_turn: None,
+                        manifest: None,
+                        validation_result: Some(&serde_json::json!({
                             "accepted": false,
                             "error": last_error.as_deref().unwrap_or_default()
                         })),
-                        None,
-                    )?;
+                        error: None,
+                    })?;
                     continue;
                 }
             };
@@ -365,15 +365,17 @@ where
                     }
                     Err(error) => {
                         last_error = Some(error.to_string());
-                        self.store.update_review_attempt(
-                            &attempt_id,
-                            "running",
-                            reprompt,
-                            None,
-                            None,
-                            Some(&serde_json::json!({"accepted":false,"error":error.to_string()})),
-                            None,
-                        )?;
+                        self.store.update_review_attempt(UpdateReviewAttemptRequest {
+                            attempt_id: &attempt_id,
+                            status: "running",
+                            reprompt_count: reprompt,
+                            worker_turn: None,
+                            manifest: None,
+                            validation_result: Some(
+                                &serde_json::json!({"accepted":false,"error":error.to_string()}),
+                            ),
+                            error: None,
+                        })?;
                     }
                 },
                 Err(error) => {
@@ -390,15 +392,15 @@ where
                 false,
                 None,
             );
-            self.store.update_review_attempt(
-                &attempt_id,
-                "blocked",
-                service.review.max_reprompts,
-                None,
-                None,
-                Some(&serde_json::json!({"accepted":false,"error":message})),
-                Some(&factory_error),
-            )?;
+            self.store.update_review_attempt(UpdateReviewAttemptRequest {
+                attempt_id: &attempt_id,
+                status: "blocked",
+                reprompt_count: service.review.max_reprompts,
+                worker_turn: None,
+                manifest: None,
+                validation_result: Some(&serde_json::json!({"accepted":false,"error":message})),
+                error: Some(&factory_error),
+            })?;
             self.store.fail_attempt(&stage.stage_run_id, factory_error.clone())?;
             self.record_event(
                 Some(&candidate.run_id),
@@ -472,18 +474,21 @@ where
                 true,
                 None,
             );
-            if let Err(cleanup_error) = self.store.update_review_attempt(
-                &attempt_id,
-                "failed",
-                service.review.max_reprompts,
-                None,
-                None,
-                Some(&serde_json::json!({
-                    "accepted": false,
-                    "error": error.to_string()
-                })),
-                Some(&factory_error),
-            ) {
+            if let Err(cleanup_error) = self
+                .store
+                .update_review_attempt(UpdateReviewAttemptRequest {
+                    attempt_id: &attempt_id,
+                    status: "failed",
+                    reprompt_count: service.review.max_reprompts,
+                    worker_turn: None,
+                    manifest: None,
+                    validation_result: Some(&serde_json::json!({
+                        "accepted": false,
+                        "error": error.to_string()
+                    })),
+                    error: Some(&factory_error),
+                })
+            {
                 tracing::error!(
                     event = "review_attempt_cleanup_failed",
                     attempt_id = %attempt_id,

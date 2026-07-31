@@ -253,6 +253,17 @@ pub struct StoreReviewArtifactRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct UpdateReviewAttemptRequest<'a> {
+    pub attempt_id: &'a str,
+    pub status: &'a str,
+    pub reprompt_count: u32,
+    pub worker_turn: Option<&'a serde_json::Value>,
+    pub manifest: Option<&'a serde_json::Value>,
+    pub validation_result: Option<&'a serde_json::Value>,
+    pub error: Option<&'a FactoryError>,
+}
+
+#[derive(Debug, Clone)]
 pub struct CreatePublicationIntentRequest {
     pub run_id: String,
     pub artifact_id: Option<String>,
@@ -3719,13 +3730,7 @@ impl SqliteFactoryStore {
 
     pub fn update_review_attempt(
         &mut self,
-        attempt_id: &str,
-        status: &str,
-        reprompt_count: u32,
-        worker_turn: Option<&serde_json::Value>,
-        manifest: Option<&serde_json::Value>,
-        validation_result: Option<&serde_json::Value>,
-        error: Option<&FactoryError>,
+        request: UpdateReviewAttemptRequest<'_>,
     ) -> Result<()> {
         let changed = self
             .conn
@@ -3737,20 +3742,21 @@ impl SqliteFactoryStore {
                     last_error_json = ?6,
                     updated_at = ?7 WHERE attempt_id = ?8",
                 params![
-                    status,
-                    reprompt_count,
-                    worker_turn.map(bounded_json).transpose()?,
-                    manifest.map(bounded_json).transpose()?,
-                    validation_result.map(bounded_json).transpose()?,
-                    error.map(|value| bounded_json(value)).transpose()?,
+                    request.status,
+                    request.reprompt_count,
+                    request.worker_turn.map(bounded_json).transpose()?,
+                    request.manifest.map(bounded_json).transpose()?,
+                    request.validation_result.map(bounded_json).transpose()?,
+                    request.error.map(bounded_json).transpose()?,
                     ts(Self::now()),
-                    attempt_id,
+                    request.attempt_id,
                 ],
             )
             .map_err(storage_error)?;
         if changed == 0 {
             return Err(SymphonyError::StorageError(format!(
-                "review attempt {attempt_id} not found"
+                "review attempt {} not found",
+                request.attempt_id
             )));
         }
         Ok(())
