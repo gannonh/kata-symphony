@@ -17,6 +17,9 @@ spec:
   enabled: true
 implementation:
   enabled: true
+  validation:
+    - name: tests
+      command: cargo test
 review:
   enabled: true
 "#;
