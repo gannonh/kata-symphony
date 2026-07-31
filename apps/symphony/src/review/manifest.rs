@@ -375,7 +375,9 @@ mod tests {
         value["findings"][0]["end_line"] = serde_json::json!(22);
 
         let error = validate(&value).expect_err("anchor must fit one diff range");
-        assert!(error.to_string().contains("right side of the reviewed diff"));
+        assert!(error
+            .to_string()
+            .contains("right side of the reviewed diff"));
     }
 
     #[test]
