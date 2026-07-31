@@ -1299,7 +1299,7 @@ impl TriageRuntime {
             },
         )
         .with_routing(routing.clone())
-        .with_pulls(client);
+        .with_pulls(client.clone());
         if let Some(events) = emitter.clone() {
             implementation_coordinator = implementation_coordinator.with_events(events);
         }

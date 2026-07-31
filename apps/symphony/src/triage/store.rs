@@ -3850,12 +3850,16 @@ impl SqliteFactoryStore {
             )
             .map_err(storage_error)?;
         }
+        let validation_result = bounded_json(&serde_json::json!({
+            "accepted": true,
+            "finding_count": request.manifest.findings.len()
+        }))?;
         tx.execute(
             "UPDATE review_attempts SET status = 'completed', manifest_json = ?1,
                 validation_result_json = ?2, updated_at = ?3 WHERE attempt_id = ?4",
             params![
                 bounded_json(&request.manifest)?,
-                serde_json::json!({"accepted": true, "finding_count": request.manifest.findings.len()}),
+                validation_result,
                 now_s,
                 request.attempt_id,
             ],
