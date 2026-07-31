@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 64433)
-Total output lines: 6473
-
 use crate::error::{Result, SymphonyError};
 use crate::implementation::domain::{
     BundleArtifactRecord, DraftPrArtifactRecord, ExecutionProfile, ImplementationArtifactRecord,
@@ -2563,7 +2560,1402 @@ impl SqliteFactoryStore {
                 "stage run {} is not a running implementation attempt",
                 request.stage_run_id
             )));
-        …14433 tokens truncated…    .map_err(storage_error)
+        }
+        let output_json = request.output_json.as_ref().map(bounded_json).transpose()?;
+        self.conn
+            .execute(
+                "INSERT INTO implementation_turns (
+                    turn_id, stage_run_id, ordinal, kind, status, harness, model,
+                    execution_profile, input_tokens, output_tokens, total_tokens,
+                    output_json, error_json, started_at, completed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                params![
+                    request.turn_id,
+                    request.stage_run_id,
+                    request.ordinal,
+                    request.kind.as_str(),
+                    request.status.as_str(),
+                    request.harness,
+                    request.model,
+                    request.execution_profile.as_str(),
+                    request.usage.input_tokens,
+                    request.usage.output_tokens,
+                    request.usage.total_tokens,
+                    output_json,
+                    optional_json(&request.error)?,
+                    ts(request.started_at),
+                    request.completed_at.map(ts),
+                ],
+            )
+            .map_err(storage_error)?;
+        self.list_implementation_turns(&request.stage_run_id)?
+            .into_iter()
+            .find(|turn| turn.turn_id == request.turn_id)
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "implementation turn {} was not stored",
+                    request.turn_id
+                ))
+            })
+    }
+
+    pub fn list_implementation_turns(
+        &self,
+        stage_run_id: &str,
+    ) -> Result<Vec<ImplementationTurnRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT turn_id, stage_run_id, ordinal, kind, status, harness, model,
+                    execution_profile, input_tokens, output_tokens, total_tokens,
+                    output_json, error_json, started_at, completed_at
+                 FROM implementation_turns WHERE stage_run_id = ?1 ORDER BY ordinal ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![stage_run_id], implementation_turn_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn store_validation_cycle(
+        &mut self,
+        request: StoreValidationCycleRequest,
+    ) -> Result<ValidationCycleRecord> {
+        let stage = select_stage_run(&self.conn, &request.stage_run_id)?;
+        if stage.stage != IMPLEMENTATION_STAGE_NAME {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is not an implementation attempt",
+                request.stage_run_id
+            )));
+        }
+        self.conn
+            .execute(
+                "INSERT INTO implementation_validation_cycles (
+                    cycle_id, stage_run_id, cycle, passed, results_json, started_at, completed_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    request.cycle_id,
+                    request.stage_run_id,
+                    request.cycle,
+                    request.passed as i64,
+                    bounded_json(&request.commands)?,
+                    ts(request.started_at),
+                    ts(request.completed_at),
+                ],
+            )
+            .map_err(storage_error)?;
+        self.list_validation_cycles(&request.stage_run_id)?
+            .into_iter()
+            .find(|cycle| cycle.cycle_id == request.cycle_id)
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "validation cycle {} was not stored",
+                    request.cycle_id
+                ))
+            })
+    }
+
+    pub fn list_validation_cycles(&self, stage_run_id: &str) -> Result<Vec<ValidationCycleRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT cycle_id, stage_run_id, cycle, passed, results_json, started_at, completed_at
+                 FROM implementation_validation_cycles
+                 WHERE stage_run_id = ?1 ORDER BY cycle ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![stage_run_id], validation_cycle_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn store_implementation_artifact(
+        &mut self,
+        request: StoreImplementationArtifactRequest,
+    ) -> Result<ImplementationArtifactRecord> {
+        crate::implementation::artifact::validate_manifest(&request.manifest, None).map_err(
+            |error| {
+                SymphonyError::StorageError(format!(
+                    "refusing invalid implementation artifact: {error}"
+                ))
+            },
+        )?;
+        let now = Self::now();
+        let now_s = ts(now);
+        let tx = self.conn.transaction().map_err(storage_error)?;
+        let stage = select_stage_run(&tx, &request.stage_run_id)?;
+        if stage.stage != IMPLEMENTATION_STAGE_NAME || stage.status != StageStatus::Running {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is not a running implementation attempt",
+                request.stage_run_id
+            )));
+        }
+        let artifact_id = new_id();
+        tx.execute(
+            "INSERT INTO implementation_artifacts (
+                artifact_id, run_id, stage_run_id, approved_artifact_id, approved_version,
+                issue_revision, configuration_revision, schema_version, manifest_json,
+                base_commit, head_commit, approved_spec_path, validation_cycles,
+                execution_profile, received_at, bytes_len
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+            params![
+                artifact_id,
+                stage.run_id,
+                request.stage_run_id,
+                request.approved_artifact_id,
+                request.approved_version,
+                request.issue_revision,
+                request.configuration_revision,
+                request.manifest.schema_version,
+                bounded_json(&request.manifest)?,
+                request.base_commit,
+                request.head_commit,
+                request.approved_spec_path,
+                request.validation_cycles,
+                request.execution_profile.as_str(),
+                now_s,
+                request.bytes_len,
+            ],
+        )
+        .map_err(storage_error)?;
+        tx.execute(
+            "UPDATE stage_runs SET status = ?1, completed_at = ?2,
+                input_tokens = ?3, output_tokens = ?4, total_tokens = ?5, updated_at = ?6
+             WHERE stage_run_id = ?7",
+            params![
+                StageStatus::Completed.as_str(),
+                now_s,
+                request.usage.input_tokens,
+                request.usage.output_tokens,
+                request.usage.total_tokens,
+                now_s,
+                request.stage_run_id,
+            ],
+        )
+        .map_err(storage_error)?;
+        let decision = match request.manifest.status {
+            crate::implementation::domain::ManifestStatus::Completed => {
+                ImplementationDecision::Previewed
+            }
+            crate::implementation::domain::ManifestStatus::Blocked => {
+                ImplementationDecision::AwaitingHuman
+            }
+        };
+        let successful = if matches!(
+            request.manifest.status,
+            crate::implementation::domain::ManifestStatus::Completed
+        ) {
+            Some(artifact_id.as_str())
+        } else {
+            None
+        };
+        tx.execute(
+            "INSERT INTO implementation_run_state (
+                run_id, approved_artifact_id, approved_version, configuration_revision,
+                decision, successful_artifact_id, bundle_artifact_id, blocker_json, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8)
+             ON CONFLICT(run_id) DO UPDATE SET
+                approved_artifact_id = excluded.approved_artifact_id,
+                approved_version = excluded.approved_version,
+                configuration_revision = excluded.configuration_revision,
+                decision = excluded.decision,
+                successful_artifact_id = excluded.successful_artifact_id,
+                blocker_json = excluded.blocker_json,
+                updated_at = excluded.updated_at",
+            params![
+                stage.run_id,
+                request.approved_artifact_id,
+                request.approved_version,
+                request.configuration_revision,
+                decision.as_str(),
+                successful,
+                optional_json(&request.manifest.blocker)?,
+                now_s,
+            ],
+        )
+        .map_err(storage_error)?;
+        tx.execute(
+            "UPDATE factory_runs SET status = ?1, current_stage = ?2, updated_at = ?3 WHERE run_id = ?4",
+            params![
+                FactoryRunStatus::Waiting.as_str(),
+                IMPLEMENTATION_STAGE_NAME,
+                now_s,
+                stage.run_id
+            ],
+        )
+        .map_err(storage_error)?;
+        let record = select_implementation_artifact(&tx, &artifact_id)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(record)
+    }
+
+    pub fn get_implementation_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<ImplementationArtifactRecord>> {
+        self.conn
+            .query_row(
+                IMPLEMENTATION_ARTIFACT_SELECT,
+                params![artifact_id],
+                implementation_artifact_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_implementation_artifacts(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<ImplementationArtifactRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT artifact_id, run_id, stage_run_id, approved_artifact_id, approved_version,
+                    issue_revision, configuration_revision, manifest_json, base_commit,
+                    head_commit, approved_spec_path, validation_cycles, execution_profile,
+                    received_at, bytes_len
+                 FROM implementation_artifacts WHERE run_id = ?1 ORDER BY received_at DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], implementation_artifact_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn store_bundle_artifact(
+        &mut self,
+        request: StoreBundleArtifactRequest,
+    ) -> Result<BundleArtifactRecord> {
+        let stage = select_stage_run(&self.conn, &request.stage_run_id)?;
+        if stage.stage != IMPLEMENTATION_STAGE_NAME {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is not an implementation attempt",
+                request.stage_run_id
+            )));
+        }
+        // Content-addressed reuse: identical sha256 returns the existing row.
+        if let Some(existing_id) = self
+            .conn
+            .query_row(
+                "SELECT artifact_id FROM implementation_bundle_artifacts WHERE sha256 = ?1",
+                params![request.sha256],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(storage_error)?
+        {
+            self.conn
+                .execute(
+                    "UPDATE implementation_run_state SET bundle_artifact_id = ?1, updated_at = ?2
+                     WHERE run_id = ?3",
+                    params![existing_id, ts(Self::now()), stage.run_id],
+                )
+                .map_err(storage_error)?;
+            return self.get_bundle_artifact(&existing_id)?.ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "bundle artifact {existing_id} was not found after reuse"
+                ))
+            });
+        }
+        let artifact_id = new_id();
+        self.conn
+            .execute(
+                "INSERT INTO implementation_bundle_artifacts (
+                    artifact_id, run_id, stage_run_id, implementation_artifact_id,
+                    base_commit, head_commit, tree_sha, sha256, bytes_len, changed_file_count,
+                    changed_paths_json, approved_spec_path, approved_spec_blob_sha,
+                    harness, model, execution_profile, created_at, verified_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                params![
+                    artifact_id,
+                    stage.run_id,
+                    request.stage_run_id,
+                    request.implementation_artifact_id,
+                    request.base_commit,
+                    request.head_commit,
+                    request.tree_sha,
+                    request.sha256,
+                    request.bytes_len,
+                    request.changed_file_count,
+                    bounded_json(&request.changed_paths)?,
+                    request.approved_spec_path,
+                    request.approved_spec_blob_sha,
+                    request.harness,
+                    request.model,
+                    request.execution_profile.as_str(),
+                    ts(request.created_at),
+                    ts(request.verified_at),
+                ],
+            )
+            .map_err(storage_error)?;
+        self.conn
+            .execute(
+                "UPDATE implementation_run_state SET bundle_artifact_id = ?1, updated_at = ?2
+                 WHERE run_id = ?3",
+                params![artifact_id, ts(Self::now()), stage.run_id],
+            )
+            .map_err(storage_error)?;
+        self.get_bundle_artifact(&artifact_id)?.ok_or_else(|| {
+            SymphonyError::StorageError(format!("bundle artifact {artifact_id} was not stored"))
+        })
+    }
+
+    pub fn get_bundle_artifact(&self, artifact_id: &str) -> Result<Option<BundleArtifactRecord>> {
+        self.conn
+            .query_row(
+                IMPLEMENTATION_BUNDLE_SELECT,
+                params![artifact_id],
+                bundle_artifact_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn get_implementation_state(&self, run_id: &str) -> Result<Option<ImplementationRunState>> {
+        self.conn
+            .query_row(
+                "SELECT run_id, approved_artifact_id, approved_version, configuration_revision,
+                    decision, successful_artifact_id, bundle_artifact_id, blocker_json, updated_at
+                 FROM implementation_run_state WHERE run_id = ?1",
+                params![run_id],
+                implementation_state_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn upsert_implementation_state(
+        &mut self,
+        request: UpsertImplementationStateRequest,
+    ) -> Result<ImplementationRunState> {
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO implementation_run_state (
+                    run_id, approved_artifact_id, approved_version, configuration_revision,
+                    decision, successful_artifact_id, bundle_artifact_id, blocker_json, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(run_id) DO UPDATE SET
+                    approved_artifact_id = excluded.approved_artifact_id,
+                    approved_version = excluded.approved_version,
+                    configuration_revision = excluded.configuration_revision,
+                    decision = excluded.decision,
+                    successful_artifact_id = excluded.successful_artifact_id,
+                    bundle_artifact_id = excluded.bundle_artifact_id,
+                    blocker_json = excluded.blocker_json,
+                    updated_at = excluded.updated_at",
+                params![
+                    request.run_id,
+                    request.approved_artifact_id,
+                    request.approved_version,
+                    request.configuration_revision,
+                    request.decision.as_str(),
+                    request.successful_artifact_id,
+                    request.bundle_artifact_id,
+                    optional_json(&request.blocker)?,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        self.get_implementation_state(&request.run_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "implementation state for run {} missing after upsert",
+                    request.run_id
+                ))
+            })
+    }
+
+    pub fn set_implementation_decision(
+        &mut self,
+        run_id: &str,
+        decision: ImplementationDecision,
+        blocker: Option<ImplementationBlocker>,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE implementation_run_state SET decision = ?1, blocker_json = ?2, updated_at = ?3
+                 WHERE run_id = ?4",
+                params![
+                    decision.as_str(),
+                    optional_json(&blocker)?,
+                    ts(Self::now()),
+                    run_id
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "implementation state for run {run_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn create_implementation_publication_intent(
+        &mut self,
+        run_id: &str,
+        artifact_id: Option<&str>,
+        kind: ImplementationPublicationKind,
+        desired_effects: &serde_json::Value,
+    ) -> Result<ImplementationPublicationIntent> {
+        let intent_id = new_id();
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO implementation_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+                    desired_effects_json, observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'pending', '[]', ?5, '{}', '{}', ?6, ?7)",
+                params![
+                    intent_id,
+                    run_id,
+                    artifact_id,
+                    kind.as_str(),
+                    bounded_json(desired_effects)?,
+                    now_s,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        self.get_implementation_publication_intent(&intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(
+                    "created implementation publication intent is missing".to_string(),
+                )
+            })
+    }
+
+    pub fn get_implementation_publication_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<ImplementationPublicationIntent>> {
+        self.conn
+            .query_row(
+                IMPLEMENTATION_PUBLICATION_SELECT,
+                params![intent_id],
+                implementation_publication_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_pending_implementation_publications(
+        &self,
+    ) -> Result<Vec<ImplementationPublicationIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+                    retry_count, last_error_json, comment_id, publisher_login,
+                    desired_effects_json, observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 FROM implementation_publication_intents
+                 WHERE status = 'pending' ORDER BY created_at ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], implementation_publication_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn list_implementation_publications_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<ImplementationPublicationIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+                    retry_count, last_error_json, comment_id, publisher_login,
+                    desired_effects_json, observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 FROM implementation_publication_intents
+                 WHERE run_id = ?1 ORDER BY created_at DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], implementation_publication_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn complete_implementation_publication(
+        &mut self,
+        intent_id: &str,
+        step: &str,
+    ) -> Result<()> {
+        let intent = self
+            .get_implementation_publication_intent(intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "implementation publication intent {intent_id} not found"
+                ))
+            })?;
+        let mut steps = intent.completed_steps;
+        if !steps.iter().any(|existing| existing == step) {
+            steps.push(step.to_string());
+        }
+        self.conn
+            .execute(
+                "UPDATE implementation_publication_intents SET status = 'applied',
+                    completed_steps_json = ?1, last_error_json = NULL, updated_at = ?2
+                 WHERE intent_id = ?3",
+                params![bounded_json(&steps)?, ts(Self::now()), intent_id],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    /// Append a publication step and update status/expected projection without
+    /// forcing `applied` (A1-style progressive reconciliation for automatic mode).
+    pub fn record_implementation_publication_step(
+        &mut self,
+        intent_id: &str,
+        step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        let intent = self
+            .get_implementation_publication_intent(intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "implementation publication intent {intent_id} not found"
+                ))
+            })?;
+        let mut steps = intent.completed_steps;
+        let trimmed = step.trim();
+        if !trimmed.is_empty() && !steps.iter().any(|existing| existing == trimmed) {
+            steps.push(trimmed.to_string());
+        }
+        self.conn
+            .execute(
+                "UPDATE implementation_publication_intents
+                 SET completed_steps_json = ?1, status = ?2, last_error_json = NULL,
+                     expected_projection_json = ?3, updated_at = ?4
+                 WHERE intent_id = ?5",
+                params![
+                    bounded_json(&steps)?,
+                    status.as_str(),
+                    bounded_json(expected_projection)?,
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn set_implementation_publication_baseline(
+        &mut self,
+        intent_id: &str,
+        observed_baseline: &serde_json::Value,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE implementation_publication_intents
+                 SET observed_baseline_json = ?1, expected_projection_json = ?2, updated_at = ?3
+                 WHERE intent_id = ?4",
+                params![
+                    bounded_json(observed_baseline)?,
+                    bounded_json(expected_projection)?,
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "implementation publication intent {intent_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn set_implementation_publication_error(
+        &mut self,
+        intent_id: &str,
+        status: PublicationStatus,
+        error: FactoryError,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE implementation_publication_intents
+                 SET status = ?1, last_error_json = ?2,
+                     retry_count = retry_count + 1, updated_at = ?3
+                 WHERE intent_id = ?4",
+                params![
+                    status.as_str(),
+                    optional_json(&Some(error))?,
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "implementation publication intent {intent_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// List publication intents terminalized as `blocked`, oldest first.
+    ///
+    /// These have left the reconcile poll set permanently, so this is the only
+    /// way an operator can discover the intent ids that need recovery.
+    pub fn list_blocked_implementation_publications(
+        &self,
+    ) -> Result<Vec<ImplementationPublicationIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT intent_id, run_id, artifact_id, kind, status, completed_steps_json,
+                    retry_count, last_error_json, comment_id, publisher_login,
+                    desired_effects_json, observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 FROM implementation_publication_intents
+                 WHERE status = 'blocked' ORDER BY created_at ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], implementation_publication_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    /// Operator recovery: return a `blocked` publication intent to `pending` so
+    /// the reconcile loop picks it up again.
+    ///
+    /// Completed steps are preserved, so progressive publication resumes where
+    /// it stopped rather than redoing durable work.
+    ///
+    /// Deliberately scoped to `blocked`. `conflict` records observed drift or a
+    /// pull request owned by someone else, where blindly re-attempting could
+    /// publish twice; clearing one needs a human to establish what actually
+    /// changed on the forge first.
+    /// The reset and its audit event commit together. Recording the
+    /// intervention is part of the operation, not a follow-up: a partial commit
+    /// would leave the intent pending while the caller saw an error, and the
+    /// obvious retry would then report "not blocked" against a timeline that
+    /// never recorded who cleared it or what error was discarded.
+    pub fn reset_blocked_implementation_publication(
+        &mut self,
+        intent_id: &str,
+        operator: &str,
+    ) -> Result<ImplementationPublicationIntent> {
+        let Some(intent) = self.get_implementation_publication_intent(intent_id)? else {
+            return Err(SymphonyError::StorageError(format!(
+                "implementation publication intent {intent_id} not found"
+            )));
+        };
+        if intent.status != PublicationStatus::Blocked {
+            return Err(SymphonyError::TriageError(format!(
+                "implementation publication intent {intent_id} is {}, not blocked; \
+                 only a blocked intent can be reset",
+                intent.status.as_str()
+            )));
+        }
+
+        let payload = bounded_json(&serde_json::json!({
+            "intent_id": intent.intent_id,
+            "operator": operator,
+            "cleared_error": intent.last_error,
+            "completed_steps": intent.completed_steps,
+        }))?;
+        let now = Self::now();
+        let tx = self.conn.transaction().map_err(storage_error)?;
+        let changed = tx
+            .execute(
+                "UPDATE implementation_publication_intents
+                 SET status = ?1, last_error_json = NULL, retry_count = 0, updated_at = ?2
+                 WHERE intent_id = ?3 AND status = ?4",
+                params![
+                    PublicationStatus::Pending.as_str(),
+                    ts(now),
+                    intent_id,
+                    PublicationStatus::Blocked.as_str(),
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::TriageError(format!(
+                "implementation publication intent {intent_id} changed status concurrently; \
+                 re-run list-blocked and retry"
+            )));
+        }
+        tx.execute(
+            "INSERT INTO factory_events (
+                event_id, run_id, stage_run_id, event_type, timestamp, payload_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                new_id(),
+                Some(intent.run_id.as_str()),
+                None::<String>,
+                "implementation_publication_reset",
+                ts(now),
+                payload,
+            ],
+        )
+        .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+
+        // Deliberately not a reload. The transaction has committed, so a fallible
+        // read here would put an already-durable reset behind a failure the caller
+        // cannot distinguish from a failed one — and the retry would then be
+        // refused with "not blocked". Return what the transaction just wrote.
+        Ok(ImplementationPublicationIntent {
+            status: PublicationStatus::Pending,
+            retry_count: 0,
+            last_error: None,
+            updated_at: now,
+            ..intent
+        })
+    }
+
+    /// Record a publication condition that is waiting on an unmet precondition
+    /// rather than on a failed attempt, leaving `retry_count` untouched.
+    ///
+    /// Conditions like issue-revision drift clear only when a human re-approves
+    /// the issue, which can take arbitrarily long. Charging them to the retry
+    /// budget consumed by [`Self::set_implementation_publication_error`] would
+    /// let a normal review delay exhaust the budget and terminalize the intent
+    /// as `blocked`, which no code path recovers from.
+    pub fn set_implementation_publication_waiting(
+        &mut self,
+        intent_id: &str,
+        status: PublicationStatus,
+        error: FactoryError,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE implementation_publication_intents
+                 SET status = ?1, last_error_json = ?2, updated_at = ?3
+                 WHERE intent_id = ?4",
+                params![
+                    status.as_str(),
+                    optional_json(&Some(error))?,
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "implementation publication intent {intent_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn store_draft_pr_artifact(
+        &mut self,
+        request: StoreDraftPrArtifactRequest,
+    ) -> Result<DraftPrArtifactRecord> {
+        let artifact_id = new_id();
+        let now = Self::now();
+        let now_s = ts(now);
+        self.conn
+            .execute(
+                "INSERT INTO implementation_draft_pr_artifacts (
+                    artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                params![
+                    artifact_id,
+                    request.run_id,
+                    request.implementation_artifact_id,
+                    request.intent_id,
+                    request.number as i64,
+                    request.url,
+                    if request.draft { 1 } else { 0 },
+                    request.head,
+                    request.base,
+                    request.head_sha,
+                    request.marker,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        self.get_draft_pr_artifact(&artifact_id)?.ok_or_else(|| {
+            SymphonyError::StorageError("created draft PR artifact is missing".to_string())
+        })
+    }
+
+    pub fn get_draft_pr_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<DraftPrArtifactRecord>> {
+        self.conn
+            .query_row(
+                "SELECT artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 FROM implementation_draft_pr_artifacts WHERE artifact_id = ?1",
+                params![artifact_id],
+                draft_pr_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn get_draft_pr_for_implementation_artifact(
+        &self,
+        implementation_artifact_id: &str,
+    ) -> Result<Option<DraftPrArtifactRecord>> {
+        self.conn
+            .query_row(
+                "SELECT artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 FROM implementation_draft_pr_artifacts
+                 WHERE implementation_artifact_id = ?1",
+                params![implementation_artifact_id],
+                draft_pr_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn get_draft_pr_for_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<DraftPrArtifactRecord>> {
+        self.conn
+            .query_row(
+                "SELECT artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 FROM implementation_draft_pr_artifacts WHERE intent_id = ?1",
+                params![intent_id],
+                draft_pr_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn bind_implementation_publication_comment(
+        &mut self,
+        intent_id: &str,
+        comment_id: &str,
+        publisher_login: &str,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE implementation_publication_intents
+                 SET comment_id = ?1, publisher_login = ?2, updated_at = ?3
+                 WHERE intent_id = ?4",
+                params![comment_id, publisher_login, ts(Self::now()), intent_id],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn store_implementation_attempt_inputs(
+        &mut self,
+        stage_run_id: &str,
+        inputs: &ImplementationAttemptInputs,
+    ) -> Result<()> {
+        let stage = select_stage_run(&self.conn, stage_run_id)?;
+        if stage.stage != IMPLEMENTATION_STAGE_NAME {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {stage_run_id} is not an implementation attempt"
+            )));
+        }
+        self.conn
+            .execute(
+                "INSERT INTO implementation_attempt_inputs (
+                    stage_run_id, approved_artifact_id, approved_version,
+                    approval_issue_revision, base_branch, base_commit, execution_profile,
+                    configuration_revision, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    stage_run_id,
+                    inputs.approved_artifact_id,
+                    inputs.approved_version,
+                    inputs.approval_issue_revision,
+                    inputs.base_branch,
+                    inputs.base_commit,
+                    inputs.execution_profile.as_str(),
+                    inputs.configuration_revision,
+                    ts(Self::now()),
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn get_implementation_attempt_inputs(
+        &self,
+        stage_run_id: &str,
+    ) -> Result<Option<ImplementationAttemptInputs>> {
+        self.conn
+            .query_row(
+                "SELECT approved_artifact_id, approved_version, approval_issue_revision,
+                    base_branch, base_commit, execution_profile, configuration_revision
+                 FROM implementation_attempt_inputs WHERE stage_run_id = ?1",
+                params![stage_run_id],
+                |row| {
+                    let profile: String = row.get(5)?;
+                    Ok(ImplementationAttemptInputs {
+                        approved_artifact_id: row.get(0)?,
+                        approved_version: row.get(1)?,
+                        approval_issue_revision: row.get(2)?,
+                        base_branch: row.get(3)?,
+                        base_commit: row.get(4)?,
+                        execution_profile: parse_execution_profile(&profile).map_err(row_error)?,
+                        configuration_revision: row.get(6)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    /// Approved A2 runs that may be claimed by A3 for `configuration_revision`.
+    pub fn list_a3_eligible_approved_runs(
+        &self,
+        configuration_revision: &str,
+    ) -> Result<Vec<A3EligibleApprovedRun>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT r.run_id, r.forge_host, r.repository, r.issue_id, r.issue_identifier,
+                    r.issue_revision, s.approved_artifact_id, s.approved_version
+                 FROM factory_runs r
+                 JOIN spec_run_state s ON s.run_id = r.run_id
+                 WHERE s.decision = 'approved'
+                   AND s.approved_artifact_id IS NOT NULL
+                   AND s.approved_version IS NOT NULL
+                   AND EXISTS (
+                     SELECT 1 FROM spec_publication_intents p
+                     WHERE p.run_id = r.run_id AND p.kind = 'approval' AND p.status = 'applied'
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM implementation_artifacts a
+                     WHERE a.run_id = r.run_id
+                       AND a.approved_artifact_id = s.approved_artifact_id
+                       AND a.configuration_revision = ?1
+                       AND json_extract(a.manifest_json, '$.status') = 'completed'
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM stage_runs sr
+                     WHERE sr.run_id = r.run_id
+                       AND sr.stage = 'implementation'
+                       AND sr.status IN ('pending', 'running')
+                   )
+                   AND (
+                     NOT EXISTS (
+                       SELECT 1 FROM implementation_run_state irs WHERE irs.run_id = r.run_id
+                     )
+                     OR EXISTS (
+                       SELECT 1 FROM implementation_run_state irs
+                       WHERE irs.run_id = r.run_id AND irs.decision = 'failed'
+                     )
+                   )
+                 ORDER BY r.updated_at ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![configuration_revision], |row| {
+                Ok(A3EligibleApprovedRun {
+                    run_id: row.get(0)?,
+                    forge_host: row.get(1)?,
+                    repository: row.get(2)?,
+                    issue_id: row.get(3)?,
+                    issue_identifier: row.get(4)?,
+                    issue_revision: row.get(5)?,
+                    approved_artifact_id: row.get(6)?,
+                    approved_version: row.get(7)?,
+                })
+            })
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    /// Approved A3 draft PRs whose tracker item can be considered by A4.
+    ///
+    /// The tracker state itself is deliberately checked by the coordinator
+    /// against the live Projects v2 item. The store only returns durable A3
+    /// publication facts and applies the single-owner/head-cycle guards.
+    pub fn list_a4_eligible_review_runs(
+        &self,
+        max_attempts: u32,
+    ) -> Result<Vec<A4EligibleReviewRun>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT r.run_id, r.forge_host, r.repository, r.issue_id,
+                    r.issue_identifier, d.artifact_id, d.implementation_artifact_id,
+                    s.approved_artifact_id, d.number, d.url, d.draft, d.head,
+                    d.base, d.head_sha
+                 FROM factory_runs r
+                 JOIN implementation_draft_pr_artifacts d ON d.run_id = r.run_id
+                 JOIN implementation_publication_intents p ON p.intent_id = d.intent_id
+                    AND p.status = 'applied'
+                 JOIN implementation_artifacts ia
+                    ON ia.artifact_id = d.implementation_artifact_id
+                 JOIN spec_run_state s ON s.run_id = r.run_id
+                    AND s.approved_artifact_id IS NOT NULL
+                 WHERE s.decision = 'approved'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM review_findings_artifacts a
+                     WHERE a.run_id = r.run_id AND a.reviewed_head_sha = d.head_sha
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM stage_runs sr
+                     WHERE sr.run_id = r.run_id AND sr.stage = ?1
+                       AND sr.status IN ('pending', 'running')
+                   )
+                   AND (
+                     SELECT COUNT(*) FROM review_attempts ra
+                     WHERE ra.run_id = r.run_id
+                       AND ra.reviewed_head_sha = d.head_sha
+                       AND ra.status IN ('failed', 'blocked', 'interrupted')
+                   ) < ?2
+                 ORDER BY r.updated_at ASC, d.created_at ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![REVIEW_STAGE_NAME, max_attempts.max(1)], |row| {
+                let draft: i64 = row.get(10)?;
+                Ok(A4EligibleReviewRun {
+                    run_id: row.get(0)?,
+                    forge_host: row.get(1)?,
+                    repository: row.get(2)?,
+                    issue_id: row.get(3)?,
+                    issue_identifier: row.get(4)?,
+                    draft_pr_artifact_id: row.get(5)?,
+                    implementation_artifact_id: row.get(6)?,
+                    approved_artifact_id: row.get(7)?,
+                    pr_number: row.get::<_, i64>(8)? as u64,
+                    pr_url: row.get(9)?,
+                    draft: draft != 0,
+                    head: row.get(11)?,
+                    base: row.get(12)?,
+                    head_sha: row.get(13)?,
+                })
+            })
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn store_review_attempt_inputs(
+        &mut self,
+        request: StoreReviewAttemptRequest,
+    ) -> Result<ReviewAttemptRecord> {
+        let stage = select_stage_run(&self.conn, &request.stage_run_id)?;
+        if stage.stage != REVIEW_STAGE_NAME || stage.status != StageStatus::Running {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is not a running review attempt",
+                request.stage_run_id
+            )));
+        }
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO review_attempts (
+                    attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                    implementation_artifact_id, spec_artifact_id, pr_number,
+                    reviewed_head_sha, base_sha, status, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?10)",
+                params![
+                    request.attempt_id,
+                    stage.run_id,
+                    request.stage_run_id,
+                    request.draft_pr_artifact_id,
+                    request.implementation_artifact_id,
+                    request.spec_artifact_id,
+                    request.pr_number as i64,
+                    request.reviewed_head_sha,
+                    request.base_sha,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        self.get_review_attempt(&request.attempt_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError("created review attempt is missing".to_string())
+            })
+    }
+
+    pub fn get_review_attempt(&self, attempt_id: &str) -> Result<Option<ReviewAttemptRecord>> {
+        self.conn
+            .query_row(
+                "SELECT attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                    implementation_artifact_id, spec_artifact_id, pr_number,
+                    reviewed_head_sha, base_sha, status, reprompt_count,
+                    worker_turn_json, manifest_json, validation_result_json,
+                    last_error_json, created_at, updated_at
+                 FROM review_attempts WHERE attempt_id = ?1",
+                params![attempt_id],
+                review_attempt_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_review_attempts(&self, run_id: &str) -> Result<Vec<ReviewAttemptRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                    implementation_artifact_id, spec_artifact_id, pr_number,
+                    reviewed_head_sha, base_sha, status, reprompt_count,
+                    worker_turn_json, manifest_json, validation_result_json,
+                    last_error_json, created_at, updated_at
+                 FROM review_attempts WHERE run_id = ?1 ORDER BY created_at DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], review_attempt_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn update_review_attempt(&mut self, request: UpdateReviewAttemptRequest<'_>) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_attempts SET status = ?1, reprompt_count = ?2,
+                    worker_turn_json = COALESCE(?3, worker_turn_json),
+                    manifest_json = COALESCE(?4, manifest_json),
+                    validation_result_json = COALESCE(?5, validation_result_json),
+                    last_error_json = ?6,
+                    updated_at = ?7 WHERE attempt_id = ?8",
+                params![
+                    request.status,
+                    request.reprompt_count,
+                    request.worker_turn.map(bounded_json).transpose()?,
+                    request.manifest.map(bounded_json).transpose()?,
+                    request.validation_result.map(bounded_json).transpose()?,
+                    request.error.map(bounded_json).transpose()?,
+                    ts(Self::now()),
+                    request.attempt_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "review attempt {} not found",
+                request.attempt_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Persist a validated manifest and terminate its stage attempt in one
+    /// transaction. The immutable artifact row has no update/delete path.
+    pub fn store_review_artifact(
+        &mut self,
+        request: StoreReviewArtifactRequest,
+    ) -> Result<ReviewFindingsArtifactRecord> {
+        if request.manifest.reviewed_head_sha != request.reviewed_head_sha
+            || request.manifest.base_sha != request.base_sha
+        {
+            return Err(SymphonyError::StorageError(
+                "review manifest does not match the pinned attempt".to_string(),
+            ));
+        }
+        let now_s = ts(Self::now());
+        let manifest_json = bounded_json(&request.manifest)?;
+        let tx = self.conn.transaction().map_err(storage_error)?;
+        let stage = select_stage_run(&tx, &request.stage_run_id)?;
+        if stage.stage != REVIEW_STAGE_NAME || stage.status != StageStatus::Running {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is not a running review attempt",
+                request.stage_run_id
+            )));
+        }
+        let artifact_id = new_id();
+        tx.execute(
+            "INSERT INTO review_findings_artifacts (
+                artifact_id, run_id, stage_run_id, attempt_id,
+                draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                schema_version, reviewed_head_sha, base_sha, manifest_json,
+                no_findings, finding_count, received_at, bytes_len
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                artifact_id,
+                stage.run_id,
+                request.stage_run_id,
+                request.attempt_id,
+                request.draft_pr_artifact_id,
+                request.implementation_artifact_id,
+                request.spec_artifact_id,
+                request.manifest.schema_version,
+                request.reviewed_head_sha,
+                request.base_sha,
+                manifest_json,
+                if request.manifest.no_findings { 1 } else { 0 },
+                request.manifest.findings.len() as i64,
+                now_s,
+                request.bytes_len,
+            ],
+        )
+        .map_err(storage_error)?;
+        for finding in &request.manifest.findings {
+            let severity = match finding.severity {
+                crate::review::manifest::ReviewSeverity::Blocking => "blocking",
+                crate::review::manifest::ReviewSeverity::Major => "major",
+                crate::review::manifest::ReviewSeverity::Minor => "minor",
+                crate::review::manifest::ReviewSeverity::Nit => "nit",
+            };
+            let category = match finding.category {
+                crate::review::manifest::ReviewFindingCategory::Correctness => "correctness",
+                crate::review::manifest::ReviewFindingCategory::Security => "security",
+                crate::review::manifest::ReviewFindingCategory::SpecConformance => {
+                    "spec-conformance"
+                }
+                crate::review::manifest::ReviewFindingCategory::TestCoverage => "test-coverage",
+                crate::review::manifest::ReviewFindingCategory::Maintainability => {
+                    "maintainability"
+                }
+            };
+            let identity_key = format!(
+                "{}:{}:{}:{}",
+                finding.path,
+                finding.line,
+                finding.end_line.unwrap_or(finding.line),
+                finding.claim.trim()
+            );
+            tx.execute(
+                "INSERT INTO review_finding_records (
+                    finding_record_id, run_id, artifact_id, finding_id, identity_key,
+                    reviewed_head_sha, severity, category, path, line, end_line,
+                    claim, rationale, remediation, acceptance_criterion, confidence,
+                    lifecycle_state, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                    ?13, ?14, ?15, ?16, 'new', ?17, ?17)",
+                params![
+                    new_id(),
+                    stage.run_id,
+                    artifact_id,
+                    finding.finding_id,
+                    identity_key,
+                    request.reviewed_head_sha,
+                    severity,
+                    category,
+                    finding.path,
+                    finding.line,
+                    finding.end_line,
+                    finding.claim,
+                    finding.rationale,
+                    finding.remediation,
+                    finding.acceptance_criterion,
+                    finding.confidence,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        }
+        let validation_result = bounded_json(&serde_json::json!({
+            "accepted": true,
+            "finding_count": request.manifest.findings.len()
+        }))?;
+        tx.execute(
+            "UPDATE review_attempts SET status = 'completed', manifest_json = ?1,
+                validation_result_json = ?2, updated_at = ?3 WHERE attempt_id = ?4",
+            params![
+                bounded_json(&request.manifest)?,
+                validation_result,
+                now_s,
+                request.attempt_id,
+            ],
+        )
+        .map_err(storage_error)?;
+        let changed = tx
+            .execute(
+                "UPDATE stage_runs SET status = 'completed', completed_at = ?1,
+                    input_tokens = ?2, output_tokens = ?3, total_tokens = ?4,
+                    updated_at = ?1 WHERE stage_run_id = ?5 AND status = 'running'",
+                params![
+                    now_s,
+                    request.usage.input_tokens,
+                    request.usage.output_tokens,
+                    request.usage.total_tokens,
+                    request.stage_run_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "review stage run {} is no longer running",
+                request.stage_run_id
+            )));
+        }
+        tx.execute(
+            "UPDATE factory_runs SET status = 'waiting', current_stage = ?1,
+                updated_at = ?2 WHERE run_id = ?3",
+            params![REVIEW_STAGE_NAME, now_s, stage.run_id],
+        )
+        .map_err(storage_error)?;
+        let record = tx
+            .query_row(
+                "SELECT artifact_id, run_id, stage_run_id, attempt_id,
+                    draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                    schema_version, reviewed_head_sha, base_sha, manifest_json,
+                    no_findings, finding_count, received_at, bytes_len
+                 FROM review_findings_artifacts WHERE artifact_id = ?1",
+                params![artifact_id],
+                review_artifact_from_row,
+            )
+            .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(record)
+    }
+
+    pub fn get_review_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<ReviewFindingsArtifactRecord>> {
+        self.conn
+            .query_row(
+                "SELECT artifact_id, run_id, stage_run_id, attempt_id,
+                    draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                    schema_version, reviewed_head_sha, base_sha, manifest_json,
+                    no_findings, finding_count, received_at, bytes_len
+                 FROM review_findings_artifacts WHERE artifact_id = ?1",
+                params![artifact_id],
+                review_artifact_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_review_artifacts(&self, run_id: &str) -> Result<Vec<ReviewFindingsArtifactRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT artifact_id, run_id, stage_run_id, attempt_id,
+                    draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                    schema_version, reviewed_head_sha, base_sha, manifest_json,
+                    no_findings, finding_count, received_at, bytes_len
+                 FROM review_findings_artifacts WHERE run_id = ?1
+                 ORDER BY received_at DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], review_artifact_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
     }
 
     pub fn create_review_publication_intent(
