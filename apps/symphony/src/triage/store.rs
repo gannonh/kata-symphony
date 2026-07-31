@@ -5985,7 +5985,7 @@ mod tests {
                     run_id,
                     implementation_stage.stage_run_id,
                     spec_artifact_id,
-                    serde_json::json!({"schema_version":1,"status":"completed","summary":"ok","acceptance_criteria":[],"known_limitations":[]}),
+                    serde_json::json!({"schema_version":1,"status":"completed","summary":"ok","acceptance_criteria":[],"known_limitations":[]}).to_string(),
                     now,
                 ],
             )
@@ -6045,7 +6045,7 @@ mod tests {
                     draft_id,
                     implementation_artifact_id,
                     spec_artifact_id,
-                    serde_json::json!({"schema_version":1,"reviewed_head_sha":"head-sha","base_sha":"base-sha","spec_conformance_summary":"none","no_findings":true,"findings":[]}),
+                    serde_json::json!({"schema_version":1,"reviewed_head_sha":"head-sha","base_sha":"base-sha","spec_conformance_summary":"none","no_findings":true,"findings":[]}).to_string(),
                     now,
                 ],
             )
