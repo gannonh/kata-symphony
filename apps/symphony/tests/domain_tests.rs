@@ -124,6 +124,7 @@ fn test_service_config_defaults_match_spec() {
         triage: symphony::triage::domain::TriageConfig::default(),
         spec: symphony::spec::domain::SpecConfig::default(),
         implementation: symphony::implementation::domain::ImplementationConfig::default(),
+        review: symphony::review::domain::ReviewConfig::default(),
     };
 
     // Polling §5.3.2

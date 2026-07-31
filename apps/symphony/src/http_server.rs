@@ -73,6 +73,9 @@ pub trait FactoryRunQuery: Send + Sync {
     fn implementation_metrics(&self) -> Result<ImplementationRunMetricsHttpResponse, String> {
         Err("implementation metrics are not available".to_string())
     }
+    fn review_metrics(&self) -> Result<FactoryRunMetricsHttpResponse, String> {
+        Err("review metrics are not available".to_string())
+    }
     fn get_artifact(
         &self,
         _run_id: &str,
@@ -484,6 +487,8 @@ pub struct FactoryRunHttpResponse {
     pub spec: Option<FactoryRunSpecHttp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub implementation: Option<FactoryRunImplementationHttp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<FactoryRunReviewHttp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -726,6 +731,7 @@ pub fn factory_run_http_response(
         }),
         spec: None,
         implementation: None,
+        review: None,
     }
 }
 
@@ -868,6 +874,30 @@ pub struct FactoryRunImplementationPullRequestHttp {
     pub head_sha: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactoryRunReviewHttp {
+    pub status: String,
+    pub artifact_id: String,
+    pub reviewed_head_sha: String,
+    pub base_sha: String,
+    pub finding_count: u32,
+    pub no_findings: bool,
+    pub received_at: chrono::DateTime<Utc>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<FactoryRunReviewPublicationHttp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactoryRunReviewPublicationHttp {
+    pub intent_id: String,
+    pub kind: String,
+    pub status: String,
+    pub completed_steps: Vec<String>,
+    pub retry_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::triage::domain::FactoryError>,
+}
+
 pub fn attach_implementation_http_response(
     response: &mut FactoryRunHttpResponse,
     state: Option<&crate::implementation::domain::ImplementationRunState>,
@@ -920,6 +950,35 @@ pub fn attach_implementation_http_response(
             head_sha: record.head_sha.clone(),
         }),
         blocker: state.blocker.clone(),
+    });
+}
+
+pub fn attach_review_http_response(
+    response: &mut FactoryRunHttpResponse,
+    artifact: Option<&crate::review::domain::ReviewFindingsArtifactRecord>,
+    publication: Option<&crate::review::domain::ReviewPublicationIntent>,
+) {
+    let Some(artifact) = artifact else {
+        return;
+    };
+    response.review = Some(FactoryRunReviewHttp {
+        status: publication
+            .map(|intent| intent.status.as_str().to_string())
+            .unwrap_or_else(|| "completed".to_string()),
+        artifact_id: artifact.artifact_id.clone(),
+        reviewed_head_sha: artifact.reviewed_head_sha.clone(),
+        base_sha: artifact.base_sha.clone(),
+        finding_count: artifact.finding_count,
+        no_findings: artifact.no_findings,
+        received_at: artifact.received_at,
+        publication: publication.map(|intent| FactoryRunReviewPublicationHttp {
+            intent_id: intent.intent_id.clone(),
+            kind: intent.kind.clone(),
+            status: intent.status.as_str().to_string(),
+            completed_steps: intent.completed_steps.clone(),
+            retry_count: intent.retry_count,
+            error: intent.last_error.clone(),
+        }),
     });
 }
 
@@ -2740,13 +2799,17 @@ async fn get_factory_run_metrics(
                 Err(message) => factory_query_failed(&message).into_response(),
             }
         }
+        crate::review::domain::REVIEW_STAGE_NAME => match query.review_metrics() {
+            Ok(metrics) => Json(metrics).into_response(),
+            Err(message) => factory_query_failed(&message).into_response(),
+        },
         _ => (
             StatusCode::BAD_REQUEST,
             Json(ApiErrorEnvelope {
                 error: ApiError {
                     code: "invalid_query",
                     message:
-                        "Query parameter 'stage' must be 'triage', 'spec', or 'implementation'"
+                        "Query parameter 'stage' must be 'triage', 'spec', 'implementation', or 'review'"
                             .to_string(),
                     status: StatusCode::BAD_REQUEST.as_u16(),
                     details: Some(serde_json::json!({

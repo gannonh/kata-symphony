@@ -161,6 +161,55 @@ pub struct AttemptLayout {
     pub home_dir: PathBuf,
 }
 
+/// Raw output from a credential-isolated, integrity-checked worker turn. A4
+/// uses this instead of the A1 triage artifact parser because its output has a
+/// separate strict manifest schema.
+#[derive(Debug, Clone)]
+pub(crate) struct IsolatedRawTurnResult {
+    pub output_bytes: Vec<u8>,
+    pub usage: StageUsage,
+}
+
+pub(crate) async fn run_isolated_raw_turn(
+    request: &TriageRunnerRequest,
+    stage_inputs: &serde_json::Value,
+) -> Result<IsolatedRawTurnResult> {
+    if let Err(message) = validate_request(request) {
+        return Err(SymphonyError::TriageError(message));
+    }
+    let layout = prepare_attempt(request).map_err(|outcome| {
+        SymphonyError::TriageError(runner_outcome_message(&outcome))
+    })?;
+    let result = async {
+        let baseline = integrity::capture_baseline(&layout.workspace_path)
+            .map_err(|error| SymphonyError::TriageError(format!("worker baseline failed: {error}")))?;
+        write_json_file(layout.stage_input_path.join("review-context.json"), stage_inputs)?;
+        let usage = match request.harness {
+            TriageHarness::Pi => run_pi_turn(request, &layout).await,
+            TriageHarness::Codex => run_codex_turn(request, &layout).await,
+        }
+        .map_err(|outcome| SymphonyError::TriageError(runner_outcome_message(&outcome)))?;
+        let output_bytes = fs::read(&layout.output_path).map_err(|error| {
+            SymphonyError::TriageError(format!(
+                "worker did not write output at {}: {error}",
+                layout.output_path.display()
+            ))
+        })?;
+        integrity::check_repository_integrity(&layout.workspace_path, &baseline).map_err(|error| {
+            SymphonyError::TriageError(format!(
+                "read-only review worker modified the repository: {error}"
+            ))
+        })?;
+        scrub_isolated_home(&layout.home_dir).map_err(|error| {
+            SymphonyError::TriageError(format!("failed to scrub isolated worker home: {error}"))
+        })?;
+        Ok(IsolatedRawTurnResult { output_bytes, usage })
+    }
+    .await;
+    let _ = fs::remove_dir_all(&layout.attempt_root);
+    result
+}
+
 pub struct TriageRunner;
 
 impl TriageRunner {
@@ -370,7 +419,7 @@ fn runner_outcome_message(outcome: &TriageRunnerOutcome) -> String {
     }
 }
 
-fn validate_request(request: &TriageRunnerRequest) -> std::result::Result<(), String> {
+pub(crate) fn validate_request(request: &TriageRunnerRequest) -> std::result::Result<(), String> {
     if request.command.is_empty() {
         return Err("triage command cannot be empty".to_string());
     }
@@ -389,7 +438,7 @@ fn validate_request(request: &TriageRunnerRequest) -> std::result::Result<(), St
     Ok(())
 }
 
-fn prepare_attempt(
+pub(crate) fn prepare_attempt(
     request: &TriageRunnerRequest,
 ) -> std::result::Result<AttemptLayout, TriageRunnerOutcome> {
     let attempt_root = request.workspace_root.join(format!(
@@ -509,7 +558,7 @@ fn report_spawn(
     });
 }
 
-fn scrub_isolated_home(home_dir: &Path) -> std::io::Result<()> {
+pub(crate) fn scrub_isolated_home(home_dir: &Path) -> std::io::Result<()> {
     if home_dir.exists() {
         fs::remove_dir_all(home_dir)?;
     }

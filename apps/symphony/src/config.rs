@@ -27,6 +27,7 @@ use crate::implementation::domain::{
 };
 use crate::notifications;
 use crate::repo_url::repo_is_remote;
+use crate::review::domain::{ReviewConfig, ReviewMode, ReviewRoute};
 use crate::spec::domain::{SpecApprovalRoute, SpecConfig, SpecDecisionLabels, SpecPromptsConfig};
 use crate::triage::domain::{
     RouteMapping, StorageConfig, TriageConfig, TriageMode, TriageRoutesConfig,
@@ -468,6 +469,23 @@ struct RawImplementationConfig {
     completion_route: Option<RawImplementationCompletionRoute>,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawReviewConfig {
+    enabled: Option<bool>,
+    mode: Option<String>,
+    prompt: Option<String>,
+    model: Option<String>,
+    max_turns: Option<u32>,
+    invocation_timeout_ms: Option<u64>,
+    max_attempts: Option<u32>,
+    max_reprompts: Option<u32>,
+    max_findings: Option<usize>,
+    trigger_state: Option<String>,
+    completion_route: Option<RawRouteMapping>,
+    changes_requested_route: Option<RawRouteMapping>,
+}
+
 // ── Section extraction helper ─────────────────────────────────────────────────
 
 fn extract_section<T>(normalized: &Value, section: &str) -> Result<T>
@@ -727,6 +745,7 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
     let raw_spec: RawSpecConfig = extract_section(&normalized, "spec")?;
     let raw_implementation: RawImplementationConfig =
         extract_section(&normalized, "implementation")?;
+    let raw_review: RawReviewConfig = extract_section(&normalized, "review")?;
 
     let defaults = ServiceConfig::default();
     let has_kata_agent_section = normalized.get("kata_agent").is_some();
@@ -1547,6 +1566,63 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
         completion_route,
     };
 
+    // ── ReviewConfig ──────────────────────────────────────────────────────
+    let review_defaults = ReviewConfig::default();
+    let review_mode = match raw_review
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => review_defaults.mode,
+        Some("preview") => ReviewMode::Preview,
+        Some("automatic") => ReviewMode::Automatic,
+        Some(other) => {
+            return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                "review.mode must be 'preview' or 'automatic', got '{other}'"
+            )));
+        }
+    };
+    let review_route = |route: Option<RawRouteMapping>| {
+        route.map(|route| ReviewRoute {
+            state: route
+                .state
+                .map(|value| resolve_env(&value))
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_default(),
+        })
+    };
+    let review = ReviewConfig {
+        enabled: raw_review.enabled.unwrap_or(review_defaults.enabled),
+        mode: review_mode,
+        prompt: config_string(raw_review.prompt, &review_defaults.prompt),
+        model: config_model(raw_review.model),
+        max_turns: raw_review
+            .max_turns
+            .unwrap_or(review_defaults.max_turns),
+        invocation_timeout_ms: raw_review
+            .invocation_timeout_ms
+            .unwrap_or(review_defaults.invocation_timeout_ms),
+        max_attempts: raw_review
+            .max_attempts
+            .unwrap_or(review_defaults.max_attempts),
+        max_reprompts: raw_review
+            .max_reprompts
+            .unwrap_or(review_defaults.max_reprompts),
+        max_findings: raw_review
+            .max_findings
+            .unwrap_or(review_defaults.max_findings),
+        trigger_state: raw_review
+            .trigger_state
+            .map(|value| resolve_env(&value))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or(review_defaults.trigger_state),
+        completion_route: review_route(raw_review.completion_route),
+        changes_requested_route: review_route(raw_review.changes_requested_route),
+    };
+
     Ok(ServiceConfig {
         tracker,
         polling,
@@ -1566,6 +1642,7 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
         triage,
         spec,
         implementation,
+        review,
     })
 }
 
@@ -2099,6 +2176,46 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
                         .to_string(),
                 ));
             }
+        }
+    }
+
+    if config.review.enabled {
+        if tracker_kind != "github" {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "review.enabled requires tracker.kind to be 'github' (GitHub is the A4 forge)"
+                    .to_string(),
+            ));
+        }
+        if !config.spec.enabled || !config.implementation.enabled {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "review.enabled requires spec.enabled and implementation.enabled so an approved specification and A3 draft PR exist"
+                    .to_string(),
+            ));
+        }
+        if config.review.prompt.trim().is_empty() {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "review.prompt must be non-empty when review is enabled".to_string(),
+            ));
+        }
+        for (field, value) in [
+            ("review.max_turns", config.review.max_turns as u64),
+            (
+                "review.invocation_timeout_ms",
+                config.review.invocation_timeout_ms,
+            ),
+            ("review.max_attempts", config.review.max_attempts as u64),
+            ("review.max_findings", config.review.max_findings as u64),
+        ] {
+            if value == 0 {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "{field} must be greater than 0"
+                )));
+            }
+        }
+        if config.review.trigger_state.trim().is_empty() {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "review.trigger_state must be non-empty when review is enabled".to_string(),
+            ));
         }
     }
 

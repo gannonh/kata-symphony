@@ -13,6 +13,11 @@ use crate::spec::domain::{
     SpecPublicationKind, SpecRunState, SpecTurnKind, SpecTurnRecord, SpecTurnStatus,
     SPEC_STAGE_NAME,
 };
+use crate::review::domain::{
+    ReviewAttemptRecord, ReviewFindingsArtifactRecord, ReviewMetricsAggregate,
+    ReviewPublicationIntent, REVIEW_STAGE_NAME,
+};
+use crate::review::manifest::ReviewFindingsManifest;
 use crate::triage::domain::{
     truncate_utf8_bytes, ArtifactRecord, FactoryError, FactoryEventRecord, FactoryRunRecord,
     FactoryRunStatus, PublicationIntentRecord, PublicationMode, PublicationStatus, StageRunRecord,
@@ -200,6 +205,51 @@ pub struct A3EligibleApprovedRun {
     pub issue_revision: Option<String>,
     pub approved_artifact_id: String,
     pub approved_version: u32,
+}
+
+/// Factory run with a terminal A3 draft-PR publication that may be claimed by A4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct A4EligibleReviewRun {
+    pub run_id: String,
+    pub forge_host: String,
+    pub repository: String,
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub draft_pr_artifact_id: String,
+    pub implementation_artifact_id: String,
+    pub approved_artifact_id: String,
+    pub pr_number: u64,
+    pub pr_url: String,
+    pub draft: bool,
+    pub head: String,
+    pub base: String,
+    pub head_sha: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreReviewAttemptRequest {
+    pub attempt_id: String,
+    pub stage_run_id: String,
+    pub draft_pr_artifact_id: String,
+    pub implementation_artifact_id: String,
+    pub spec_artifact_id: String,
+    pub pr_number: u64,
+    pub reviewed_head_sha: String,
+    pub base_sha: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreReviewArtifactRequest {
+    pub stage_run_id: String,
+    pub attempt_id: String,
+    pub draft_pr_artifact_id: String,
+    pub implementation_artifact_id: String,
+    pub spec_artifact_id: String,
+    pub reviewed_head_sha: String,
+    pub base_sha: String,
+    pub manifest: ReviewFindingsManifest,
+    pub bytes_len: u64,
+    pub usage: StageUsage,
 }
 
 #[derive(Debug, Clone)]
@@ -3526,6 +3576,560 @@ impl SqliteFactoryStore {
             .map_err(storage_error)
     }
 
+    /// Approved A3 draft PRs whose tracker item can be considered by A4.
+    ///
+    /// The tracker state itself is deliberately checked by the coordinator
+    /// against the live Projects v2 item. The store only returns durable A3
+    /// publication facts and applies the single-owner/head-cycle guards.
+    pub fn list_a4_eligible_review_runs(&self) -> Result<Vec<A4EligibleReviewRun>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT r.run_id, r.forge_host, r.repository, r.issue_id,
+                    r.issue_identifier, d.artifact_id, d.implementation_artifact_id,
+                    s.approved_artifact_id, d.number, d.url, d.draft, d.head,
+                    d.base, d.head_sha
+                 FROM factory_runs r
+                 JOIN implementation_draft_pr_artifacts d ON d.run_id = r.run_id
+                 JOIN implementation_publication_intents p ON p.intent_id = d.intent_id
+                    AND p.status = 'applied'
+                 JOIN implementation_artifacts ia
+                    ON ia.artifact_id = d.implementation_artifact_id
+                 JOIN spec_run_state s ON s.run_id = r.run_id
+                    AND s.approved_artifact_id IS NOT NULL
+                 WHERE s.decision = 'approved'
+                   AND NOT EXISTS (
+                     SELECT 1 FROM review_findings_artifacts a
+                     WHERE a.run_id = r.run_id AND a.reviewed_head_sha = d.head_sha
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM stage_runs sr
+                     WHERE sr.run_id = r.run_id AND sr.stage = ?1
+                       AND sr.status IN ('pending', 'running')
+                   )
+                 ORDER BY r.updated_at ASC, d.created_at ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![REVIEW_STAGE_NAME], |row| {
+                let draft: i64 = row.get(10)?;
+                Ok(A4EligibleReviewRun {
+                    run_id: row.get(0)?,
+                    forge_host: row.get(1)?,
+                    repository: row.get(2)?,
+                    issue_id: row.get(3)?,
+                    issue_identifier: row.get(4)?,
+                    draft_pr_artifact_id: row.get(5)?,
+                    implementation_artifact_id: row.get(6)?,
+                    approved_artifact_id: row.get(7)?,
+                    pr_number: row.get::<_, i64>(8)? as u64,
+                    pr_url: row.get(9)?,
+                    draft: draft != 0,
+                    head: row.get(11)?,
+                    base: row.get(12)?,
+                    head_sha: row.get(13)?,
+                })
+            })
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn store_review_attempt_inputs(
+        &mut self,
+        request: StoreReviewAttemptRequest,
+    ) -> Result<ReviewAttemptRecord> {
+        let stage = select_stage_run(&self.conn, &request.stage_run_id)?;
+        if stage.stage != REVIEW_STAGE_NAME || stage.status != StageStatus::Running {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is not a running review attempt",
+                request.stage_run_id
+            )));
+        }
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO review_attempts (
+                    attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                    implementation_artifact_id, spec_artifact_id, pr_number,
+                    reviewed_head_sha, base_sha, status, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'running', ?10, ?10)",
+                params![
+                    request.attempt_id,
+                    stage.run_id,
+                    request.stage_run_id,
+                    request.draft_pr_artifact_id,
+                    request.implementation_artifact_id,
+                    request.spec_artifact_id,
+                    request.pr_number as i64,
+                    request.reviewed_head_sha,
+                    request.base_sha,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        self.get_review_attempt(&request.attempt_id)?.ok_or_else(|| {
+            SymphonyError::StorageError("created review attempt is missing".to_string())
+        })
+    }
+
+    pub fn get_review_attempt(&self, attempt_id: &str) -> Result<Option<ReviewAttemptRecord>> {
+        self.conn
+            .query_row(
+                "SELECT attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                    implementation_artifact_id, spec_artifact_id, pr_number,
+                    reviewed_head_sha, base_sha, status, reprompt_count,
+                    worker_turn_json, manifest_json, validation_result_json,
+                    last_error_json, created_at, updated_at
+                 FROM review_attempts WHERE attempt_id = ?1",
+                params![attempt_id],
+                review_attempt_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_review_attempts(&self, run_id: &str) -> Result<Vec<ReviewAttemptRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                    implementation_artifact_id, spec_artifact_id, pr_number,
+                    reviewed_head_sha, base_sha, status, reprompt_count,
+                    worker_turn_json, manifest_json, validation_result_json,
+                    last_error_json, created_at, updated_at
+                 FROM review_attempts WHERE run_id = ?1 ORDER BY created_at DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], review_attempt_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn update_review_attempt(
+        &mut self,
+        attempt_id: &str,
+        status: &str,
+        reprompt_count: u32,
+        worker_turn: Option<&serde_json::Value>,
+        manifest: Option<&serde_json::Value>,
+        validation_result: Option<&serde_json::Value>,
+        error: Option<&FactoryError>,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_attempts SET status = ?1, reprompt_count = ?2,
+                    worker_turn_json = ?3, manifest_json = ?4,
+                    validation_result_json = ?5, last_error_json = ?6,
+                    updated_at = ?7 WHERE attempt_id = ?8",
+                params![
+                    status,
+                    reprompt_count,
+                    worker_turn.map(bounded_json).transpose()?,
+                    manifest.map(bounded_json).transpose()?,
+                    validation_result.map(bounded_json).transpose()?,
+                    error.map(|value| bounded_json(value)).transpose()?,
+                    ts(Self::now()),
+                    attempt_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "review attempt {attempt_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Persist a validated manifest and terminate its stage attempt in one
+    /// transaction. The immutable artifact row has no update/delete path.
+    pub fn store_review_artifact(
+        &mut self,
+        request: StoreReviewArtifactRequest,
+    ) -> Result<ReviewFindingsArtifactRecord> {
+        let stage = select_stage_run(&self.conn, &request.stage_run_id)?;
+        if stage.stage != REVIEW_STAGE_NAME || stage.status != StageStatus::Running {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is not a running review attempt",
+                request.stage_run_id
+            )));
+        }
+        if request.manifest.reviewed_head_sha != request.reviewed_head_sha
+            || request.manifest.base_sha != request.base_sha
+        {
+            return Err(SymphonyError::StorageError(
+                "review manifest does not match the pinned attempt".to_string(),
+            ));
+        }
+        let now_s = ts(Self::now());
+        let manifest_json = bounded_json(&request.manifest)?;
+        let tx = self.conn.transaction().map_err(storage_error)?;
+        let artifact_id = new_id();
+        tx.execute(
+            "INSERT INTO review_findings_artifacts (
+                artifact_id, run_id, stage_run_id, attempt_id,
+                draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                schema_version, reviewed_head_sha, base_sha, manifest_json,
+                no_findings, finding_count, received_at, bytes_len
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                artifact_id,
+                stage.run_id,
+                request.stage_run_id,
+                request.attempt_id,
+                request.draft_pr_artifact_id,
+                request.implementation_artifact_id,
+                request.spec_artifact_id,
+                request.manifest.schema_version,
+                request.reviewed_head_sha,
+                request.base_sha,
+                manifest_json,
+                if request.manifest.no_findings { 1 } else { 0 },
+                request.manifest.findings.len() as i64,
+                now_s,
+                request.bytes_len,
+            ],
+        )
+        .map_err(storage_error)?;
+        for finding in &request.manifest.findings {
+            let severity = match finding.severity {
+                crate::review::manifest::ReviewSeverity::Blocking => "blocking",
+                crate::review::manifest::ReviewSeverity::Major => "major",
+                crate::review::manifest::ReviewSeverity::Minor => "minor",
+                crate::review::manifest::ReviewSeverity::Nit => "nit",
+            };
+            let category = match finding.category {
+                crate::review::manifest::ReviewFindingCategory::Correctness => "correctness",
+                crate::review::manifest::ReviewFindingCategory::Security => "security",
+                crate::review::manifest::ReviewFindingCategory::SpecConformance => {
+                    "spec-conformance"
+                }
+                crate::review::manifest::ReviewFindingCategory::TestCoverage => "test-coverage",
+                crate::review::manifest::ReviewFindingCategory::Maintainability => {
+                    "maintainability"
+                }
+            };
+            let identity_key = format!(
+                "{}:{}:{}:{}",
+                finding.path,
+                finding.line,
+                finding.end_line.unwrap_or(finding.line),
+                finding.claim.trim()
+            );
+            tx.execute(
+                "INSERT INTO review_finding_records (
+                    finding_record_id, run_id, artifact_id, finding_id, identity_key,
+                    reviewed_head_sha, severity, category, path, line, end_line,
+                    claim, rationale, remediation, acceptance_criterion, confidence,
+                    lifecycle_state, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
+                    ?13, ?14, ?15, ?16, 'new', ?17, ?17)",
+                params![
+                    new_id(),
+                    stage.run_id,
+                    artifact_id,
+                    finding.finding_id,
+                    identity_key,
+                    request.reviewed_head_sha,
+                    severity,
+                    category,
+                    finding.path,
+                    finding.line,
+                    finding.end_line,
+                    finding.claim,
+                    finding.rationale,
+                    finding.remediation,
+                    finding.acceptance_criterion,
+                    finding.confidence,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        }
+        tx.execute(
+            "UPDATE review_attempts SET status = 'completed', manifest_json = ?1,
+                validation_result_json = ?2, updated_at = ?3 WHERE attempt_id = ?4",
+            params![
+                bounded_json(&request.manifest)?,
+                serde_json::json!({"accepted": true, "finding_count": request.manifest.findings.len()}),
+                now_s,
+                request.attempt_id,
+            ],
+        )
+        .map_err(storage_error)?;
+        tx.execute(
+            "UPDATE stage_runs SET status = 'completed', completed_at = ?1,
+                input_tokens = ?2, output_tokens = ?3, total_tokens = ?4,
+                updated_at = ?1 WHERE stage_run_id = ?5",
+            params![
+                now_s,
+                request.usage.input_tokens,
+                request.usage.output_tokens,
+                request.usage.total_tokens,
+                request.stage_run_id,
+            ],
+        )
+        .map_err(storage_error)?;
+        tx.execute(
+            "UPDATE factory_runs SET status = 'waiting', current_stage = ?1,
+                updated_at = ?2 WHERE run_id = ?3",
+            params![REVIEW_STAGE_NAME, now_s, stage.run_id],
+        )
+        .map_err(storage_error)?;
+        let record = tx
+            .query_row(
+                "SELECT artifact_id, run_id, stage_run_id, attempt_id,
+                    draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                    schema_version, reviewed_head_sha, base_sha, manifest_json,
+                    no_findings, finding_count, received_at, bytes_len
+                 FROM review_findings_artifacts WHERE artifact_id = ?1",
+                params![artifact_id],
+                review_artifact_from_row,
+            )
+            .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+        Ok(record)
+    }
+
+    pub fn get_review_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Option<ReviewFindingsArtifactRecord>> {
+        self.conn
+            .query_row(
+                "SELECT artifact_id, run_id, stage_run_id, attempt_id,
+                    draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                    schema_version, reviewed_head_sha, base_sha, manifest_json,
+                    no_findings, finding_count, received_at, bytes_len
+                 FROM review_findings_artifacts WHERE artifact_id = ?1",
+                params![artifact_id],
+                review_artifact_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_review_artifacts(&self, run_id: &str) -> Result<Vec<ReviewFindingsArtifactRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT artifact_id, run_id, stage_run_id, attempt_id,
+                    draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                    schema_version, reviewed_head_sha, base_sha, manifest_json,
+                    no_findings, finding_count, received_at, bytes_len
+                 FROM review_findings_artifacts WHERE run_id = ?1
+                 ORDER BY received_at DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], review_artifact_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn create_review_publication_intent(
+        &mut self,
+        run_id: &str,
+        artifact_id: &str,
+        kind: &str,
+        desired_effects: &serde_json::Value,
+    ) -> Result<ReviewPublicationIntent> {
+        let intent_id = new_id();
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, desired_effects_json,
+                    observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'pending', '[]', ?5, '{}', '{}', ?6, ?6)",
+                params![
+                    intent_id,
+                    run_id,
+                    artifact_id,
+                    kind,
+                    bounded_json(desired_effects)?,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        self.get_review_publication_intent(&intent_id)?.ok_or_else(|| {
+            SymphonyError::StorageError("created review publication intent is missing".to_string())
+        })
+    }
+
+    pub fn get_review_publication_intent(
+        &self,
+        intent_id: &str,
+    ) -> Result<Option<ReviewPublicationIntent>> {
+        self.conn
+            .query_row(
+                "SELECT intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, last_error_json, comment_id,
+                    publisher_login, desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 FROM review_publication_intents WHERE intent_id = ?1",
+                params![intent_id],
+                review_publication_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_pending_review_publications(&self) -> Result<Vec<ReviewPublicationIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, last_error_json, comment_id,
+                    publisher_login, desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 FROM review_publication_intents WHERE status = 'pending'
+                 ORDER BY created_at ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], review_publication_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn list_review_publications_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<ReviewPublicationIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, last_error_json, comment_id,
+                    publisher_login, desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 FROM review_publication_intents WHERE run_id = ?1
+                 ORDER BY created_at DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], review_publication_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn bind_review_publication_comment(
+        &mut self,
+        intent_id: &str,
+        comment_id: &str,
+        publisher_login: &str,
+    ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE review_publication_intents SET comment_id = ?1,
+                    publisher_login = ?2, updated_at = ?3 WHERE intent_id = ?4",
+                params![comment_id, publisher_login, ts(Self::now()), intent_id],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn complete_review_publication(&mut self, intent_id: &str, step: &str) -> Result<()> {
+        let intent = self
+            .get_review_publication_intent(intent_id)?
+            .ok_or_else(|| SymphonyError::StorageError(format!("review intent {intent_id} not found")))?;
+        let mut steps = intent.completed_steps;
+        if !steps.iter().any(|existing| existing == step) {
+            steps.push(step.to_string());
+        }
+        self.conn
+            .execute(
+                "UPDATE review_publication_intents SET status = 'applied',
+                    completed_steps_json = ?1, last_error_json = NULL, updated_at = ?2
+                 WHERE intent_id = ?3",
+                params![bounded_json(&steps)?, ts(Self::now()), intent_id],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn set_review_publication_error(
+        &mut self,
+        intent_id: &str,
+        status: PublicationStatus,
+        error: FactoryError,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET status = ?1,
+                    last_error_json = ?2, retry_count = retry_count + 1,
+                    updated_at = ?3 WHERE intent_id = ?4",
+                params![
+                    status.as_str(),
+                    bounded_json(&error)?,
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "review intent {intent_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn review_metrics(&self) -> Result<ReviewMetricsAggregate> {
+        let mut metrics = ReviewMetricsAggregate::default();
+        let (total, completed, failed): (u64, u64, u64) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status IN ('failed', 'interrupted') THEN 1 ELSE 0 END), 0)
+                 FROM stage_runs WHERE stage = ?1",
+                params![REVIEW_STAGE_NAME],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(storage_error)?;
+        metrics.total_attempts = total;
+        metrics.completed_attempts = completed;
+        metrics.failed_attempts = failed;
+        metrics.blocked_attempts = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM review_publication_intents WHERE status = 'blocked'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        metrics.preview_publications = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM review_publication_intents
+                 WHERE kind = 'preview' AND status = 'applied'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        metrics.findings = self
+            .conn
+            .query_row("SELECT COALESCE(SUM(finding_count), 0) FROM review_findings_artifacts", [], |row| row.get(0))
+            .map_err(storage_error)?;
+        metrics.no_findings = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM review_findings_artifacts WHERE no_findings = 1", [], |row| row.get(0))
+            .map_err(storage_error)?;
+        Ok(metrics)
+    }
+
     pub fn implementation_metrics(&self) -> Result<ImplementationMetricsAggregate> {
         use crate::triage::domain::{TriageMetricsDuration, TriageMetricsTokenTotals};
         use std::collections::BTreeMap;
@@ -3782,6 +4386,74 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
         let weight = rank - lower as f64;
         sorted[lower] * (1.0 - weight) + sorted[upper] * weight
     }
+}
+
+fn review_attempt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewAttemptRecord> {
+    Ok(ReviewAttemptRecord {
+        attempt_id: row.get(0)?,
+        run_id: row.get(1)?,
+        stage_run_id: row.get(2)?,
+        draft_pr_artifact_id: row.get(3)?,
+        implementation_artifact_id: row.get(4)?,
+        spec_artifact_id: row.get(5)?,
+        pr_number: row.get::<_, i64>(6)? as u64,
+        reviewed_head_sha: row.get(7)?,
+        base_sha: row.get(8)?,
+        status: row.get(9)?,
+        reprompt_count: row.get(10)?,
+        worker_turn: optional_from_json(row.get::<_, Option<String>>(11)?)?,
+        manifest: optional_from_json(row.get::<_, Option<String>>(12)?)?,
+        validation_result: optional_from_json(row.get::<_, Option<String>>(13)?)?,
+        last_error: optional_from_json(row.get::<_, Option<String>>(14)?)?,
+        created_at: parse_ts_row(row.get::<_, String>(15)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(16)?)?,
+    })
+}
+
+fn review_artifact_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ReviewFindingsArtifactRecord> {
+    let no_findings: i64 = row.get(11)?;
+    Ok(ReviewFindingsArtifactRecord {
+        artifact_id: row.get(0)?,
+        run_id: row.get(1)?,
+        stage_run_id: row.get(2)?,
+        attempt_id: row.get(3)?,
+        draft_pr_artifact_id: row.get(4)?,
+        implementation_artifact_id: row.get(5)?,
+        spec_artifact_id: row.get(6)?,
+        schema_version: row.get(7)?,
+        reviewed_head_sha: row.get(8)?,
+        base_sha: row.get(9)?,
+        manifest: serde_json::from_str(&row.get::<_, String>(10)?).map_err(row_error)?,
+        no_findings: no_findings != 0,
+        finding_count: row.get(12)?,
+        received_at: parse_ts_row(row.get::<_, String>(13)?)?,
+        bytes_len: row.get(14)?,
+    })
+}
+
+fn review_publication_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ReviewPublicationIntent> {
+    let status: String = row.get(4)?;
+    Ok(ReviewPublicationIntent {
+        intent_id: row.get(0)?,
+        run_id: row.get(1)?,
+        artifact_id: row.get(2)?,
+        kind: row.get(3)?,
+        status: parse_publication_status(&status).map_err(row_error)?,
+        completed_steps: serde_json::from_str(&row.get::<_, String>(5)?).map_err(row_error)?,
+        retry_count: row.get(6)?,
+        last_error: optional_from_json(row.get::<_, Option<String>>(7)?)?,
+        comment_id: row.get(8)?,
+        publisher_login: row.get(9)?,
+        desired_effects: serde_json::from_str(&row.get::<_, String>(10)?).map_err(row_error)?,
+        observed_baseline: serde_json::from_str(&row.get::<_, String>(11)?).map_err(row_error)?,
+        expected_projection: serde_json::from_str(&row.get::<_, String>(12)?).map_err(row_error)?,
+        created_at: parse_ts_row(row.get::<_, String>(13)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(14)?)?,
+    })
 }
 
 fn select_stage_run(conn: &Connection, stage_run_id: &str) -> Result<StageRunRecord> {
@@ -5275,6 +5947,116 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn migration_006_keeps_review_artifacts_immutable() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let (run_id, spec_artifact_id, _) = seed_approved_spec_run(&mut store);
+        let implementation_stage = store
+            .claim_stage_attempt(
+                IMPLEMENTATION_STAGE_NAME,
+                claim_request("issue-rev", "impl-config"),
+            )
+            .unwrap();
+        let implementation_artifact_id = "impl-artifact";
+        let implementation_intent_id = "impl-intent";
+        let draft_id = "draft-artifact";
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_artifacts (
+                    artifact_id, run_id, stage_run_id, approved_artifact_id,
+                    approved_version, issue_revision, configuration_revision,
+                    schema_version, manifest_json, base_commit, head_commit,
+                    approved_spec_path, validation_cycles, execution_profile,
+                    received_at, bytes_len
+                 ) VALUES (?1, ?2, ?3, ?4, 1, 'issue-rev', 'impl-config', 1,
+                    ?5, 'base', 'head', 'spec.md', 1, 'local', ?6, 10)",
+                params![
+                    implementation_artifact_id,
+                    run_id,
+                    implementation_stage.stage_run_id,
+                    spec_artifact_id,
+                    serde_json::json!({"schema_version":1,"status":"completed","summary":"ok","acceptance_criteria":[],"known_limitations":[]}),
+                    now,
+                ],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, desired_effects_json,
+                    observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, 'automatic', 'applied', '[]', '{}', '{}', '{}', ?4, ?4)",
+                params![implementation_intent_id, run_id, implementation_artifact_id, now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_draft_pr_artifacts (
+                    artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, 42, 'https://example.test/pr/42', 1,
+                    'feature', 'main', 'head-sha', 'marker', ?5)",
+                params![draft_id, run_id, implementation_artifact_id, implementation_intent_id, now],
+            )
+            .unwrap();
+
+        let review_stage = store
+            .claim_stage_attempt(REVIEW_STAGE_NAME, claim_request("review-rev", "review-config"))
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_attempts (
+                    attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                    implementation_artifact_id, spec_artifact_id, pr_number,
+                    reviewed_head_sha, base_sha, status, created_at, updated_at
+                 ) VALUES ('review-attempt', ?1, ?2, ?3, ?4, ?5, 42,
+                    'head-sha', 'base-sha', 'completed', ?6, ?6)",
+                params![run_id, review_stage.stage_run_id, draft_id, implementation_artifact_id, spec_artifact_id, now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_findings_artifacts (
+                    artifact_id, run_id, stage_run_id, attempt_id,
+                    draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                    schema_version, reviewed_head_sha, base_sha, manifest_json,
+                    no_findings, finding_count, received_at, bytes_len
+                 ) VALUES ('review-artifact', ?1, ?2, 'review-attempt', ?3, ?4, ?5,
+                    1, 'head-sha', 'base-sha', ?6, 1, 0, ?7, 2)",
+                params![
+                    run_id,
+                    review_stage.stage_run_id,
+                    draft_id,
+                    implementation_artifact_id,
+                    spec_artifact_id,
+                    serde_json::json!({"schema_version":1,"reviewed_head_sha":"head-sha","base_sha":"base-sha","spec_conformance_summary":"none","no_findings":true,"findings":[]}),
+                    now,
+                ],
+            )
+            .unwrap();
+
+        let update = store.conn.execute(
+            "UPDATE review_findings_artifacts SET manifest_json = '{}' WHERE artifact_id = 'review-artifact'",
+            [],
+        );
+        assert!(update.is_err(), "review artifact UPDATE must be rejected");
+        let delete = store.conn.execute(
+            "DELETE FROM review_findings_artifacts WHERE artifact_id = 'review-artifact'",
+            [],
+        );
+        assert!(delete.is_err(), "review artifact DELETE must be rejected");
     }
 
     #[test]

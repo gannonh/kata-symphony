@@ -54,6 +54,21 @@ CREATE TABLE IF NOT EXISTS review_findings_artifacts (
 CREATE INDEX IF NOT EXISTS idx_review_findings_artifacts_run
 ON review_findings_artifacts(run_id, received_at DESC);
 
+-- Review artifacts are the immutable, validated worker output for one pinned
+-- head SHA. Lifecycle state lives in review_finding_records; the manifest
+-- itself must never be rewritten or removed after it has been accepted.
+CREATE TRIGGER IF NOT EXISTS review_findings_artifacts_immutable_update
+BEFORE UPDATE ON review_findings_artifacts
+BEGIN
+  SELECT RAISE(ABORT, 'review findings artifacts are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS review_findings_artifacts_immutable_delete
+BEFORE DELETE ON review_findings_artifacts
+BEGIN
+  SELECT RAISE(ABORT, 'review findings artifacts are immutable');
+END;
+
 -- PR1 uses this for the marker-owned preview issue comment. PR2 extends the
 -- progressive completed-step vocabulary for atomic review publication/routing.
 CREATE TABLE IF NOT EXISTS review_publication_intents (
