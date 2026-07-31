@@ -2217,6 +2217,24 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
                 "review.trigger_state must be non-empty when review is enabled".to_string(),
             ));
         }
+        if config.agent_backend == AgentBackend::Codex && config.review.model.is_some() {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "review.model is not supported when agent.name is 'codex'".to_string(),
+            ));
+        }
+        if config.review.mode == ReviewMode::Automatic
+            && config
+                .review
+                .completion_route
+                .as_ref()
+                .map(|route| route.state.trim().is_empty())
+                .unwrap_or(true)
+        {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "review.completion_route.state is required when review.mode is 'automatic'"
+                    .to_string(),
+            ));
+        }
     }
 
     Ok(ValidatedServiceConfig(config.clone()))

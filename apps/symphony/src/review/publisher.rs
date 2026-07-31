@@ -58,7 +58,7 @@ where
         max_pages: u32,
     ) -> Result<()> {
         let publisher_login = self.comments.authenticated_login().await?;
-        let comment_id = if let Some(raw) = intent.comment_id.as_deref() {
+        let mut comment_id = if let Some(raw) = intent.comment_id.as_deref() {
             raw.parse::<u64>().map_err(|error| {
                 SymphonyError::TriageError(format!(
                     "invalid review publication comment id {raw}: {error}"
@@ -79,7 +79,28 @@ where
             return Ok(());
         };
 
-        let existing = self.comments.get_comment(comment_id).await?;
+        let existing = match self.comments.get_comment(comment_id).await {
+            Ok(existing) => existing,
+            Err(SymphonyError::GithubApiStatus { status: 404, .. }) => {
+                store.clear_review_publication_comment(&intent.intent_id)?;
+                if let Some(recovered) = self
+                    .find_owned_marker(issue_number, &intent.intent_id, &publisher_login, max_pages)
+                    .await?
+                {
+                    comment_id = recovered;
+                    self.comments.get_comment(comment_id).await?
+                } else {
+                    let created = self.comments.create_comment(issue_number, body).await?;
+                    store.bind_review_publication_comment(
+                        &intent.intent_id,
+                        &created.id.to_string(),
+                        &publisher_login,
+                    )?;
+                    return Ok(());
+                }
+            }
+            Err(error) => return Err(error),
+        };
         let author = existing
             .user
             .as_ref()
@@ -130,4 +151,3 @@ where
         Ok(None)
     }
 }
-

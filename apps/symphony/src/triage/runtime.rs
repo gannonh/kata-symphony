@@ -495,8 +495,9 @@ impl SharedFactoryStore {
 
     pub fn list_a4_eligible_review_runs(
         &self,
+        max_attempts: u32,
     ) -> Result<Vec<crate::triage::store::A4EligibleReviewRun>> {
-        self.with_store(|store| store.list_a4_eligible_review_runs())
+        self.with_store(|store| store.list_a4_eligible_review_runs(max_attempts))
     }
 
     pub fn store_review_attempt_inputs(
@@ -574,6 +575,10 @@ impl SharedFactoryStore {
         self.with_store_mut(|store| {
             store.bind_review_publication_comment(intent_id, comment_id, publisher_login)
         })
+    }
+
+    pub fn clear_review_publication_comment(&self, intent_id: &str) -> Result<()> {
+        self.with_store_mut(|store| store.clear_review_publication_comment(intent_id))
     }
 
     pub fn set_review_publication_error(

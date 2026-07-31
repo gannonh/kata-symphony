@@ -34,9 +34,9 @@ ON review_attempts(run_id, reviewed_head_sha, created_at DESC);
 -- (run, reviewed_head_sha) key prevents duplicate completed cycles.
 CREATE TABLE IF NOT EXISTS review_findings_artifacts (
   artifact_id TEXT PRIMARY KEY,
-  run_id TEXT NOT NULL REFERENCES factory_runs(run_id) ON DELETE CASCADE,
-  stage_run_id TEXT NOT NULL UNIQUE REFERENCES stage_runs(stage_run_id) ON DELETE CASCADE,
-  attempt_id TEXT NOT NULL UNIQUE REFERENCES review_attempts(attempt_id) ON DELETE CASCADE,
+  run_id TEXT NOT NULL REFERENCES factory_runs(run_id) ON DELETE RESTRICT,
+  stage_run_id TEXT NOT NULL UNIQUE REFERENCES stage_runs(stage_run_id) ON DELETE RESTRICT,
+  attempt_id TEXT NOT NULL UNIQUE REFERENCES review_attempts(attempt_id) ON DELETE RESTRICT,
   draft_pr_artifact_id TEXT NOT NULL REFERENCES implementation_draft_pr_artifacts(artifact_id),
   implementation_artifact_id TEXT NOT NULL REFERENCES implementation_artifacts(artifact_id),
   spec_artifact_id TEXT NOT NULL REFERENCES spec_artifacts(artifact_id),

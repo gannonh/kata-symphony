@@ -3581,7 +3581,10 @@ impl SqliteFactoryStore {
     /// The tracker state itself is deliberately checked by the coordinator
     /// against the live Projects v2 item. The store only returns durable A3
     /// publication facts and applies the single-owner/head-cycle guards.
-    pub fn list_a4_eligible_review_runs(&self) -> Result<Vec<A4EligibleReviewRun>> {
+    pub fn list_a4_eligible_review_runs(
+        &self,
+        max_attempts: u32,
+    ) -> Result<Vec<A4EligibleReviewRun>> {
         let mut stmt = self
             .conn
             .prepare(
@@ -3607,11 +3610,17 @@ impl SqliteFactoryStore {
                      WHERE sr.run_id = r.run_id AND sr.stage = ?1
                        AND sr.status IN ('pending', 'running')
                    )
+                   AND (
+                     SELECT COUNT(*) FROM review_attempts ra
+                     WHERE ra.run_id = r.run_id
+                       AND ra.reviewed_head_sha = d.head_sha
+                       AND ra.status IN ('failed', 'blocked', 'interrupted')
+                   ) < ?2
                  ORDER BY r.updated_at ASC, d.created_at ASC",
             )
             .map_err(storage_error)?;
         let rows = stmt
-            .query_map(params![REVIEW_STAGE_NAME], |row| {
+            .query_map(params![REVIEW_STAGE_NAME, max_attempts.max(1)], |row| {
                 let draft: i64 = row.get(10)?;
                 Ok(A4EligibleReviewRun {
                     run_id: row.get(0)?,
@@ -3722,8 +3731,10 @@ impl SqliteFactoryStore {
             .conn
             .execute(
                 "UPDATE review_attempts SET status = ?1, reprompt_count = ?2,
-                    worker_turn_json = ?3, manifest_json = ?4,
-                    validation_result_json = ?5, last_error_json = ?6,
+                    worker_turn_json = COALESCE(?3, worker_turn_json),
+                    manifest_json = COALESCE(?4, manifest_json),
+                    validation_result_json = COALESCE(?5, validation_result_json),
+                    last_error_json = ?6,
                     updated_at = ?7 WHERE attempt_id = ?8",
                 params![
                     status,
@@ -3751,13 +3762,6 @@ impl SqliteFactoryStore {
         &mut self,
         request: StoreReviewArtifactRequest,
     ) -> Result<ReviewFindingsArtifactRecord> {
-        let stage = select_stage_run(&self.conn, &request.stage_run_id)?;
-        if stage.stage != REVIEW_STAGE_NAME || stage.status != StageStatus::Running {
-            return Err(SymphonyError::StorageError(format!(
-                "stage run {} is not a running review attempt",
-                request.stage_run_id
-            )));
-        }
         if request.manifest.reviewed_head_sha != request.reviewed_head_sha
             || request.manifest.base_sha != request.base_sha
         {
@@ -3768,6 +3772,13 @@ impl SqliteFactoryStore {
         let now_s = ts(Self::now());
         let manifest_json = bounded_json(&request.manifest)?;
         let tx = self.conn.transaction().map_err(storage_error)?;
+        let stage = select_stage_run(&tx, &request.stage_run_id)?;
+        if stage.stage != REVIEW_STAGE_NAME || stage.status != StageStatus::Running {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is not a running review attempt",
+                request.stage_run_id
+            )));
+        }
         let artifact_id = new_id();
         tx.execute(
             "INSERT INTO review_findings_artifacts (
@@ -3865,19 +3876,26 @@ impl SqliteFactoryStore {
             ],
         )
         .map_err(storage_error)?;
-        tx.execute(
-            "UPDATE stage_runs SET status = 'completed', completed_at = ?1,
-                input_tokens = ?2, output_tokens = ?3, total_tokens = ?4,
-                updated_at = ?1 WHERE stage_run_id = ?5",
-            params![
-                now_s,
-                request.usage.input_tokens,
-                request.usage.output_tokens,
-                request.usage.total_tokens,
-                request.stage_run_id,
-            ],
-        )
-        .map_err(storage_error)?;
+        let changed = tx
+            .execute(
+                "UPDATE stage_runs SET status = 'completed', completed_at = ?1,
+                    input_tokens = ?2, output_tokens = ?3, total_tokens = ?4,
+                    updated_at = ?1 WHERE stage_run_id = ?5 AND status = 'running'",
+                params![
+                    now_s,
+                    request.usage.input_tokens,
+                    request.usage.output_tokens,
+                    request.usage.total_tokens,
+                    request.stage_run_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "review stage run {} is no longer running",
+                request.stage_run_id
+            )));
+        }
         tx.execute(
             "UPDATE factory_runs SET status = 'waiting', current_stage = ?1,
                 updated_at = ?2 WHERE run_id = ?3",
@@ -4039,6 +4057,18 @@ impl SqliteFactoryStore {
                     publisher_login = ?2, updated_at = ?3 WHERE intent_id = ?4",
                 params![comment_id, publisher_login, ts(Self::now()), intent_id],
             )
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn clear_review_publication_comment(&mut self, intent_id: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET comment_id = NULL, publisher_login = NULL, updated_at = ?1
+                 WHERE intent_id = ?2",
+                params![ts(Self::now()), intent_id],
+            )
             .map_err(storage_error)?;
         Ok(())
     }
@@ -4091,6 +4121,9 @@ impl SqliteFactoryStore {
     }
 
     pub fn review_metrics(&self) -> Result<ReviewMetricsAggregate> {
+        use crate::triage::domain::{TriageMetricsDuration, TriageMetricsTokenTotals};
+        use std::collections::BTreeMap;
+
         let mut metrics = ReviewMetricsAggregate::default();
         let (total, completed, failed): (u64, u64, u64) = self
             .conn
@@ -4106,7 +4139,7 @@ impl SqliteFactoryStore {
         metrics.total_attempts = total;
         metrics.completed_attempts = completed;
         metrics.failed_attempts = failed;
-        metrics.blocked_attempts = self
+        metrics.blocked_publications = self
             .conn
             .query_row(
                 "SELECT COUNT(*) FROM review_publication_intents WHERE status = 'blocked'",
@@ -4131,6 +4164,79 @@ impl SqliteFactoryStore {
             .conn
             .query_row("SELECT COUNT(*) FROM review_findings_artifacts WHERE no_findings = 1", [], |row| row.get(0))
             .map_err(storage_error)?;
+
+        let mut durations = Vec::new();
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT started_at, completed_at FROM stage_runs
+                 WHERE stage = ?1 AND started_at IS NOT NULL AND completed_at IS NOT NULL",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![REVIEW_STAGE_NAME], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_error)?;
+        for row in rows {
+            let (start, end) = row.map_err(storage_error)?;
+            durations.push(
+                (parse_ts(&end).map_err(SymphonyError::StorageError)?
+                    - parse_ts(&start).map_err(SymphonyError::StorageError)?)
+                .num_milliseconds()
+                .max(0) as f64,
+            );
+        }
+        durations.sort_by(f64::total_cmp);
+        metrics.base.duration = if durations.is_empty() {
+            TriageMetricsDuration {
+                average_ms: None,
+                p50_ms: None,
+                p95_ms: None,
+            }
+        } else {
+            TriageMetricsDuration {
+                average_ms: Some(durations.iter().sum::<f64>() / durations.len() as f64),
+                p50_ms: Some(percentile(&durations, 0.50)),
+                p95_ms: Some(percentile(&durations, 0.95)),
+            }
+        };
+
+        let mut tokens = BTreeMap::new();
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT harness, model, COALESCE(SUM(input_tokens), 0),
+                        COALESCE(SUM(output_tokens), 0), COALESCE(SUM(total_tokens), 0)
+                 FROM stage_runs WHERE stage = ?1 GROUP BY harness, model",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![REVIEW_STAGE_NAME], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, u64>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, u64>(4)?,
+                ))
+            })
+            .map_err(storage_error)?;
+        for row in rows {
+            let (harness, model, input, output, total) = row.map_err(storage_error)?;
+            metrics.base.input_tokens = metrics.base.input_tokens.saturating_add(input);
+            metrics.base.output_tokens = metrics.base.output_tokens.saturating_add(output);
+            metrics.base.total_tokens = metrics.base.total_tokens.saturating_add(total);
+            tokens.insert(
+                format!("{}/{}", harness, model.as_deref().unwrap_or("unknown")),
+                TriageMetricsTokenTotals {
+                    input_tokens: input,
+                    output_tokens: output,
+                    total_tokens: total,
+                },
+            );
+        }
+        metrics.base.tokens_by_harness_model = tokens;
         Ok(metrics)
     }
 

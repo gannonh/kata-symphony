@@ -111,7 +111,9 @@ where
             .query_all_items(&status_field.project_id, self.config.max_pages)
             .await?;
         let trigger = service.review.trigger_state.trim();
-        let candidates = self.store.list_a4_eligible_review_runs()?;
+        let candidates = self
+            .store
+            .list_a4_eligible_review_runs(service.review.max_attempts)?;
         summary.candidates_seen = candidates.len() as u32;
 
         for candidate in candidates {
@@ -246,7 +248,7 @@ where
             },
         )?;
         let attempt_id = Uuid::now_v7().to_string();
-        self.store.store_review_attempt_inputs(StoreReviewAttemptRequest {
+        let attempt_inputs = StoreReviewAttemptRequest {
             attempt_id: attempt_id.clone(),
             stage_run_id: stage.stage_run_id.clone(),
             draft_pr_artifact_id: candidate.draft_pr_artifact_id.clone(),
@@ -255,8 +257,20 @@ where
             pr_number: candidate.pr_number,
             reviewed_head_sha: pull.head.sha.clone(),
             base_sha: pull.base.sha.clone(),
-        })?;
-        self.record_event(
+        };
+        if let Err(error) = self.store.store_review_attempt_inputs(attempt_inputs) {
+            let factory_error = FactoryError::new(
+                "review_attempt_input_persist_failed",
+                "review_coordinator",
+                error.to_string(),
+                true,
+                None,
+            );
+            let _ = self.store.fail_attempt(&stage.stage_run_id, factory_error);
+            return Err(error);
+        }
+        let result = async {
+            self.record_event(
             Some(&candidate.run_id),
             Some(&stage.stage_run_id),
             "review_started",
@@ -266,7 +280,7 @@ where
                 "reviewed_head_sha": pull.head.sha,
                 "base_sha": pull.base.sha,
             }),
-        )?;
+            )?;
 
         let prompt = load_review_prompt(&self.config.workflow_dir, service)?;
         let repo_path = service.workspace.repo.as_deref().ok_or_else(|| {
@@ -300,15 +314,34 @@ where
         let mut last_error = None;
         let mut final_output = None;
         let mut total_usage = StageUsage::default();
+        let base_prompt = worker_request.prompt.clone();
         for reprompt in 0..=service.review.max_reprompts {
             if reprompt > 0 {
                 worker_request.prompt = format!(
                     "{}\n\nPrevious validation feedback (fix the JSON output only): {}",
-                    worker_request.prompt,
+                    base_prompt,
                     last_error.as_deref().unwrap_or("manifest validation failed")
                 );
             }
-            let result = self.worker.run(&worker_request).await?;
+            let result = match self.worker.run(&worker_request).await {
+                Ok(result) => result,
+                Err(error) => {
+                    last_error = Some(format!("worker invocation failed: {error}"));
+                    self.store.update_review_attempt(
+                        &attempt_id,
+                        "running",
+                        reprompt + 1,
+                        None,
+                        None,
+                        Some(&serde_json::json!({
+                            "accepted": false,
+                            "error": last_error.as_deref().unwrap_or_default()
+                        })),
+                        None,
+                    )?;
+                    continue;
+                }
+            };
             total_usage.input_tokens = total_usage
                 .input_tokens
                 .saturating_add(result.usage.input_tokens);
@@ -378,7 +411,7 @@ where
 
         let artifact = self.store.store_review_artifact(StoreReviewArtifactRequest {
             stage_run_id: stage.stage_run_id.clone(),
-            attempt_id,
+            attempt_id: attempt_id.clone(),
             draft_pr_artifact_id: candidate.draft_pr_artifact_id.clone(),
             implementation_artifact_id: candidate.implementation_artifact_id.clone(),
             spec_artifact_id: candidate.approved_artifact_id.clone(),
@@ -427,32 +460,80 @@ where
             "review_published",
             serde_json::json!({"status":"applied","intent_id":intent.intent_id,"artifact_id":artifact.artifact_id}),
         )?;
-        Ok(ProcessOutcome::Completed)
+            Ok(ProcessOutcome::Completed)
+        }
+        .await;
+
+        if let Err(error) = &result {
+            let factory_error = FactoryError::new(
+                "review_attempt_failed",
+                "review_coordinator",
+                error.to_string(),
+                true,
+                None,
+            );
+            if let Err(cleanup_error) = self.store.update_review_attempt(
+                &attempt_id,
+                "failed",
+                service.review.max_reprompts,
+                None,
+                None,
+                Some(&serde_json::json!({
+                    "accepted": false,
+                    "error": error.to_string()
+                })),
+                Some(&factory_error),
+            ) {
+                tracing::error!(
+                    event = "review_attempt_cleanup_failed",
+                    attempt_id = %attempt_id,
+                    error = %cleanup_error,
+                    "could not persist failed review attempt"
+                );
+            }
+            if let Err(cleanup_error) = self.store.fail_attempt(&stage.stage_run_id, factory_error) {
+                tracing::error!(
+                    event = "review_stage_cleanup_failed",
+                    stage_run_id = %stage.stage_run_id,
+                    error = %cleanup_error,
+                    "could not terminate failed review stage"
+                );
+            }
+        }
+        result
     }
 
-    async fn reconcile_pending_publications(&self, service: &ServiceConfig) -> Result<()> {
+    async fn reconcile_pending_publications(&self, _service: &ServiceConfig) -> Result<()> {
         let publisher = ReviewPublisher::new(self.comments.clone());
         for intent in self.store.list_pending_review_publications()? {
             let Some(artifact) = self.store.get_review_artifact(&intent.artifact_id)? else {
                 continue;
             };
-            let issue_number = intent
+            let Some(issue_number) = intent
                 .desired_effects
                 .get("issue_number")
                 .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| {
-                    SymphonyError::StorageError(format!(
-                        "review intent {} is missing issue_number",
-                        intent.intent_id
-                    ))
-                })?;
+            else {
+                self.store.set_review_publication_error(
+                    &intent.intent_id,
+                    crate::triage::domain::PublicationStatus::Blocked,
+                    FactoryError::new(
+                        "review_publication_missing_issue_number",
+                        "review_publisher",
+                        format!("review intent {} is missing issue_number", intent.intent_id),
+                        false,
+                        None,
+                    ),
+                )?;
+                continue;
+            };
             if let Err(error) = publisher
                 .publish_preview(
                     &self.store,
                     &intent,
                     &artifact,
                     issue_number,
-                    service.triage.max_intake_pages.max(1),
+                    self.config.max_pages,
                 )
                 .await
             {

@@ -167,7 +167,7 @@ pub struct ReviewMetricsAggregate {
     pub total_attempts: u64,
     pub completed_attempts: u64,
     pub failed_attempts: u64,
-    pub blocked_attempts: u64,
+    pub blocked_publications: u64,
     pub preview_publications: u64,
     pub findings: u64,
     pub no_findings: u64,

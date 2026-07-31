@@ -26,9 +26,8 @@ pub fn reviewed_files(files: &[GithubPullRequestFile]) -> Vec<ReviewedFile> {
                         }
                     }
                 }
-                if ranges.is_empty() && file.additions > 0 {
-                    ranges.push(ReviewedLineRange::new(1, file.additions));
-                }
+                // A missing patch does not tell us where the changes landed.
+                // Keep the file unanchorable instead of guessing at line 1.
             }
             let line_count = if deleted {
                 0
@@ -97,7 +96,10 @@ pub fn render_preview_comment(
                 finding.path,
                 finding.line,
                 end,
-                finding.claim.replace('|', "\\|")
+                finding
+                    .claim
+                    .replace(['\r', '\n'], " ")
+                    .replace('|', "\\|")
             ));
         }
     }
