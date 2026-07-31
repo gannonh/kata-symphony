@@ -251,11 +251,7 @@ mod tests {
             Ok(comment)
         }
 
-        async fn update_comment(
-            &self,
-            comment_id: u64,
-            body: &str,
-        ) -> Result<GithubIssueComment> {
+        async fn update_comment(&self, comment_id: u64, body: &str) -> Result<GithubIssueComment> {
             *self.update_count.lock().unwrap() += 1;
             let mut comments = self.comments.lock().unwrap();
             let comment =

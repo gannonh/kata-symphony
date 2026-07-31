@@ -30,7 +30,7 @@ fn review_error(raw: serde_yaml::Value) -> String {
     match validate(&config) {
         Err(SymphonyError::InvalidWorkflowConfig(message)) => message,
         Err(other) => panic!("expected workflow validation error, got {other}"),
-        Ok(()) => panic!("expected review workflow validation to fail"),
+        Ok(_) => panic!("expected review workflow validation to fail"),
     }
 }
 
