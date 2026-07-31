@@ -44,7 +44,7 @@ CREATE TABLE IF NOT EXISTS review_findings_artifacts (
   reviewed_head_sha TEXT NOT NULL,
   base_sha TEXT NOT NULL,
   manifest_json TEXT NOT NULL,
-  no_findings INTEGER NOT NULL,
+  no_findings INTEGER NOT NULL CHECK (no_findings IN (0, 1)),
   finding_count INTEGER NOT NULL,
   received_at TEXT NOT NULL,
   bytes_len INTEGER NOT NULL,
@@ -59,7 +59,7 @@ ON review_findings_artifacts(run_id, received_at DESC);
 CREATE TABLE IF NOT EXISTS review_publication_intents (
   intent_id TEXT PRIMARY KEY,
   run_id TEXT NOT NULL REFERENCES factory_runs(run_id) ON DELETE CASCADE,
-  artifact_id TEXT REFERENCES review_findings_artifacts(artifact_id) ON DELETE SET NULL,
+  artifact_id TEXT NOT NULL REFERENCES review_findings_artifacts(artifact_id) ON DELETE CASCADE,
   kind TEXT NOT NULL,
   status TEXT NOT NULL,
   completed_steps_json TEXT NOT NULL,
@@ -79,7 +79,7 @@ ON review_publication_intents(status, updated_at);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_review_one_nonterminal_publication
 ON review_publication_intents(artifact_id)
-WHERE artifact_id IS NOT NULL AND status IN ('pending', 'conflict', 'blocked');
+WHERE status IN ('pending', 'conflict', 'blocked');
 
 -- Per-finding durable identities make lifecycle classification possible in PR2
 -- without mutating the immutable manifest artifact from the original cycle.
@@ -90,8 +90,16 @@ CREATE TABLE IF NOT EXISTS review_finding_records (
   finding_id TEXT NOT NULL,
   identity_key TEXT NOT NULL,
   reviewed_head_sha TEXT NOT NULL,
-  severity TEXT NOT NULL,
-  category TEXT NOT NULL,
+  severity TEXT NOT NULL CHECK (severity IN ('blocking', 'major', 'minor', 'nit')),
+  category TEXT NOT NULL CHECK (
+    category IN (
+      'correctness',
+      'security',
+      'spec-conformance',
+      'test-coverage',
+      'maintainability'
+    )
+  ),
   path TEXT NOT NULL,
   line INTEGER NOT NULL,
   end_line INTEGER,
@@ -99,8 +107,9 @@ CREATE TABLE IF NOT EXISTS review_finding_records (
   rationale TEXT NOT NULL,
   remediation TEXT NOT NULL,
   acceptance_criterion TEXT,
-  confidence REAL NOT NULL,
-  lifecycle_state TEXT NOT NULL DEFAULT 'new',
+  confidence REAL NOT NULL CHECK (confidence BETWEEN 0.0 AND 1.0),
+  lifecycle_state TEXT NOT NULL DEFAULT 'new'
+    CHECK (lifecycle_state IN ('new', 'persisting', 'resolved')),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(artifact_id, finding_id),
