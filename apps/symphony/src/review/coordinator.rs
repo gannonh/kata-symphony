@@ -22,12 +22,12 @@ use crate::review::worker::{
 use crate::triage::coordinator::EventEmitter;
 use crate::triage::domain::{FactoryError, FactoryEventRecord, StageUsage};
 use crate::triage::publisher::TriageCommentPort;
+use crate::triage::runner::TriageIssueIdentity;
 use crate::triage::runtime::SharedFactoryStore;
 use crate::triage::store::{
     A4EligibleReviewRun, ClaimAttemptRequest, FactoryRunStore, StoreReviewArtifactRequest,
     StoreReviewAttemptRequest, UpdateReviewAttemptRequest,
 };
-use crate::triage::runner::TriageIssueIdentity;
 
 #[derive(Debug, Clone)]
 pub struct ReviewCoordinatorConfig {
@@ -126,12 +126,9 @@ where
             };
             let in_trigger_state = project_items.iter().any(|item| {
                 item.issue_number == issue_number
-                    && item
-                        .repository
-                        .as_deref()
-                        .is_none_or(|repository| {
-                            repository.eq_ignore_ascii_case(&candidate.repository)
-                        })
+                    && item.repository.as_deref().is_none_or(|repository| {
+                        repository.eq_ignore_ascii_case(&candidate.repository)
+                    })
                     && item
                         .status
                         .as_deref()
@@ -141,7 +138,10 @@ where
                 summary.waiting += 1;
                 continue;
             }
-            match self.process_candidate(service, &candidate, issue_number).await {
+            match self
+                .process_candidate(service, &candidate, issue_number)
+                .await
+            {
                 Ok(ProcessOutcome::Completed) => {
                     summary.attempts_started += 1;
                     summary.attempts_completed += 1;
@@ -202,7 +202,9 @@ where
                 format!(
                     "diff --git a/{0} b/{0}\n--- a/{0}\n+++ b/{0}\n{1}",
                     file.filename,
-                    file.patch.as_deref().unwrap_or("(binary or patch unavailable)\n")
+                    file.patch
+                        .as_deref()
+                        .unwrap_or("(binary or patch unavailable)\n")
                 )
             })
             .collect::<String>();
@@ -225,28 +227,26 @@ where
                 ))
             })?;
         let configuration_revision = review_configuration_revision(&service.review);
-        let stage = self.store.claim_review_attempt(
-            ClaimAttemptRequest {
-                forge_host: candidate.forge_host.clone(),
-                repository: candidate.repository.clone(),
-                issue_id: candidate.issue_id.clone(),
-                issue_identifier: candidate.issue_identifier.clone(),
-                issue_revision: pull.head.sha.clone(),
-                configuration_revision: configuration_revision.clone(),
-                owner_instance: self.config.owner_instance.clone(),
-                harness: match service.agent_backend {
-                    AgentBackend::Codex => "codex".to_string(),
-                    AgentBackend::KataCli => "pi".to_string(),
-                },
-                model: service.review.model.clone(),
-                workspace_path: None,
-                output_path: None,
-                pid: None,
-                process_group_id: None,
-                process_start_token: None,
-                executable_identity: None,
+        let stage = self.store.claim_review_attempt(ClaimAttemptRequest {
+            forge_host: candidate.forge_host.clone(),
+            repository: candidate.repository.clone(),
+            issue_id: candidate.issue_id.clone(),
+            issue_identifier: candidate.issue_identifier.clone(),
+            issue_revision: pull.head.sha.clone(),
+            configuration_revision: configuration_revision.clone(),
+            owner_instance: self.config.owner_instance.clone(),
+            harness: match service.agent_backend {
+                AgentBackend::Codex => "codex".to_string(),
+                AgentBackend::KataCli => "pi".to_string(),
             },
-        )?;
+            model: service.review.model.clone(),
+            workspace_path: None,
+            output_path: None,
+            pid: None,
+            process_group_id: None,
+            process_start_token: None,
+            executable_identity: None,
+        })?;
         let attempt_id = Uuid::now_v7().to_string();
         let attempt_inputs = StoreReviewAttemptRequest {
             attempt_id: attempt_id.clone(),
@@ -474,20 +474,20 @@ where
                 true,
                 None,
             );
-            if let Err(cleanup_error) = self
-                .store
-                .update_review_attempt(UpdateReviewAttemptRequest {
-                    attempt_id: &attempt_id,
-                    status: "failed",
-                    reprompt_count: service.review.max_reprompts,
-                    worker_turn: None,
-                    manifest: None,
-                    validation_result: Some(&serde_json::json!({
-                        "accepted": false,
-                        "error": error.to_string()
-                    })),
-                    error: Some(&factory_error),
-                })
+            if let Err(cleanup_error) =
+                self.store
+                    .update_review_attempt(UpdateReviewAttemptRequest {
+                        attempt_id: &attempt_id,
+                        status: "failed",
+                        reprompt_count: service.review.max_reprompts,
+                        worker_turn: None,
+                        manifest: None,
+                        validation_result: Some(&serde_json::json!({
+                            "accepted": false,
+                            "error": error.to_string()
+                        })),
+                        error: Some(&factory_error),
+                    })
             {
                 tracing::error!(
                     event = "review_attempt_cleanup_failed",
@@ -496,7 +496,8 @@ where
                     "could not persist failed review attempt"
                 );
             }
-            if let Err(cleanup_error) = self.store.fail_attempt(&stage.stage_run_id, factory_error) {
+            if let Err(cleanup_error) = self.store.fail_attempt(&stage.stage_run_id, factory_error)
+            {
                 tracing::error!(
                     event = "review_stage_cleanup_failed",
                     stage_run_id = %stage.stage_run_id,

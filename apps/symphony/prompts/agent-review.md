@@ -44,3 +44,6 @@ diff. Use `no_findings: true` only when `findings` is empty. Never invent a SHA,
 path, or line outside the supplied context. If the context is insufficient,
 return a concise `spec_conformance_summary` and an actionable finding rather
 than prose outside the JSON object.
+
+The trusted coordinator will move the issue to `Human Review` after feedback is
+resolved; this read-only worker must not perform that transition itself.

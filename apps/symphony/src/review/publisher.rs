@@ -1,7 +1,10 @@
 //! Idempotent marker-owned findings preview publication.
 
 use crate::error::{Result, SymphonyError};
-use crate::review::domain::{ReviewFindingsArtifactRecord, ReviewPublicationIntent, REVIEW_COMMENT_MARKER_PREFIX, REVIEW_COMMENT_MARKER_SUFFIX};
+use crate::review::domain::{
+    ReviewFindingsArtifactRecord, ReviewPublicationIntent, REVIEW_COMMENT_MARKER_PREFIX,
+    REVIEW_COMMENT_MARKER_SUFFIX,
+};
 use crate::review::findings::render_preview_comment;
 use crate::triage::publisher::TriageCommentPort;
 use crate::triage::runtime::SharedFactoryStore;
@@ -131,7 +134,8 @@ where
         publisher_login: &str,
         max_pages: u32,
     ) -> Result<Option<u64>> {
-        let marker = format!("{REVIEW_COMMENT_MARKER_PREFIX}{intent_id}{REVIEW_COMMENT_MARKER_SUFFIX}");
+        let marker =
+            format!("{REVIEW_COMMENT_MARKER_PREFIX}{intent_id}{REVIEW_COMMENT_MARKER_SUFFIX}");
         for comment in self.comments.list_comments(issue_number, max_pages).await? {
             let Some(body) = comment.body.as_deref() else {
                 continue;
@@ -158,8 +162,8 @@ mod tests {
     use crate::github::client::{GithubIssueComment, GithubUser};
     use crate::implementation::domain::{
         AcceptanceCriterionClaim, CriterionStatus, EvidenceKind, ExecutionProfile,
-        ImplementationEvidence, ImplementationManifest, ManifestStatus,
-        ImplementationPublicationKind,
+        ImplementationEvidence, ImplementationManifest, ImplementationPublicationKind,
+        ManifestStatus,
     };
     use crate::review::domain::ReviewFindingsArtifactRecord;
     use crate::review::manifest::ReviewFindingsManifest;
@@ -247,15 +251,20 @@ mod tests {
             Ok(comment)
         }
 
-        async fn update_comment(&self, comment_id: u64, body: &str) -> Result<GithubIssueComment> {
+        async fn update_comment(
+            &self,
+            comment_id: u64,
+            body: &str,
+        ) -> Result<GithubIssueComment> {
             *self.update_count.lock().unwrap() += 1;
             let mut comments = self.comments.lock().unwrap();
-            let comment = comments
-                .get_mut(&comment_id)
-                .ok_or_else(|| SymphonyError::GithubApiStatus {
-                    status: 404,
-                    message: "missing".to_string(),
-                })?;
+            let comment =
+                comments
+                    .get_mut(&comment_id)
+                    .ok_or_else(|| SymphonyError::GithubApiStatus {
+                        status: 404,
+                        message: "missing".to_string(),
+                    })?;
             comment.body = Some(body.to_string());
             Ok(comment.clone())
         }
@@ -289,7 +298,10 @@ mod tests {
 
     async fn setup_preview_fixture(
         store: &SharedFactoryStore,
-    ) -> (ReviewFindingsArtifactRecord, crate::review::domain::ReviewPublicationIntent) {
+    ) -> (
+        ReviewFindingsArtifactRecord,
+        crate::review::domain::ReviewPublicationIntent,
+    ) {
         let spec_stage = store.claim_spec_attempt(claim_request("spec-cfg")).unwrap();
         let approved = store
             .store_spec_artifact(StoreSpecArtifactRequest {
@@ -366,7 +378,7 @@ mod tests {
                 &implementation.run_id,
                 Some(&implementation.artifact_id),
                 ImplementationPublicationKind::Preview,
-                &serde_json::json!({"mode":"preview"}),
+                &serde_json::json!({"mode": "preview"}),
             )
             .unwrap();
         let draft = store
@@ -384,7 +396,9 @@ mod tests {
             })
             .unwrap();
 
-        let review_stage = store.claim_review_attempt(claim_request("review-cfg")).unwrap();
+        let review_stage = store
+            .claim_review_attempt(claim_request("review-cfg"))
+            .unwrap();
         let attempt_id = "review-attempt".to_string();
         store
             .store_review_attempt_inputs(StoreReviewAttemptRequest {
@@ -443,7 +457,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(*comments.create_count.lock().unwrap(), 1);
-        assert_eq!(store.list_pending_review_publications().unwrap(), Vec::new());
+        assert_eq!(
+            store.list_pending_review_publications().unwrap(),
+            Vec::new()
+        );
         let first = comments
             .comments
             .lock()

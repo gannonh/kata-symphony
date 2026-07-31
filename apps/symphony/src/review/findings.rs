@@ -3,8 +3,10 @@
 use std::collections::BTreeMap;
 
 use crate::github::client::GithubPullRequestFile;
-use crate::review::domain::{ReviewFindingsArtifactRecord, REVIEW_COMMENT_MARKER_PREFIX, REVIEW_COMMENT_MARKER_SUFFIX};
-use crate::review::manifest::{ReviewedFile, ReviewedLineRange, ReviewSeverity};
+use crate::review::domain::{
+    ReviewFindingsArtifactRecord, REVIEW_COMMENT_MARKER_PREFIX, REVIEW_COMMENT_MARKER_SUFFIX,
+};
+use crate::review::manifest::{ReviewSeverity, ReviewedFile, ReviewedLineRange};
 
 /// Convert GitHub file patches into the right-side line ranges accepted by
 /// review comments. A hunk's full new-file span includes both changed and
@@ -85,21 +87,27 @@ pub fn render_preview_comment(
                 body.push_str(&format!("| {severity} | {count} |\n"));
             }
         }
-        body.push_str("\n| ID | Severity | Category | Location | Claim |\n| --- | --- | --- | --- | --- |\n");
+        body.push_str(
+            "\n| ID | Severity | Category | Location | Claim |\n| --- | --- | --- | --- | --- |\n",
+        );
         for finding in &artifact.manifest.findings {
-            let end = finding.end_line.map(|line| format!("-{line}")).unwrap_or_default();
+            let end = finding
+                .end_line
+                .map(|line| format!("-{line}"))
+                .unwrap_or_default();
             body.push_str(&format!(
                 "| `{}` | `{}` | `{}` | `{}`:{}{} | {} |\n",
                 finding.finding_id,
-                serde_json::to_string(&finding.severity).unwrap_or_else(|_| "\"unknown\"".into()).trim_matches('"'),
-                serde_json::to_string(&finding.category).unwrap_or_else(|_| "\"unknown\"".into()).trim_matches('"'),
+                serde_json::to_string(&finding.severity)
+                    .unwrap_or_else(|_| "\"unknown\"".into())
+                    .trim_matches('"'),
+                serde_json::to_string(&finding.category)
+                    .unwrap_or_else(|_| "\"unknown\"".into())
+                    .trim_matches('"'),
                 finding.path,
                 finding.line,
                 end,
-                finding
-                    .claim
-                    .replace(['\r', '\n'], " ")
-                    .replace('|', "\\|")
+                finding.claim.replace(['\r', '\n'], " ").replace('|', "\\|")
             ));
         }
     }

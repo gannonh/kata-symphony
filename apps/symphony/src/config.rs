@@ -1598,9 +1598,7 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
         mode: review_mode,
         prompt: config_string(raw_review.prompt, &review_defaults.prompt),
         model: config_model(raw_review.model),
-        max_turns: raw_review
-            .max_turns
-            .unwrap_or(review_defaults.max_turns),
+        max_turns: raw_review.max_turns.unwrap_or(review_defaults.max_turns),
         invocation_timeout_ms: raw_review
             .invocation_timeout_ms
             .unwrap_or(review_defaults.invocation_timeout_ms),

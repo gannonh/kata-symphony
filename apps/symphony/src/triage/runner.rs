@@ -177,13 +177,16 @@ pub(crate) async fn run_isolated_raw_turn(
     if let Err(message) = validate_request(request) {
         return Err(SymphonyError::TriageError(message));
     }
-    let layout = prepare_attempt(request).map_err(|outcome| {
-        SymphonyError::TriageError(runner_outcome_message(&outcome))
-    })?;
+    let layout = prepare_attempt(request)
+        .map_err(|outcome| SymphonyError::TriageError(runner_outcome_message(&outcome)))?;
     let result = async {
-        let baseline = integrity::capture_baseline(&layout.workspace_path)
-            .map_err(|error| SymphonyError::TriageError(format!("worker baseline failed: {error}")))?;
-        write_json_file(layout.stage_input_path.join("review-context.json"), stage_inputs)?;
+        let baseline = integrity::capture_baseline(&layout.workspace_path).map_err(|error| {
+            SymphonyError::TriageError(format!("worker baseline failed: {error}"))
+        })?;
+        write_json_file(
+            layout.stage_input_path.join("review-context.json"),
+            stage_inputs,
+        )?;
         let usage = match request.harness {
             TriageHarness::Pi => run_pi_turn(request, &layout).await,
             TriageHarness::Codex => run_codex_turn(request, &layout).await,
@@ -195,15 +198,20 @@ pub(crate) async fn run_isolated_raw_turn(
                 layout.output_path.display()
             ))
         })?;
-        integrity::check_repository_integrity(&layout.workspace_path, &baseline).map_err(|error| {
-            SymphonyError::TriageError(format!(
-                "read-only review worker modified the repository: {error}"
-            ))
-        })?;
+        integrity::check_repository_integrity(&layout.workspace_path, &baseline).map_err(
+            |error| {
+                SymphonyError::TriageError(format!(
+                    "read-only review worker modified the repository: {error}"
+                ))
+            },
+        )?;
         scrub_isolated_home(&layout.home_dir).map_err(|error| {
             SymphonyError::TriageError(format!("failed to scrub isolated worker home: {error}"))
         })?;
-        Ok(IsolatedRawTurnResult { output_bytes, usage })
+        Ok(IsolatedRawTurnResult {
+            output_bytes,
+            usage,
+        })
     }
     .await;
     let _ = fs::remove_dir_all(&layout.attempt_root);

@@ -10,11 +10,11 @@ use crate::github::client::GithubClient;
 use crate::github::projects_v2::ProjectsV2Client;
 use crate::http_server::{
     attach_implementation_http_response, attach_review_http_response, attach_spec_http_response,
-    factory_run_http_response,
-    factory_run_metrics_http_response, implementation_run_metrics_http_response,
-    review_run_metrics_http_response, spec_run_metrics_http_response, FactoryArtifactHttpResponse,
-    FactoryRunHttpResponse, FactoryRunMetricsHttpResponse, FactoryRunQuery,
-    ImplementationRunMetricsHttpResponse, ReviewRunMetricsHttpResponse, SpecRunMetricsHttpResponse,
+    factory_run_http_response, factory_run_metrics_http_response,
+    implementation_run_metrics_http_response, review_run_metrics_http_response,
+    spec_run_metrics_http_response, FactoryArtifactHttpResponse, FactoryRunHttpResponse,
+    FactoryRunMetricsHttpResponse, FactoryRunQuery, ImplementationRunMetricsHttpResponse,
+    ReviewRunMetricsHttpResponse, SpecRunMetricsHttpResponse,
 };
 use crate::implementation::coordinator::{
     ImplementationCoordinator, ImplementationCoordinatorConfig,
@@ -40,8 +40,8 @@ use crate::triage::store::{
     PendingAutomaticDispatchGuard, SqliteFactoryStore, StoreArtifactRequest,
     StoreBundleArtifactRequest, StoreImplementationArtifactRequest, StoreImplementationTurnRequest,
     StoreSpecArtifactRequest, StoreSpecTurnRequest, StoreValidationCycleRequest,
-    UpdateReviewAttemptRequest,
-    StoredCommentIdentity, UpsertFactoryRunRequest, UpsertImplementationStateRequest,
+    StoredCommentIdentity, UpdateReviewAttemptRequest, UpsertFactoryRunRequest,
+    UpsertImplementationStateRequest,
 };
 
 /// Shared SQLite factory store for coordinator + HTTP reads.
@@ -485,10 +485,7 @@ impl SharedFactoryStore {
         self.with_store(|store| store.list_a3_eligible_approved_runs(configuration_revision))
     }
 
-    pub fn claim_review_attempt(
-        &self,
-        request: ClaimAttemptRequest,
-    ) -> Result<StageRunRecord> {
+    pub fn claim_review_attempt(&self, request: ClaimAttemptRequest) -> Result<StageRunRecord> {
         self.with_store_mut(|store| {
             store.claim_stage_attempt(crate::review::domain::REVIEW_STAGE_NAME, request)
         })
