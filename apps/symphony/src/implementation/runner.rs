@@ -541,8 +541,22 @@ pub fn resolve_base_commit(repo: &Path, base_branch: &str) -> Result<String> {
         format!("refs/remotes/origin/{base_branch}"),
         base_branch.to_string(),
     ];
+    resolve_commit_candidates(repo, base_branch, &candidates)
+}
+
+/// Resolve a base branch that was fetched from the trusted publication remote.
+pub fn resolve_remote_base_commit(repo: &Path, base_branch: &str) -> Result<String> {
+    let candidates = [format!("refs/remotes/origin/{base_branch}")];
+    resolve_commit_candidates(repo, base_branch, &candidates)
+}
+
+fn resolve_commit_candidates(
+    repo: &Path,
+    base_branch: &str,
+    candidates: &[String],
+) -> Result<String> {
     for candidate in candidates {
-        if let Ok(sha) = git_stdout(repo, &["rev-parse", "--verify", &candidate]) {
+        if let Ok(sha) = git_stdout(repo, &["rev-parse", "--verify", candidate]) {
             if sha.len() >= 40 {
                 return Ok(sha);
             }

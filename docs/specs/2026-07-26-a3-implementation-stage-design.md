@@ -193,7 +193,9 @@ Within one live attempt:
 
 ### Base capture
 
-At claim time, Symphony resolves `workspace.base_branch`, fetches it through the trusted controller, and records its commit SHA. A moving base after claim does not rewrite the worker's commit. The captured SHA is exposed in evidence and the draft PR may show that the branch is behind.
+At claim time, Symphony refreshes `workspace.base_branch` from the pinned publication remote through the trusted controller and records that remote commit SHA. Local commits that are absent from the publication remote are excluded from automatic implementation bases. A moving base after claim does not rewrite the worker's commit. The captured SHA is exposed in evidence and the draft PR may show that the branch is behind.
+
+Automatic publication verifies that the captured SHA remains reachable from the fetched remote base before importing the thin result bundle. Missing base history is a terminal publication conflict; Symphony does not push a branch or retry the same invalid bundle.
 
 ### Credential-free base bundle
 

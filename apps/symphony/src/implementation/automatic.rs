@@ -272,12 +272,14 @@ where
             let sha = request.bundle.sha256.clone();
             let bytes = request.bundle.bytes_len;
             let desired = desired_head.clone();
+            let base_commit = request.bundle.base_commit.clone();
             let intent_id = intent.intent_id.clone();
             let outcome = tokio::task::spawn_blocking(move || {
                 publish_branch(&BranchPublishRequest {
                     artifacts_dir: &arts,
                     bundle_sha256: &sha,
                     bundle_bytes_len: bytes,
+                    base_commit: &base_commit,
                     desired_head: &desired,
                     expected_remote_sha: expected.as_deref(),
                     branch_name: &branch_owned,
@@ -295,7 +297,19 @@ where
                 Ok(value) => value,
                 Err(error) => {
                     let message = error.to_string();
-                    if message.contains("conflict") {
+                    if message.contains("base commit conflict") {
+                        let _ = store.set_implementation_publication_error(
+                            &intent_id,
+                            PublicationStatus::Conflict,
+                            FactoryError::new(
+                                "base_commit_unreachable",
+                                "implementation_publication",
+                                message.clone(),
+                                false,
+                                None,
+                            ),
+                        );
+                    } else if message.contains("conflict") {
                         let _ = store.set_implementation_publication_error(
                             &intent_id,
                             PublicationStatus::Conflict,

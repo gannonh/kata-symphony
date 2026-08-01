@@ -19,7 +19,7 @@ use crate::implementation::artifact::{
 use crate::implementation::automatic::{
     resolve_publication_remote, AutomaticImplementationPublisher, AutomaticPublishRequest,
 };
-use crate::implementation::branch::branch_name_for_issue;
+use crate::implementation::branch::{branch_name_for_issue, fetch_remote_base_branch};
 use crate::implementation::bundle::{
     artifacts_dir, cleanup_incomplete_temps, create_result_bundle, store_blob_atomic, BlobSource,
 };
@@ -33,8 +33,9 @@ use crate::implementation::publisher::{
     DiagnosticPublishRequest, ImplementationPublisher, PreviewPublishRequest, COMMENT_FINAL_STEP,
 };
 use crate::implementation::runner::{
-    assess_postconditions, blob_sha_of_file, resolve_base_commit, ImplementationHarness,
-    ImplementationRunner, ImplementationTurnRequest, LiveImplementationHarness,
+    assess_postconditions, blob_sha_of_file, resolve_base_commit, resolve_remote_base_commit,
+    ImplementationHarness, ImplementationRunner, ImplementationTurnRequest,
+    LiveImplementationHarness,
 };
 use crate::implementation::runtime::implementation_configuration_revision;
 use crate::implementation::validation::ValidationExecutor;
@@ -708,7 +709,45 @@ where
             .base_branch
             .clone()
             .unwrap_or_else(|| "main".to_string());
-        let base_commit = resolve_base_commit(&repo_path, &base_branch)?;
+        let base_commit = if service.implementation.mode == ImplementationMode::Automatic {
+            let repo_owner = service
+                .tracker
+                .repo_owner
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    SymphonyError::InvalidWorkflowConfig(
+                        "tracker.repo_owner is required for automatic implementation".into(),
+                    )
+                })?;
+            let repo_name = service
+                .tracker
+                .repo_name
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    SymphonyError::InvalidWorkflowConfig(
+                        "tracker.repo_name is required for automatic implementation".into(),
+                    )
+                })?;
+            let github_token = resolve_github_token(&service.tracker)
+                .ok_or(SymphonyError::MissingGithubApiToken)?;
+            let remote_url = resolve_publication_remote(
+                &serde_json::json!({}),
+                &self.config.forge_host,
+                repo_owner,
+                repo_name,
+            )?;
+            fetch_remote_base_branch(
+                &repo_path,
+                &remote_url,
+                &base_branch,
+                Some(&github_token.token),
+            )?;
+            resolve_remote_base_commit(&repo_path, &base_branch)?
+        } else {
+            resolve_base_commit(&repo_path, &base_branch)?
+        };
         let execution_profile = if service.workspace.docker.is_some() {
             ExecutionProfile::Docker
         } else {

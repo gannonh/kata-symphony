@@ -68,6 +68,7 @@ pub struct BranchPublishRequest<'a> {
     pub artifacts_dir: &'a Path,
     pub bundle_sha256: &'a str,
     pub bundle_bytes_len: u64,
+    pub base_commit: &'a str,
     pub desired_head: &'a str,
     pub expected_remote_sha: Option<&'a str>,
     pub branch_name: &'a str,
@@ -85,6 +86,7 @@ impl std::fmt::Debug for BranchPublishRequest<'_> {
             .field("artifacts_dir", &self.artifacts_dir)
             .field("bundle_sha256", &self.bundle_sha256)
             .field("bundle_bytes_len", &self.bundle_bytes_len)
+            .field("base_commit", &self.base_commit)
             .field("desired_head", &self.desired_head)
             .field("expected_remote_sha", &self.expected_remote_sha)
             .field("branch_name", &self.branch_name)
@@ -182,6 +184,14 @@ pub fn publish_branch(request: &BranchPublishRequest<'_>) -> Result<BranchPublis
             "git fetch base `{}` failed: {}",
             request.base_branch,
             sanitized_git_stderr(&fetch_base.stderr, request.remote_url, request.github_token)
+        )));
+    }
+
+    let remote_base_ref = format!("refs/remotes/origin/{}", request.base_branch);
+    if !is_ancestor(&repo, request.base_commit, &remote_base_ref)? {
+        return Err(SymphonyError::TriageError(format!(
+            "base commit conflict: captured base {} is not reachable from remote base branch {}",
+            request.base_commit, request.base_branch
         )));
     }
 
@@ -328,6 +338,29 @@ pub fn publish_branch(request: &BranchPublishRequest<'_>) -> Result<BranchPublis
     })
 }
 
+pub(crate) fn fetch_remote_base_branch(
+    repo: &Path,
+    remote_url: &str,
+    base_branch: &str,
+    github_token: Option<&str>,
+) -> Result<()> {
+    let refspec = format!("+refs/heads/{base_branch}:refs/remotes/origin/{base_branch}");
+    let output = run_network_git(
+        Some(repo),
+        &["fetch", "--no-tags", remote_url, &refspec],
+        github_token,
+        "git fetch base",
+        remote_url,
+    )?;
+    if !output.status.success() {
+        return Err(SymphonyError::TriageError(format!(
+            "git fetch base `{base_branch}` failed: {}",
+            sanitized_git_stderr(&output.stderr, remote_url, github_token)
+        )));
+    }
+    Ok(())
+}
+
 fn observe_remote_branch(
     remote_url: &str,
     branch_name: &str,
@@ -367,6 +400,7 @@ fn is_ancestor(repo: &Path, maybe_ancestor: &str, tip: &str) -> Result<bool> {
     let status = Command::new("git")
         .args(["merge-base", "--is-ancestor", maybe_ancestor, tip])
         .current_dir(repo)
+        .stderr(Stdio::null())
         .status()
         .map_err(|error| {
             SymphonyError::TriageError(format!("git merge-base --is-ancestor failed: {error}"))
@@ -699,6 +733,23 @@ mod tests {
         bare
     }
 
+    #[test]
+    fn fetch_remote_base_branch_updates_origin_tracking_ref() {
+        let seed = tempdir().unwrap();
+        let base = init_repo(seed.path());
+        let bare = make_bare_remote(seed.path());
+        let clone = tempdir().unwrap();
+        run_git(clone.path(), &["init"]).unwrap();
+
+        fetch_remote_base_branch(clone.path(), bare.path().to_str().unwrap(), "main", None)
+            .unwrap();
+
+        assert_eq!(
+            rev_parse(clone.path(), "refs/remotes/origin/main").unwrap(),
+            base
+        );
+    }
+
     fn prepare_bundle(workspace: &Path, base: &str, head: &str, arts: &Path) -> (String, u64) {
         let bundle_file = workspace.join("result.bundle");
         create_result_bundle(workspace, base, head, &bundle_file).unwrap();
@@ -724,6 +775,7 @@ mod tests {
             artifacts_dir: arts.path(),
             bundle_sha256: &sha,
             bundle_bytes_len: bytes,
+            base_commit: &base,
             desired_head: &head,
             expected_remote_sha: None,
             branch_name: "symphony/42",
@@ -738,6 +790,45 @@ mod tests {
         assert_eq!(
             observe_remote_branch(bare.path().to_str().unwrap(), "symphony/42", None).unwrap(),
             Some(head)
+        );
+    }
+
+    #[test]
+    fn bare_remote_missing_captured_base_is_conflict() {
+        let seed = tempdir().unwrap();
+        let remote_base = init_repo(seed.path());
+        let bare = make_bare_remote(seed.path());
+
+        let work = tempdir().unwrap();
+        run_git(work.path(), &["clone", bare.path().to_str().unwrap(), "."]).unwrap();
+        run_git(work.path(), &["config", "user.email", "a3@example.com"]).unwrap();
+        run_git(work.path(), &["config", "user.name", "A3 Test"]).unwrap();
+        let captured_base = commit_file(work.path(), "setup.txt", "local\n", "local base");
+        let head = commit_file(work.path(), "feature.rs", "impl\n", "feature");
+
+        let arts = tempdir().unwrap();
+        let (sha, bytes) = prepare_bundle(work.path(), &remote_base, &head, arts.path());
+
+        let err = publish_branch(&BranchPublishRequest {
+            artifacts_dir: arts.path(),
+            bundle_sha256: &sha,
+            bundle_bytes_len: bytes,
+            base_commit: &captured_base,
+            desired_head: &head,
+            expected_remote_sha: None,
+            branch_name: "symphony/42",
+            base_branch: "main",
+            remote_url: bare.path().to_str().unwrap(),
+            github_token: None,
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("base commit conflict"),
+            "expected base conflict, got {err}"
+        );
+        assert_eq!(
+            observe_remote_branch(bare.path().to_str().unwrap(), "symphony/42", None).unwrap(),
+            None
         );
     }
 
@@ -765,6 +856,7 @@ mod tests {
             artifacts_dir: arts.path(),
             bundle_sha256: &sha,
             bundle_bytes_len: bytes,
+            base_commit: &base,
             desired_head: &head,
             expected_remote_sha: Some(&head),
             branch_name: "symphony/42",
@@ -802,6 +894,7 @@ mod tests {
             artifacts_dir: arts.path(),
             bundle_sha256: &sha,
             bundle_bytes_len: bytes,
+            base_commit: &base,
             desired_head: &head,
             expected_remote_sha: Some(&mid),
             branch_name: "symphony/42",
@@ -850,6 +943,7 @@ mod tests {
             artifacts_dir: arts.path(),
             bundle_sha256: &sha,
             bundle_bytes_len: bytes,
+            base_commit: &base,
             desired_head: &ours,
             expected_remote_sha: Some(&base),
             branch_name: "symphony/42",
