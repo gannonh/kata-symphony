@@ -617,6 +617,44 @@ mod tests {
         (dir, head)
     }
 
+    #[test]
+    fn remote_base_resolution_ignores_local_branch_ahead_of_remote() {
+        let (repo, remote_base) = init_repo();
+        assert!(Command::new("git")
+            .args(["branch", "-M", "main"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        fs::write(repo.path().join("local.txt"), "local\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "local.txt"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-m", "local-only"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        let local_tip = git_stdout(repo.path(), &["rev-parse", "HEAD"]).unwrap();
+        assert_ne!(local_tip, remote_base);
+        assert!(Command::new("git")
+            .args(["update-ref", "refs/remotes/origin/main", &remote_base])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+
+        assert_eq!(resolve_base_commit(repo.path(), "main").unwrap(), local_tip);
+        assert_eq!(
+            resolve_remote_base_commit(repo.path(), "main").unwrap(),
+            remote_base
+        );
+    }
+
     struct CommitHarness {
         spec_path: String,
         spec_bytes: Vec<u8>,
