@@ -1508,14 +1508,17 @@ fn read_prompt(workflow_dir: &Path, relative: &str) -> Result<String> {
 }
 
 fn resolve_path(value: &str, field: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(value);
-    if !path.exists() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         return Err(SymphonyError::InvalidWorkflowConfig(format!(
-            "{field} does not exist: {}",
-            path.display()
+            "{field} cannot be empty for the implementation stage"
         )));
     }
-    Ok(path)
+    crate::path_safety::canonicalize(Path::new(trimmed)).map_err(|error| {
+        SymphonyError::InvalidWorkflowConfig(format!(
+            "failed to resolve {field} '{trimmed}' for the implementation stage: {error}"
+        ))
+    })
 }
 
 fn agent_command(service: &ServiceConfig) -> Result<Vec<String>> {
@@ -1684,7 +1687,19 @@ mod tests {
     use std::collections::HashMap;
     use std::process::Command;
     use std::sync::Mutex;
-    use tempfile::tempdir;
+    use tempfile::{tempdir, tempdir_in};
+
+    #[test]
+    fn implementation_paths_are_absolute_for_child_process_environment() {
+        let cwd = std::env::current_dir().unwrap();
+        let tmp = tempdir_in(&cwd).unwrap();
+        let relative = tmp.path().strip_prefix(&cwd).unwrap();
+
+        let resolved = resolve_path(relative.to_str().unwrap(), "workspace.root").unwrap();
+
+        assert_eq!(resolved, tmp.path());
+        assert!(resolved.is_absolute());
+    }
 
     #[derive(Default)]
     struct FakeComments {
