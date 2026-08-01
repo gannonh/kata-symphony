@@ -1,7 +1,7 @@
 //! A4 eligibility, read-only dispatch, manifest validation, and preview.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -12,6 +12,7 @@ use crate::domain::{AgentBackend, ServiceConfig};
 use crate::error::{Result, SymphonyError};
 use crate::github::client::GithubClient;
 use crate::github::projects_v2::ProjectsV2Client;
+use crate::path_safety::canonicalize;
 use crate::review::domain::ReviewConfig;
 use crate::review::findings::reviewed_files;
 use crate::review::manifest::parse_and_validate_review_manifest;
@@ -288,7 +289,8 @@ where
                 "workspace.repo is required when review is enabled".to_string(),
             )
         })?;
-        let workspace_root = PathBuf::from(&service.workspace.root);
+        let repo_path = resolve_review_path(repo_path, "workspace.repo")?;
+        let workspace_root = resolve_review_path(&service.workspace.root, "workspace.root")?;
         let command = command_for_review(service)?;
         let mut worker_request = ReviewWorkerRequest {
             attempt_id: attempt_id.clone(),
@@ -582,10 +584,36 @@ where
     }
 }
 
+fn resolve_review_path(value: &str, field: &str) -> Result<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(SymphonyError::InvalidWorkflowConfig(format!(
+            "{field} cannot be empty when review is enabled"
+        )));
+    }
+    canonicalize(Path::new(trimmed)).map_err(|error| {
+        SymphonyError::InvalidWorkflowConfig(format!(
+            "failed to resolve {field} '{trimmed}' for the review stage: {error}"
+        ))
+    })
+}
+
 enum ProcessOutcome {
     Completed,
     Waiting,
     Blocked,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_review_path;
+
+    #[test]
+    fn review_relative_paths_are_resolved_before_worker_setup() {
+        assert!(resolve_review_path(".", "workspace.repo")
+            .unwrap()
+            .is_absolute());
+    }
 }
 
 fn load_review_prompt(workflow_dir: &std::path::Path, service: &ServiceConfig) -> Result<String> {
