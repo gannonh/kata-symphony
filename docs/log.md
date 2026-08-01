@@ -1,5 +1,8 @@
 # Docs Update Log
 
+## 2026-08-01
+* **Implementation preview UAT completed**: Fixed relative Git bundle destinations, canonicalized implementation workspace paths for isolated child environments, and routed validation commands using shell command substitution through `sh`. The direct Ratatui TUI run on `gannonh/uat-symphony` Project #16 published the issue #32 implementation preview with verified bundle metadata, no open pull request, and no `symphony/_32` remote branch. The UAT runbook now keeps typed implementation/review states out of legacy dispatch and uses the available OpenRouter model.
+
 ## 2026-07-30
 * **A3 PR2 shipped, A4 planned**: Roadmap and PRD mark A3 PR2 shipped in [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`) and promote [A4 Agent Review Stage](/specs/2026-07-30-a4-agent-review-stage-design.md) as the next factory slice. Live AC20 UAT was not executed and is deferred by maintainer decision; the verify report stays Incomplete rather than claiming acceptance.
 

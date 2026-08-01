@@ -1,5 +1,8 @@
 # Specs Update Log
 
+## 2026-08-01
+* **Implementation preview runtime hardening**: Relative workflow workspace paths now resolve to absolute paths before child-process execution and Git bundle creation. Validation recognizes shell command substitution, preserving the existing UAT command form. Direct UAT on `gannonh/uat-symphony` Project #16 verified preview publication, bundle metadata, and tracker preservation.
+
 ## 2026-07-30
 * **Operator recovery for blocked publication intents**: [#609](https://github.com/gannonh/kata-symphony/pull/609) adds `symphony publication list-blocked` / `reset <intent-id>`, returning a `blocked` intent to `pending` with `retry_count` cleared and completed steps preserved, recorded as an `implementation_publication_reset` event. Both commands call the orchestrator's admin HTTP routes first and fall back to the durable store only when nothing answers, because the store's exclusive lock is held for as long as Symphony runs. The [A4 spec](/specs/2026-07-30-a4-agent-review-stage-design.md) drops this from its risk list; A4 extends the same command surface and HTTP-first shape to review intents.
 * **A4 spec added**: [A4 Agent Review Stage design](/specs/2026-07-30-a4-agent-review-stage-design.md) promoted to Planned — draft PR to structured, read-only agent review with schema-validated findings and a deterministic comment publisher.
