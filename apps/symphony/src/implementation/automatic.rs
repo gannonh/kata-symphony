@@ -25,6 +25,7 @@ use crate::triage::runtime::SharedFactoryStore;
 use crate::triage::store::StoreDraftPrArtifactRequest;
 use async_trait::async_trait;
 use std::path::Path;
+use std::time::Duration;
 
 /// Re-export step names used by coordinator/tests.
 pub use crate::implementation::branch::BRANCH_PUSHED_STEP as BRANCH_STEP;
@@ -150,6 +151,30 @@ where
             routing,
             pulls,
         }
+    }
+
+    async fn set_completion_route_state(&self, issue_number: u64, state: &str) -> Result<()> {
+        const MAX_ATTEMPTS: usize = 3;
+
+        for attempt in 0..MAX_ATTEMPTS {
+            self.routing
+                .set_issue_project_state(issue_number, state)
+                .await?;
+            let observed = self.routing.issue_project_state(issue_number).await?;
+            if observed
+                .as_deref()
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case(state))
+            {
+                return Ok(());
+            }
+            if attempt + 1 < MAX_ATTEMPTS {
+                tokio::time::sleep(Duration::from_millis(250 * (attempt as u64 + 1))).await;
+            }
+        }
+
+        Err(SymphonyError::TriageError(format!(
+            "completion route state '{state}' was not observed for issue {issue_number}"
+        )))
     }
 
     pub async fn publish_automatic(
@@ -436,8 +461,7 @@ where
                     .remove_issue_label(request.issue_number, request.approval_route_label)
                     .await?;
             }
-            self.routing
-                .set_issue_project_state(request.issue_number, request.completion_route_state)
+            self.set_completion_route_state(request.issue_number, request.completion_route_state)
                 .await?;
             let projection = serde_json::json!({
                 "step": ROUTE_APPLIED_STEP,

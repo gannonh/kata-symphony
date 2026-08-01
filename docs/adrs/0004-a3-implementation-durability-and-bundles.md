@@ -15,7 +15,7 @@ Accepted — A3 PR1; extended by A3 PR2 (draft-PR artifacts and progressive publ
 
 ## Context
 
-A3 turns a pinned A2 approved specification into a validated change bundle and (in PR2) a linked draft GitHub PR. Code-sized Git bundles do not belong in SQLite. Workers must not receive forge mutation credentials. Preview publication must be idempotent without advancing tracker state. Automatic publication must reconcile expected branch/PR projections without force-push and must not advance tracker state before a verified draft-PR artifact exists.
+A3 turns a pinned A2 approved specification into a validated change bundle and (in PR2) a linked draft GitHub PR. Code-sized Git bundles do not belong in SQLite. Workers must not receive forge mutation credentials. Preview publication must be idempotent without advancing tracker state. Automatic publication must reconcile expected branch/PR projections without force-push and must not advance tracker state before a verified draft-PR artifact exists. Completion route state is verified after label removal and retried within a bounded window to absorb Projects automation races.
 
 ## Decision
 

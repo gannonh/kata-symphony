@@ -1,7 +1,7 @@
 # Docs Update Log
 
 ## 2026-08-01
-* **Automatic publication base provenance hardened**: Automatic implementation refreshes the pinned remote base before capturing its commit, and publication rejects a captured base that is absent from the remote before importing a thin result bundle. This prevents local-only UAT/configuration commits from producing an opaque retry loop.
+* **Automatic publication and review hardening**: Automatic implementation refreshes the pinned remote base before capturing its commit, verifies the completion route after label/state mutations, and publication rejects a captured base that is absent from the remote before importing a thin result bundle. The review coordinator resolves relative repository/workspace paths before isolated worker setup. These checks prevent local-only UAT/configuration commits, Projects automation races, and relative-path failures from producing opaque UAT stalls.
 * **Implementation preview UAT completed**: Fixed relative Git bundle destinations, canonicalized implementation workspace paths for isolated child environments, and routed validation commands using shell command substitution through `sh`. The direct Ratatui TUI run on `gannonh/uat-symphony` Project #16 published the issue #32 implementation preview with verified bundle metadata, no open pull request, and no `symphony/_32` remote branch. The UAT runbook now keeps typed implementation/review states out of legacy dispatch and uses the available Codex OAuth model.
 
 ## 2026-07-30

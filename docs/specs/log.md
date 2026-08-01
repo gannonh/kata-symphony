@@ -1,7 +1,7 @@
 # Specs Update Log
 
 ## 2026-08-01
-* **Automatic publication base provenance hardened**: Automatic implementation refreshes the configured remote base before capturing the attempt SHA, and branch publication verifies that the pinned base remains reachable before importing the thin result bundle. A missing base is a terminal publication conflict with no branch push or retry loop.
+* **Automatic publication and review hardening**: Automatic implementation refreshes the configured remote base before capturing the attempt SHA, verifies the completion route after label/state mutations, and branch publication verifies that the pinned base remains reachable before importing the thin result bundle. The review coordinator resolves relative repository/workspace paths before isolated worker setup. Missing base history is a terminal publication conflict with no branch push or retry loop.
 * **Implementation preview runtime hardening**: Relative workflow workspace paths now resolve to absolute paths before child-process execution and Git bundle creation. Validation recognizes shell command substitution, preserving the existing UAT command form. Direct UAT on `gannonh/uat-symphony` Project #16 verified preview publication, bundle metadata, and tracker preservation.
 
 ## 2026-07-30
