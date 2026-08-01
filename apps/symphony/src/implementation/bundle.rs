@@ -42,6 +42,7 @@ pub fn blob_path(artifacts_dir: &Path, sha256: &str) -> PathBuf {
 
 /// Create a verified base bundle containing `commit` from `repo`.
 pub fn create_base_bundle(repo: &Path, commit: &str, dest: &Path) -> Result<()> {
+    let dest = absolute_output_path(dest)?;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             SymphonyError::StorageError(format!(
@@ -68,7 +69,7 @@ pub fn create_base_bundle(repo: &Path, commit: &str, dest: &Path) -> Result<()> 
     )?;
     let output = Command::new("git")
         .args(["bundle", "create"])
-        .arg(dest)
+        .arg(&dest)
         .arg("HEAD")
         .current_dir(worktree.path())
         .output();
@@ -86,12 +87,13 @@ pub fn create_base_bundle(repo: &Path, commit: &str, dest: &Path) -> Result<()> 
             String::from_utf8_lossy(&output.stderr).trim()
         )));
     }
-    verify_bundle(dest)?;
+    verify_bundle(&dest)?;
     Ok(())
 }
 
 /// Create a verified result bundle for `base..head` from `workspace`.
 pub fn create_result_bundle(workspace: &Path, base: &str, head: &str, dest: &Path) -> Result<()> {
+    let dest = absolute_output_path(dest)?;
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             SymphonyError::StorageError(format!(
@@ -118,7 +120,7 @@ pub fn create_result_bundle(workspace: &Path, base: &str, head: &str, dest: &Pat
     let range = format!("{base}..HEAD");
     let output = Command::new("git")
         .args(["bundle", "create"])
-        .arg(dest)
+        .arg(&dest)
         .arg(&range)
         .current_dir(worktree.path())
         .output();
@@ -137,7 +139,7 @@ pub fn create_result_bundle(workspace: &Path, base: &str, head: &str, dest: &Pat
         )));
     }
     // Thin result bundles require the workspace (which has `base`) for verify.
-    verify_bundle_in(workspace, dest)?;
+    verify_bundle_in(workspace, &dest)?;
     Ok(())
 }
 
@@ -455,6 +457,20 @@ fn sync_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn absolute_output_path(path: &Path) -> Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(path))
+        .map_err(|error| {
+            SymphonyError::StorageError(format!(
+                "failed resolving bundle output path {}: {error}",
+                path.display()
+            ))
+        })
+}
+
 fn run_git(cwd: &Path, args: &[&str]) -> Result<()> {
     let output = Command::new("git")
         .args(args)
@@ -533,6 +549,30 @@ mod tests {
         clone_from_bundle(&bundle, &workspace).unwrap();
         assert_eq!(head_sha(&workspace), commit);
         assert!(workspace.join("README.md").is_file());
+    }
+
+    #[test]
+    fn relative_bundle_destinations_work_from_a_temporary_git_worktree() {
+        let repo = init_tiny_repo();
+        let base = head_sha(repo.path());
+        fs::write(repo.path().join("code.rs"), "fn main() {}\n").unwrap();
+        run_git(repo.path(), &["add", "code.rs"]).unwrap();
+        run_git(repo.path(), &["commit", "-m", "impl"]).unwrap();
+        let head = head_sha(repo.path());
+
+        let cwd = std::env::current_dir().unwrap();
+        let tmp = tempfile::tempdir_in(&cwd).unwrap();
+        let relative_dir = tmp.path().strip_prefix(&cwd).unwrap();
+        let base_bundle = relative_dir.join("base.bundle");
+        let result_bundle = relative_dir.join("result.bundle");
+
+        create_base_bundle(repo.path(), &base, &base_bundle).unwrap();
+        create_result_bundle(repo.path(), &base, &head, &result_bundle).unwrap();
+
+        assert!(tmp.path().join("base.bundle").is_file());
+        assert!(tmp.path().join("result.bundle").is_file());
+        verify_bundle(&base_bundle).unwrap();
+        verify_bundle_in(repo.path(), &tmp.path().join("result.bundle")).unwrap();
     }
 
     #[test]
