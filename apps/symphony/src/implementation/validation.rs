@@ -274,7 +274,11 @@ fn disposable_validation_home(workspace: &Path) -> Result<PathBuf> {
 fn split_command(command: &str) -> Result<Vec<String>> {
     // Prefer shell-words when the string is a simple argv; fall back to `sh -c`
     // for operators that shell_words cannot express (`&&`, pipes, redirects).
-    if command.contains(['|', ';', '>', '<']) || command.contains("&&") || command.contains("||") {
+    if command.contains(['|', ';', '>', '<'])
+        || command.contains("&&")
+        || command.contains("||")
+        || command.contains("$(")
+    {
         return Ok(vec![command.to_string()]);
     }
     shell_words::split(command).map_err(|error| {
@@ -283,7 +287,10 @@ fn split_command(command: &str) -> Result<Vec<String>> {
 }
 
 fn looks_like_shell_script(first: &str) -> bool {
-    first.contains(['|', ';', '>', '<']) || first.contains("&&") || first.contains("||")
+    first.contains(['|', ';', '>', '<'])
+        || first.contains("&&")
+        || first.contains("||")
+        || first.contains("$(")
 }
 
 fn bounded_redacted_tail(bytes: &[u8]) -> String {
@@ -371,6 +378,28 @@ mod tests {
         assert!(!outcome.commands[1].passed);
         assert_eq!(outcome.commands[1].exit_code, Some(1));
         assert_eq!(outcome.commands[1].cycle, 2);
+    }
+
+    #[tokio::test]
+    async fn validation_runs_command_substitution_through_shell() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("README.md"), "# Symphony\n").unwrap();
+        let executor = ValidationExecutor::new(ExecutionProfile::Local);
+        let outcome = executor
+            .run_cycle(
+                dir.path(),
+                &[cmd(
+                    "readme-heading",
+                    r##"test "$(head -n 1 README.md)" = "# Symphony""##,
+                    5_000,
+                )],
+                1,
+            )
+            .await
+            .unwrap();
+
+        assert!(outcome.passed);
+        assert_eq!(outcome.commands[0].exit_code, Some(0));
     }
 
     #[tokio::test]
