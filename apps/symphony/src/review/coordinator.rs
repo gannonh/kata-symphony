@@ -864,20 +864,6 @@ where
         let publisher =
             ReviewPublisher::with_owner(self.comments.clone(), self.config.owner_instance.clone());
         let pending = self.store.list_pending_review_publications()?;
-        let has_automatic = pending.iter().any(|intent| intent.kind == "automatic");
-        let project_data = if has_automatic {
-            let field = self
-                .projects
-                .resolve_status_field(&self.config.project_owner, self.config.project_number)
-                .await?;
-            let items = self
-                .projects
-                .query_all_items(&field.project_id, self.config.max_pages)
-                .await?;
-            Some((field, items))
-        } else {
-            None
-        };
 
         for intent in pending {
             let Some(artifact) = self.store.get_review_artifact(&intent.artifact_id)? else {
@@ -917,13 +903,31 @@ where
                 continue;
             };
 
+            let pr_number = if intent.kind == "automatic" {
+                let Some(pr_number) = review_publication_pr_number(&intent.desired_effects) else {
+                    let error = FactoryError::new(
+                        "review_publication_missing_pr_number",
+                        "review_publisher",
+                        format!("review intent {} is missing pr_number", intent.intent_id),
+                        false,
+                        None,
+                    );
+                    self.record_publication_failure(
+                        &intent,
+                        error.clone(),
+                        service.review.max_attempts,
+                    )?;
+                    self.record_reconciliation_blocked(&intent, &error)?;
+                    continue;
+                };
+                Some(pr_number)
+            } else {
+                None
+            };
+
             let result = if intent.kind == "automatic" {
                 let publisher_result = async {
-                    let pr_number = intent
-                        .desired_effects
-                        .get("pr_number")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(issue_number);
+                    let pr_number = pr_number.expect("automatic review intent has PR number");
                     let expected_head = intent
                         .desired_effects
                         .get("reviewed_head_sha")
@@ -980,46 +984,51 @@ where
                         Ok(ReviewPublicationResult::Waiting)
                     }
                     Err(error) => Err(error),
-                    Ok(ReviewPublicationResult::Published) => self
-                        .apply_automatic_route_with_data(
-                            service,
-                            &intent,
-                            issue_number,
-                            project_data.as_ref().expect("automatic project data"),
-                        )
-                        .await
-                        .and_then(|applied| {
-                            if !applied {
-                                return Ok(ReviewPublicationResult::Published);
-                            }
-                            let latest = self
-                                .store
-                                .get_review_publication_intent(&intent.intent_id)?
-                                .ok_or_else(|| {
-                                    SymphonyError::StorageError(format!(
-                                        "review intent {} disappeared during reconciliation",
-                                        intent.intent_id
-                                    ))
-                                })?;
-                            if latest
-                                .completed_steps
-                                .iter()
-                                .any(|step| step == "comment_final")
-                            {
-                                return Ok(ReviewPublicationResult::Published);
-                            }
-                            self.store.record_review_publication_step(
-                                &intent.intent_id,
-                                "comment_final",
-                                crate::triage::domain::PublicationStatus::Pending,
-                                &serde_json::json!({
-                                    "review_id": latest.review_id,
-                                    "review_url": latest.review_url,
-                                    "route_state": latest.route_state,
-                                }),
-                            )?;
-                            Ok(ReviewPublicationResult::Published)
-                        }),
+                    Ok(ReviewPublicationResult::Published) => {
+                        let latest = self
+                            .store
+                            .get_review_publication_intent(&intent.intent_id)?
+                            .ok_or_else(|| {
+                                SymphonyError::StorageError(format!(
+                                    "review intent {} disappeared during reconciliation",
+                                    intent.intent_id
+                                ))
+                            })?;
+                        self.apply_automatic_route(service, &latest, issue_number)
+                            .await
+                            .and_then(|applied| {
+                                if !applied {
+                                    return Ok(ReviewPublicationResult::Published);
+                                }
+                                let latest = self
+                                    .store
+                                    .get_review_publication_intent(&intent.intent_id)?
+                                    .ok_or_else(|| {
+                                        SymphonyError::StorageError(format!(
+                                            "review intent {} disappeared during reconciliation",
+                                            intent.intent_id
+                                        ))
+                                    })?;
+                                if latest
+                                    .completed_steps
+                                    .iter()
+                                    .any(|step| step == "comment_final")
+                                {
+                                    return Ok(ReviewPublicationResult::Published);
+                                }
+                                self.store.record_review_publication_step(
+                                    &intent.intent_id,
+                                    "comment_final",
+                                    crate::triage::domain::PublicationStatus::Pending,
+                                    &serde_json::json!({
+                                        "review_id": latest.review_id,
+                                        "review_url": latest.review_url,
+                                        "route_state": latest.route_state,
+                                    }),
+                                )?;
+                                Ok(ReviewPublicationResult::Published)
+                            })
+                    }
                 }
             } else {
                 publisher
@@ -1342,6 +1351,10 @@ fn pull_revision_changed(
     before.head.sha != after.head.sha || before.base.sha != after.base.sha
 }
 
+fn review_publication_pr_number(effects: &serde_json::Value) -> Option<u64> {
+    effects.get("pr_number").and_then(serde_json::Value::as_u64)
+}
+
 fn review_route_state(
     artifact: &crate::review::domain::ReviewFindingsArtifactRecord,
     service: &ServiceConfig,
@@ -1406,7 +1419,10 @@ enum ReviewPublicationResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{pull_revision_changed, resolve_review_path, review_attempt_retry_exhausted};
+    use super::{
+        pull_revision_changed, resolve_review_path, review_attempt_retry_exhausted,
+        review_publication_pr_number,
+    };
     use crate::github::client::{GithubPullRequest, GithubPullRequestRef};
 
     #[test]
@@ -1416,6 +1432,18 @@ mod tests {
         assert!(!review_attempt_retry_exhausted(0, 2));
         assert!(review_attempt_retry_exhausted(1, 2));
         assert!(!review_attempt_retry_exhausted(0, 2));
+    }
+
+    #[test]
+    fn review_publication_requires_a_durable_pr_number() {
+        assert_eq!(
+            review_publication_pr_number(&serde_json::json!({"issue_number": 42})),
+            None
+        );
+        assert_eq!(
+            review_publication_pr_number(&serde_json::json!({"pr_number": 46})),
+            Some(46)
+        );
     }
 
     fn pull(head: &str, base: &str) -> GithubPullRequest {

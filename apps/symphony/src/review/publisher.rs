@@ -263,6 +263,17 @@ where
                         return Err(error);
                     }
                 };
+                let live_head = review_port
+                    .pull_request_head_sha(pull_request_number)
+                    .await?;
+                if live_head != artifact.reviewed_head_sha {
+                    store
+                        .clear_review_publication_lease(&intent.intent_id, &self.owner_instance)?;
+                    return Err(SymphonyError::TriageError(format!(
+                        "review cycle reopened after formal review creation: live head {} does not match expected {}",
+                        live_head, artifact.reviewed_head_sha
+                    )));
+                }
                 Some(created)
             }
         };
@@ -606,6 +617,7 @@ mod tests {
         login: String,
         head_sha: Mutex<String>,
         change_head_on_create: Mutex<bool>,
+        change_head_after_create: Mutex<bool>,
         reviews: Mutex<Vec<GithubPullRequestReview>>,
         review_payloads: Mutex<Vec<(String, Vec<GithubPullRequestReviewComment>)>>,
     }
@@ -616,6 +628,7 @@ mod tests {
                 login: login.to_string(),
                 head_sha: Mutex::new("head".to_string()),
                 change_head_on_create: Mutex::new(false),
+                change_head_after_create: Mutex::new(false),
                 reviews: Mutex::new(Vec::new()),
                 review_payloads: Mutex::new(Vec::new()),
             })
@@ -670,6 +683,9 @@ mod tests {
                 submitted_at: None,
             };
             self.reviews.lock().unwrap().push(review.clone());
+            if *self.change_head_after_create.lock().unwrap() {
+                *self.head_sha.lock().unwrap() = "new-head".to_string();
+            }
             Ok(review)
         }
     }
@@ -1325,6 +1341,29 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("review cycle reopened"));
         assert!(reviews.review_payloads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn formal_publication_waits_when_successful_create_returns_stale_head() {
+        let (_temp, store) = open_store();
+        let reviews = FakeReviews::new("symphony-bot");
+        *reviews.change_head_after_create.lock().unwrap() = true;
+        let publisher = ReviewPublisher::new(FakeComments::new("symphony-bot"));
+        let (artifact, intent) = setup_review_fixture(&store, "formal").await;
+
+        let error = publisher
+            .publish_formal(&store, &reviews, &intent, &artifact, 42, 2)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("review cycle reopened"));
+        assert_eq!(reviews.review_payloads.lock().unwrap().len(), 1);
+        assert_eq!(reviews.reviews.lock().unwrap().len(), 1);
+        let persisted = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert!(persisted.completed_steps.is_empty());
+        assert_eq!(persisted.retry_count, 0);
     }
 
     #[tokio::test]
