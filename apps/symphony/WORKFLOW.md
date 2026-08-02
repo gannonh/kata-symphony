@@ -132,6 +132,24 @@ server:
 #       timeout_ms: 1800000
 #   # completion_route:
 #   #   state: Agent Review
+# A4 agent review stage. Requires an approved A2 specification and A3 draft PR.
+# review:
+#   enabled: false
+#   mode: preview                 # preview or automatic
+#   prompt: prompts/agent-review.md
+#   # model: provider/model-name  # Pi only
+#   max_turns: 1
+#   invocation_timeout_ms: 1800000
+#   max_attempts: 3
+#   max_reprompts: 2
+#   max_findings: 50
+#   blocking_severity: blocking   # blocking, major, minor, or nit
+#   trigger_state: Agent Review
+#   # permission_probe_pull_request: 123  # optional deterministic doctor probe
+#   # completion_route:
+#   #   state: Human Review
+#   # changes_requested_route:
+#   #   state: Implementation
 # notifications:
 #   slack:
 #     webhook_url: $SLACK_WEBHOOK_URL
