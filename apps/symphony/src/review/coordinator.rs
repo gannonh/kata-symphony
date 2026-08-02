@@ -295,7 +295,7 @@ where
         let mut worker_request = ReviewWorkerRequest {
             attempt_id: attempt_id.clone(),
             workspace_root,
-            repo_path: PathBuf::from(repo_path),
+            repo_path,
             command,
             prompt,
             config: service.review.clone(),
