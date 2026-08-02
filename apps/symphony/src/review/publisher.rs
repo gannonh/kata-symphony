@@ -12,9 +12,77 @@ use crate::triage::runtime::SharedFactoryStore;
 use uuid::Uuid;
 
 pub const REVIEW_PREVIEW_COMMENT_STEP: &str = "review_preview_comment";
-const REVIEW_PUBLICATION_LEASE_SECONDS: i64 = 900;
+pub const REVIEW_PUBLICATION_LEASE_SECONDS: i64 = 900;
 pub const REVIEW_CREATED_STEP: &str = "review_created";
 pub const FINDINGS_RECORDED_STEP: &str = "findings_recorded";
+const REVIEW_PUBLICATION_LEASE_RENEW_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(1);
+
+/// Keep a claimed publication lease fenced while a forge request is in flight.
+///
+/// The durable write guards remain authoritative after the request returns. The
+/// heartbeat prevents a healthy but slow request from becoming reclaimable
+/// during normal operation.
+pub(crate) struct ReviewPublicationLeaseGuard {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ReviewPublicationLeaseGuard {
+    pub(crate) fn start(store: &SharedFactoryStore, intent_id: &str, owner: &str) -> Self {
+        let (stop, mut stopped) = tokio::sync::oneshot::channel();
+        let shared_store = store.clone();
+        let intent_id = intent_id.to_string();
+        let owner = owner.to_string();
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(REVIEW_PUBLICATION_LEASE_RENEW_INTERVAL);
+            loop {
+                tokio::select! {
+                    _ = &mut stopped => break,
+                    _ = interval.tick() => {
+                        match shared_store.renew_review_publication_lease(
+                            &intent_id,
+                            &owner,
+                            REVIEW_PUBLICATION_LEASE_SECONDS,
+                        ) {
+                            Ok(true) => {}
+                            Ok(false) => {
+                                tracing::debug!(
+                                    intent_id = %intent_id,
+                                    owner = %owner,
+                                    "review publication lease is no longer owned"
+                                );
+                                break;
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    intent_id = %intent_id,
+                                    owner = %owner,
+                                    error = %error,
+                                    "review publication lease renewal failed"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            stop: Some(stop),
+            task,
+        }
+    }
+}
+
+impl Drop for ReviewPublicationLeaseGuard {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        self.task.abort();
+    }
+}
 
 /// Forge operations required for atomic pull-request review publication.
 #[async_trait::async_trait]
@@ -127,6 +195,8 @@ where
         )? {
             return Ok(false);
         }
+        let _lease =
+            ReviewPublicationLeaseGuard::start(store, &intent.intent_id, &self.owner_instance);
 
         let publisher_login = review_port.authenticated_login().await?;
         let marker = format!(
@@ -214,8 +284,6 @@ where
                     .pull_request_head_sha(pull_request_number)
                     .await?;
                 if live_head != artifact.reviewed_head_sha {
-                    store
-                        .clear_review_publication_lease(&intent.intent_id, &self.owner_instance)?;
                     return Err(SymphonyError::TriageError(format!(
                         "review cycle reopened before formal review creation: live head {} does not match expected {}",
                         live_head, artifact.reviewed_head_sha
@@ -236,10 +304,6 @@ where
                             review_port.pull_request_head_sha(pull_request_number).await;
                         if let Ok(live_head) = live_head {
                             if live_head != artifact.reviewed_head_sha {
-                                store.clear_review_publication_lease(
-                                    &intent.intent_id,
-                                    &self.owner_instance,
-                                )?;
                                 return Err(SymphonyError::TriageError(format!(
                                     "review cycle reopened during formal review creation: live head {} does not match expected {}",
                                     live_head, artifact.reviewed_head_sha
@@ -258,7 +322,6 @@ where
                 .pull_request_head_sha(pull_request_number)
                 .await?;
             if live_head != artifact.reviewed_head_sha {
-                store.clear_review_publication_lease(&intent.intent_id, &self.owner_instance)?;
                 return Err(SymphonyError::TriageError(format!(
                     "review cycle reopened while accepting formal review identity: live head {} does not match expected {}",
                     live_head, artifact.reviewed_head_sha
@@ -273,8 +336,9 @@ where
                 .publisher_login
                 .as_deref()
                 .expect("bound publisher login");
-            store.record_review_publication_step(
+            if !store.record_review_publication_step_owned(
                 &intent.intent_id,
+                &self.owner_instance,
                 REVIEW_CREATED_STEP,
                 crate::triage::domain::PublicationStatus::Pending,
                 &serde_json::json!({
@@ -282,19 +346,25 @@ where
                     "review_url": review_url,
                     "publisher_login": durable_publisher_login,
                 }),
-            )?;
+            )? {
+                return Ok(false);
+            }
         }
 
         if let Some(review) = review {
             let review_url = review.html_url.clone().unwrap_or_default();
-            store.bind_review_publication_review(
+            if !store.bind_review_publication_review_owned(
                 &intent.intent_id,
+                &self.owner_instance,
                 &review.id.to_string(),
                 &review_url,
                 &publisher_login,
-            )?;
-            store.record_review_publication_step(
+            )? {
+                return Ok(false);
+            }
+            if !store.record_review_publication_step_owned(
                 &intent.intent_id,
+                &self.owner_instance,
                 REVIEW_CREATED_STEP,
                 crate::triage::domain::PublicationStatus::Pending,
                 &serde_json::json!({
@@ -302,23 +372,27 @@ where
                     "review_url": review_url,
                     "publisher_login": publisher_login,
                 }),
-            )?;
+            )? {
+                return Ok(false);
+            }
         } else if !review_created && !bound_identity {
             return Err(SymphonyError::TriageError(
                 "formal review has no forge identity to record".to_string(),
             ));
         }
 
-        store.record_review_publication_step(
+        if !store.record_review_publication_step_owned(
             &intent.intent_id,
+            &self.owner_instance,
             FINDINGS_RECORDED_STEP,
             crate::triage::domain::PublicationStatus::Pending,
             &serde_json::json!({
                 "finding_count": artifact.finding_count,
                 "inline_comment_count": comments.len(),
             }),
-        )?;
-        store.clear_review_publication_lease(&intent.intent_id, &self.owner_instance)?;
+        )? {
+            return Ok(false);
+        }
         Ok(true)
     }
 
@@ -344,10 +418,40 @@ where
         {
             return Ok(());
         }
+        if !store.claim_review_publication(
+            &intent.intent_id,
+            &self.owner_instance,
+            REVIEW_PUBLICATION_LEASE_SECONDS,
+        )? {
+            return Ok(());
+        }
+        let _lease =
+            ReviewPublicationLeaseGuard::start(store, &intent.intent_id, &self.owner_instance);
         let body = render_preview_comment(&intent.intent_id, &intent.run_id, artifact);
-        self.upsert_owned_comment(store, intent, issue_number, &body, max_pages)
-            .await?;
-        store.complete_review_publication(&intent.intent_id, REVIEW_PREVIEW_COMMENT_STEP)
+        let result = async {
+            if !self
+                .upsert_owned_comment(store, intent, issue_number, &body, max_pages)
+                .await?
+            {
+                return Ok(false);
+            }
+            store.complete_review_publication_owned(
+                &intent.intent_id,
+                &self.owner_instance,
+                REVIEW_PREVIEW_COMMENT_STEP,
+            )
+        }
+        .await;
+        match result {
+            Ok(completed) => {
+                if !completed {
+                    store
+                        .clear_review_publication_lease(&intent.intent_id, &self.owner_instance)?;
+                }
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn upsert_owned_comment(
@@ -357,7 +461,7 @@ where
         issue_number: u64,
         body: &str,
         max_pages: u32,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let publisher_login = self.comments.authenticated_login().await?;
         let mut comment_id = if let Some(raw) = intent.comment_id.as_deref() {
             raw.parse::<u64>().map_err(|error| {
@@ -372,37 +476,51 @@ where
             found
         } else {
             let created = self.comments.create_comment(issue_number, body).await?;
-            store.bind_review_publication_comment(
+            if !store.bind_review_publication_comment_owned(
                 &intent.intent_id,
+                &self.owner_instance,
                 &created.id.to_string(),
                 &publisher_login,
-            )?;
-            return Ok(());
+            )? {
+                return Ok(false);
+            }
+            return Ok(true);
         };
 
         let existing = match self.comments.get_comment(comment_id).await {
             Ok(existing) => existing,
             Err(SymphonyError::GithubApiStatus { status: 404, .. }) => {
-                store.clear_review_publication_comment(&intent.intent_id)?;
+                if !store.clear_review_publication_comment_owned(
+                    &intent.intent_id,
+                    &self.owner_instance,
+                )? {
+                    return Ok(false);
+                }
                 if let Some(recovered) = self
                     .find_owned_marker(issue_number, &intent.intent_id, &publisher_login, max_pages)
                     .await?
                 {
                     comment_id = recovered;
-                    store.bind_review_publication_comment(
+                    if !store.bind_review_publication_comment_owned(
                         &intent.intent_id,
+                        &self.owner_instance,
                         &comment_id.to_string(),
                         &publisher_login,
-                    )?;
+                    )? {
+                        return Ok(false);
+                    }
                     self.comments.get_comment(comment_id).await?
                 } else {
                     let created = self.comments.create_comment(issue_number, body).await?;
-                    store.bind_review_publication_comment(
+                    if !store.bind_review_publication_comment_owned(
                         &intent.intent_id,
+                        &self.owner_instance,
                         &created.id.to_string(),
                         &publisher_login,
-                    )?;
-                    return Ok(());
+                    )? {
+                        return Ok(false);
+                    }
+                    return Ok(true);
                 }
             }
             Err(error) => return Err(error),
@@ -418,16 +536,19 @@ where
             )));
         }
         self.comments.update_comment(comment_id, body).await?;
-        if intent.comment_id.is_none()
-            || intent.publisher_login.as_deref() != Some(publisher_login.as_str())
-        {
-            store.bind_review_publication_comment(
+        let needs_binding = intent.comment_id.is_none()
+            || intent.publisher_login.as_deref() != Some(publisher_login.as_str());
+        if needs_binding
+            && !store.bind_review_publication_comment_owned(
                 &intent.intent_id,
+                &self.owner_instance,
                 &comment_id.to_string(),
                 &publisher_login,
-            )?;
+            )?
+        {
+            return Ok(false);
         }
-        Ok(())
+        Ok(true)
     }
 
     async fn find_owned_marker(
@@ -1032,7 +1153,7 @@ mod tests {
             .unwrap();
         assert_eq!(comments.comments.lock().unwrap().len(), 1);
         assert_eq!(*comments.create_count.lock().unwrap(), 1);
-        assert_eq!(*comments.update_count.lock().unwrap(), 1);
+        assert_eq!(*comments.update_count.lock().unwrap(), 0);
     }
 
     #[tokio::test]

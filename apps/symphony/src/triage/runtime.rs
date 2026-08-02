@@ -617,10 +617,21 @@ impl SharedFactoryStore {
         self.with_store(|store| store.list_review_publications_for_run(run_id))
     }
 
+    #[cfg(test)]
     pub fn complete_review_publication(&self, intent_id: &str, step: &str) -> Result<()> {
         self.with_store_mut(|store| store.complete_review_publication(intent_id, step))
     }
 
+    pub fn complete_review_publication_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        step: &str,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| store.complete_review_publication_owned(intent_id, owner, step))
+    }
+
+    #[cfg(test)]
     pub fn record_review_publication_step(
         &self,
         intent_id: &str,
@@ -633,6 +644,26 @@ impl SharedFactoryStore {
         })
     }
 
+    pub fn record_review_publication_step_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.record_review_publication_step_owned(
+                intent_id,
+                owner,
+                step,
+                status,
+                expected_projection,
+            )
+        })
+    }
+
+    #[cfg(test)]
     pub fn bind_review_publication_review(
         &self,
         intent_id: &str,
@@ -645,6 +676,26 @@ impl SharedFactoryStore {
         })
     }
 
+    pub fn bind_review_publication_review_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        review_id: &str,
+        review_url: &str,
+        publisher_login: &str,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.bind_review_publication_review_owned(
+                intent_id,
+                owner,
+                review_id,
+                review_url,
+                publisher_login,
+            )
+        })
+    }
+
+    #[cfg(test)]
     pub fn set_review_publication_route_state(
         &self,
         intent_id: &str,
@@ -655,6 +706,18 @@ impl SharedFactoryStore {
         })
     }
 
+    pub fn set_review_publication_route_state_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        route_state: &str,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.set_review_publication_route_state_owned(intent_id, owner, route_state)
+        })
+    }
+
+    #[cfg(test)]
     pub fn bind_review_publication_comment(
         &self,
         intent_id: &str,
@@ -666,14 +729,52 @@ impl SharedFactoryStore {
         })
     }
 
+    pub fn bind_review_publication_comment_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        comment_id: &str,
+        publisher_login: &str,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.bind_review_publication_comment_owned(
+                intent_id,
+                owner,
+                comment_id,
+                publisher_login,
+            )
+        })
+    }
+
+    #[cfg(test)]
     pub fn clear_review_publication_comment(&self, intent_id: &str) -> Result<()> {
         self.with_store_mut(|store| store.clear_review_publication_comment(intent_id))
+    }
+
+    pub fn clear_review_publication_comment_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| store.clear_review_publication_comment_owned(intent_id, owner))
     }
 
     pub fn clear_review_publication_lease(&self, intent_id: &str, owner: &str) -> Result<()> {
         self.with_store_mut(|store| store.clear_review_publication_lease(intent_id, owner))
     }
 
+    pub fn renew_review_publication_lease(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        lease_seconds: i64,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.renew_review_publication_lease(intent_id, owner, lease_seconds)
+        })
+    }
+
+    #[cfg(test)]
     pub fn set_review_publication_error(
         &self,
         intent_id: &str,
@@ -683,6 +784,30 @@ impl SharedFactoryStore {
         self.with_store_mut(|store| store.set_review_publication_error(intent_id, status, error))
     }
 
+    pub fn set_review_publication_error_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        status: PublicationStatus,
+        error: FactoryError,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.set_review_publication_error_owned(intent_id, owner, status, error)
+        })
+    }
+
+    pub fn supersede_review_publication_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        error: FactoryError,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.supersede_review_publication_owned(intent_id, owner, error)
+        })
+    }
+
+    #[cfg(test)]
     pub fn supersede_review_publication(
         &self,
         intent_id: &str,

@@ -16,7 +16,9 @@ use crate::path_safety::canonicalize;
 use crate::review::domain::ReviewConfig;
 use crate::review::findings::reviewed_files;
 use crate::review::manifest::parse_and_validate_review_manifest;
-use crate::review::publisher::ReviewPublisher;
+use crate::review::publisher::{
+    ReviewPublicationLeaseGuard, ReviewPublisher, REVIEW_PUBLICATION_LEASE_SECONDS,
+};
 use crate::review::worker::{
     command_for_review, harness_for_service, model_for_review, ReviewWorker, ReviewWorkerRequest,
 };
@@ -618,6 +620,7 @@ where
                     &intent,
                     classified.clone(),
                     service.review.max_attempts,
+                    &self.config.owner_instance,
                 )?;
                 if matches!(
                     status,
@@ -690,6 +693,7 @@ where
                     &intent,
                     classified.clone(),
                     service.review.max_attempts,
+                    &self.config.owner_instance,
                 )?;
                 if matches!(
                     status,
@@ -734,8 +738,9 @@ where
             if !routed.completed_steps.iter().any(|step| step == "route_applied") {
                 return Ok(ProcessOutcome::Waiting);
             }
-            self.store.record_review_publication_step(
+            if !self.store.record_review_publication_step_owned(
                 &routed.intent_id,
+                &self.config.owner_instance,
                 "comment_final",
                 crate::triage::domain::PublicationStatus::Pending,
                 &serde_json::json!({
@@ -743,7 +748,9 @@ where
                     "review_url": routed.review_url,
                     "route_state": routed.route_state,
                 }),
-            )?;
+            )? {
+                return Ok(ProcessOutcome::Waiting);
+            }
         }
         let final_intent = self
             .store
@@ -894,6 +901,7 @@ where
                     &intent,
                     error.clone(),
                     service.review.max_attempts,
+                    &self.config.owner_instance,
                 )?;
                 self.record_reconciliation_blocked(&intent, &error)?;
                 continue;
@@ -914,6 +922,7 @@ where
                     &intent,
                     error.clone(),
                     service.review.max_attempts,
+                    &self.config.owner_instance,
                 )?;
                 self.record_reconciliation_blocked(&intent, &error)?;
                 continue;
@@ -932,6 +941,7 @@ where
                         &intent,
                         error.clone(),
                         service.review.max_attempts,
+                        &self.config.owner_instance,
                     )?;
                     self.record_reconciliation_blocked(&intent, &error)?;
                     continue;
@@ -1064,8 +1074,9 @@ where
                                 {
                                     return Ok(ReviewPublicationResult::Published);
                                 }
-                                self.store.record_review_publication_step(
+                                if !self.store.record_review_publication_step_owned(
                                     &intent.intent_id,
+                                    &self.config.owner_instance,
                                     "comment_final",
                                     crate::triage::domain::PublicationStatus::Pending,
                                     &serde_json::json!({
@@ -1073,7 +1084,9 @@ where
                                         "review_url": latest.review_url,
                                         "route_state": latest.route_state,
                                     }),
-                                )?;
+                                )? {
+                                    return Ok(ReviewPublicationResult::Waiting);
+                                }
                                 Ok(ReviewPublicationResult::Published)
                             })
                     }
@@ -1122,6 +1135,7 @@ where
                         &intent,
                         classified.clone(),
                         service.review.max_attempts,
+                        &self.config.owner_instance,
                     )?;
                     let latest = self
                         .store
@@ -1151,16 +1165,42 @@ where
         intent: &crate::review::domain::ReviewPublicationIntent,
         issue_number: u64,
     ) -> Result<bool> {
-        let field = self
-            .projects
-            .resolve_status_field(&self.config.project_owner, self.config.project_number)
-            .await?;
-        let items = self
-            .projects
-            .query_all_items(&field.project_id, self.config.max_pages)
-            .await?;
-        self.apply_automatic_route_with_data(service, intent, issue_number, &(field, items))
-            .await
+        if !self.store.claim_review_publication(
+            &intent.intent_id,
+            &self.config.owner_instance,
+            REVIEW_PUBLICATION_LEASE_SECONDS,
+        )? {
+            return Ok(false);
+        }
+        let _lease = ReviewPublicationLeaseGuard::start(
+            &self.store,
+            &intent.intent_id,
+            &self.config.owner_instance,
+        );
+        let result = async {
+            let field = self
+                .projects
+                .resolve_status_field(&self.config.project_owner, self.config.project_number)
+                .await?;
+            let items = self
+                .projects
+                .query_all_items(&field.project_id, self.config.max_pages)
+                .await?;
+            self.apply_automatic_route_with_data(service, intent, issue_number, &(field, items))
+                .await
+        }
+        .await;
+        match result {
+            Ok(true) => Ok(true),
+            Ok(false) => {
+                self.store.clear_review_publication_lease(
+                    &intent.intent_id,
+                    &self.config.owner_instance,
+                )?;
+                Ok(false)
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn apply_automatic_route_with_data(
@@ -1213,14 +1253,22 @@ where
         };
         let current = item.status.as_deref().map(str::trim).unwrap_or("");
         if current.eq_ignore_ascii_case(route_state) {
-            self.store
-                .set_review_publication_route_state(&intent.intent_id, route_state)?;
-            self.store.record_review_publication_step(
+            if !self.store.set_review_publication_route_state_owned(
                 &intent.intent_id,
+                &self.config.owner_instance,
+                route_state,
+            )? {
+                return Ok(false);
+            }
+            if !self.store.record_review_publication_step_owned(
+                &intent.intent_id,
+                &self.config.owner_instance,
                 "route_applied",
                 crate::triage::domain::PublicationStatus::Pending,
                 &serde_json::json!({"route_state": route_state, "already_applied": true}),
-            )?;
+            )? {
+                return Ok(false);
+            }
             return Ok(true);
         }
         let trigger = intent
@@ -1260,14 +1308,22 @@ where
                 "Projects v2 route update for issue {issue_number} did not reach '{route_state}'"
             )));
         }
-        self.store
-            .set_review_publication_route_state(&intent.intent_id, route_state)?;
-        self.store.record_review_publication_step(
+        if !self.store.set_review_publication_route_state_owned(
             &intent.intent_id,
+            &self.config.owner_instance,
+            route_state,
+        )? {
+            return Ok(false);
+        }
+        if !self.store.record_review_publication_step_owned(
+            &intent.intent_id,
+            &self.config.owner_instance,
             "route_applied",
             crate::triage::domain::PublicationStatus::Pending,
             &serde_json::json!({"route_state": route_state, "option_id": target.id}),
-        )?;
+        )? {
+            return Ok(false);
+        }
         Ok(true)
     }
 
@@ -1276,6 +1332,7 @@ where
         intent: &crate::review::domain::ReviewPublicationIntent,
         error: FactoryError,
         max_attempts: u32,
+        owner: &str,
     ) -> Result<crate::triage::domain::PublicationStatus> {
         let next = intent.retry_count.saturating_add(1);
         let status = if error.code == "review_publication_conflict" {
@@ -1285,9 +1342,28 @@ where
         } else {
             crate::triage::domain::PublicationStatus::Pending
         };
-        self.store
-            .set_review_publication_error(&intent.intent_id, status, error)?;
-        Ok(status)
+        if self.store.claim_review_publication(
+            &intent.intent_id,
+            owner,
+            REVIEW_PUBLICATION_LEASE_SECONDS,
+        )? && self.store.set_review_publication_error_owned(
+            &intent.intent_id,
+            owner,
+            status,
+            error,
+        )? {
+            return Ok(status);
+        }
+        let latest = self
+            .store
+            .get_review_publication_intent(&intent.intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!(
+                    "review intent {} disappeared while recording publication failure",
+                    intent.intent_id
+                ))
+            })?;
+        Ok(latest.status)
     }
 
     fn record_reconciliation_blocked(
@@ -1334,7 +1410,18 @@ where
         error: FactoryError,
     ) -> Result<()> {
         let store = self.store.clone();
-        if !store.supersede_review_publication(intent_id, error.clone())? {
+        if !store.claim_review_publication(
+            intent_id,
+            &self.config.owner_instance,
+            REVIEW_PUBLICATION_LEASE_SECONDS,
+        )? {
+            return Ok(());
+        }
+        if !store.supersede_review_publication_owned(
+            intent_id,
+            &self.config.owner_instance,
+            error.clone(),
+        )? {
             return Ok(());
         }
         self.record_event(

@@ -4142,7 +4142,7 @@ impl SqliteFactoryStore {
                 "UPDATE review_publication_intents
                  SET lease_owner = ?1, lease_expires_at = ?2, updated_at = ?3
                  WHERE intent_id = ?4 AND status = 'pending'
-                   AND (lease_owner IS NULL OR lease_expires_at IS NULL
+                   AND (lease_owner = ?1 OR lease_owner IS NULL OR lease_expires_at IS NULL
                         OR lease_expires_at <= ?3)",
                 params![owner, expires_s, now_s, intent_id],
             )
@@ -4160,6 +4160,28 @@ impl SqliteFactoryStore {
             )
             .map_err(storage_error)?;
         Ok(())
+    }
+
+    pub fn renew_review_publication_lease(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        lease_seconds: i64,
+    ) -> Result<bool> {
+        let now = Self::now();
+        let now_s = ts(now);
+        let expires_s = ts(now + Duration::seconds(lease_seconds.max(1)));
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET lease_expires_at = ?1, updated_at = ?2
+                 WHERE intent_id = ?3 AND status = 'pending'
+                   AND lease_owner = ?4 AND lease_expires_at > ?2",
+                params![expires_s, now_s, intent_id, owner],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
     }
 
     pub fn get_review_publication_intent(
@@ -4224,7 +4246,8 @@ impl SqliteFactoryStore {
     }
 
     /// Return a blocked or conflict review publication intent to pending for
-    /// operator recovery. Completed steps and forge identities are preserved.
+    /// explicit operator recovery. This is the human-controlled recovery
+    /// command; completed steps and forge identities are preserved.
     pub fn reset_blocked_review_publication(
         &mut self,
         intent_id: &str,
@@ -4317,6 +4340,7 @@ impl SqliteFactoryStore {
             .map_err(storage_error)
     }
 
+    #[cfg(test)]
     pub fn bind_review_publication_comment(
         &mut self,
         intent_id: &str,
@@ -4326,26 +4350,69 @@ impl SqliteFactoryStore {
         self.conn
             .execute(
                 "UPDATE review_publication_intents SET comment_id = ?1,
-                    publisher_login = ?2, updated_at = ?3 WHERE intent_id = ?4",
+                    publisher_login = ?2, updated_at = ?3
+                 WHERE intent_id = ?4 AND status = 'pending' AND lease_owner IS NULL",
                 params![comment_id, publisher_login, ts(Self::now()), intent_id],
             )
             .map_err(storage_error)?;
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn clear_review_publication_comment(&mut self, intent_id: &str) -> Result<()> {
         self.conn
             .execute(
                 "UPDATE review_publication_intents
                  SET comment_id = NULL, publisher_login = NULL, updated_at = ?1
-                 WHERE intent_id = ?2",
+                 WHERE intent_id = ?2 AND status = 'pending' AND lease_owner IS NULL",
                 params![ts(Self::now()), intent_id],
             )
             .map_err(storage_error)?;
         Ok(())
     }
 
-    /// Bind the identity returned by the forge for a formal review.
+    pub fn bind_review_publication_comment_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        comment_id: &str,
+        publisher_login: &str,
+    ) -> Result<bool> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET comment_id = ?1,
+                    publisher_login = ?2, updated_at = ?3
+                 WHERE intent_id = ?4 AND status = 'pending' AND lease_owner = ?5
+                   AND lease_expires_at > ?3",
+                params![comment_id, publisher_login, now_s, intent_id, owner],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    pub fn clear_review_publication_comment_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+    ) -> Result<bool> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET comment_id = NULL, publisher_login = NULL, updated_at = ?1
+                 WHERE intent_id = ?2 AND status = 'pending' AND lease_owner = ?3
+                   AND lease_expires_at > ?1",
+                params![now_s, intent_id, owner],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    /// Test-only compatibility helper for constructing durable publication rows.
+    #[cfg(test)]
     pub fn bind_review_publication_review(
         &mut self,
         intent_id: &str,
@@ -4358,7 +4425,8 @@ impl SqliteFactoryStore {
             .execute(
                 "UPDATE review_publication_intents
                  SET review_id = ?1, review_url = ?2, publisher_login = ?3,
-                     updated_at = ?4 WHERE intent_id = ?5",
+                     updated_at = ?4
+                 WHERE intent_id = ?5 AND status = 'pending' AND lease_owner IS NULL",
                 params![
                     review_id,
                     review_url,
@@ -4376,29 +4444,80 @@ impl SqliteFactoryStore {
         Ok(())
     }
 
+    pub fn bind_review_publication_review_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        review_id: &str,
+        review_url: &str,
+        publisher_login: &str,
+    ) -> Result<bool> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET review_id = ?1, review_url = ?2, publisher_login = ?3,
+                     updated_at = ?4
+                 WHERE intent_id = ?5 AND status = 'pending' AND lease_owner = ?6
+                   AND lease_expires_at > ?7",
+                params![
+                    review_id,
+                    review_url,
+                    publisher_login,
+                    ts(Self::now()),
+                    intent_id,
+                    owner,
+                    ts(Self::now()),
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    #[cfg(test)]
     pub fn set_review_publication_route_state(
         &mut self,
         intent_id: &str,
         route_state: &str,
     ) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET route_state = ?1, updated_at = ?2
+                 WHERE intent_id = ?3 AND status = 'pending' AND lease_owner IS NULL",
+                params![route_state, ts(Self::now()), intent_id],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn set_review_publication_route_state_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        route_state: &str,
+    ) -> Result<bool> {
         let changed = self
             .conn
             .execute(
                 "UPDATE review_publication_intents
-                 SET route_state = ?1, updated_at = ?2 WHERE intent_id = ?3",
-                params![route_state, ts(Self::now()), intent_id],
+                 SET route_state = ?1, updated_at = ?2
+                 WHERE intent_id = ?3 AND status = 'pending' AND lease_owner = ?4
+                   AND lease_expires_at > ?5",
+                params![
+                    route_state,
+                    ts(Self::now()),
+                    intent_id,
+                    owner,
+                    ts(Self::now()),
+                ],
             )
             .map_err(storage_error)?;
-        if changed == 0 {
-            return Err(SymphonyError::StorageError(format!(
-                "review intent {intent_id} not found"
-            )));
-        }
-        Ok(())
+        Ok(changed == 1)
     }
 
-    /// Record one formal publication step. Only `comment_final` terminalizes
-    /// the intent, allowing restart to resume at the first incomplete step.
+    /// Test-only compatibility helper for constructing durable publication rows.
+    #[cfg(test)]
     pub fn record_review_publication_step(
         &mut self,
         intent_id: &str,
@@ -4406,13 +4525,48 @@ impl SqliteFactoryStore {
         status: PublicationStatus,
         expected_projection: &serde_json::Value,
     ) -> Result<()> {
+        self.record_review_publication_step_inner(
+            intent_id,
+            step,
+            status,
+            expected_projection,
+            None,
+        )
+        .map(|_| ())
+    }
+
+    pub fn record_review_publication_step_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<bool> {
+        self.record_review_publication_step_inner(
+            intent_id,
+            step,
+            status,
+            expected_projection,
+            Some(owner),
+        )
+    }
+
+    fn record_review_publication_step_inner(
+        &mut self,
+        intent_id: &str,
+        step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+        owner: Option<&str>,
+    ) -> Result<bool> {
         let intent = self
             .get_review_publication_intent(intent_id)?
             .ok_or_else(|| {
                 SymphonyError::StorageError(format!("review intent {intent_id} not found"))
             })?;
-        if intent.status == PublicationStatus::Applied {
-            return Ok(());
+        if intent.status != PublicationStatus::Pending {
+            return Ok(false);
         }
         let mut steps = intent.completed_steps;
         let trimmed = step.trim();
@@ -4426,29 +4580,77 @@ impl SqliteFactoryStore {
         } else {
             status
         };
-        self.conn
-            .execute(
-                "UPDATE review_publication_intents
-                 SET completed_steps_json = ?1, status = ?2, last_error_json = NULL,
-                     expected_projection_json = ?3,
-                     lease_owner = CASE WHEN ?6 = 'applied' THEN NULL ELSE lease_owner END,
-                     lease_expires_at = CASE WHEN ?6 = 'applied' THEN NULL ELSE lease_expires_at END,
-                     updated_at = ?4
-                 WHERE intent_id = ?5",
-                params![
-                    bounded_json(&steps)?,
-                    next_status.as_str(),
-                    bounded_json(expected_projection)?,
-                    ts(Self::now()),
-                    intent_id,
-                    next_status.as_str(),
-                ],
-            )
-            .map_err(storage_error)?;
-        Ok(())
+        let steps_json = bounded_json(&steps)?;
+        let projection_json = bounded_json(expected_projection)?;
+        let now_s = ts(Self::now());
+        let changed = if let Some(owner) = owner {
+            self.conn
+                .execute(
+                    "UPDATE review_publication_intents
+                     SET completed_steps_json = ?1, status = ?2, last_error_json = NULL,
+                         expected_projection_json = ?3,
+                         lease_owner = CASE WHEN ?6 = 'applied' THEN NULL ELSE lease_owner END,
+                         lease_expires_at = CASE WHEN ?6 = 'applied' THEN NULL ELSE lease_expires_at END,
+                         updated_at = ?4
+                     WHERE intent_id = ?5 AND status = 'pending' AND lease_owner = ?7
+                       AND lease_expires_at > ?8",
+                    params![
+                        steps_json,
+                        next_status.as_str(),
+                        projection_json,
+                        now_s,
+                        intent_id,
+                        next_status.as_str(),
+                        owner,
+                        now_s,
+                    ],
+                )
+                .map_err(storage_error)?
+        } else {
+            self.conn
+                .execute(
+                    "UPDATE review_publication_intents
+                     SET completed_steps_json = ?1, status = ?2, last_error_json = NULL,
+                         expected_projection_json = ?3,
+                         lease_owner = CASE WHEN ?6 = 'applied' THEN NULL ELSE lease_owner END,
+                         lease_expires_at = CASE WHEN ?6 = 'applied' THEN NULL ELSE lease_expires_at END,
+                         updated_at = ?4
+                     WHERE intent_id = ?5 AND status = 'pending' AND lease_owner IS NULL",
+                    params![
+                        steps_json,
+                        next_status.as_str(),
+                        projection_json,
+                        now_s,
+                        intent_id,
+                        next_status.as_str(),
+                    ],
+                )
+                .map_err(storage_error)?
+        };
+        Ok(changed == 1)
     }
 
+    #[cfg(test)]
     pub fn complete_review_publication(&mut self, intent_id: &str, step: &str) -> Result<()> {
+        self.complete_review_publication_inner(intent_id, step, None)
+            .map(|_| ())
+    }
+
+    pub fn complete_review_publication_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        step: &str,
+    ) -> Result<bool> {
+        self.complete_review_publication_inner(intent_id, step, Some(owner))
+    }
+
+    fn complete_review_publication_inner(
+        &mut self,
+        intent_id: &str,
+        step: &str,
+        owner: Option<&str>,
+    ) -> Result<bool> {
         let intent = self
             .get_review_publication_intent(intent_id)?
             .ok_or_else(|| {
@@ -4460,21 +4662,39 @@ impl SqliteFactoryStore {
                 intent.kind
             )));
         }
+        if intent.status != PublicationStatus::Pending {
+            return Ok(false);
+        }
         let mut steps = intent.completed_steps;
         if !steps.iter().any(|existing| existing == step) {
             steps.push(step.to_string());
         }
-        self.conn
-            .execute(
-                "UPDATE review_publication_intents SET status = 'applied',
-                    completed_steps_json = ?1, last_error_json = NULL, updated_at = ?2
-                 WHERE intent_id = ?3",
-                params![bounded_json(&steps)?, ts(Self::now()), intent_id],
-            )
-            .map_err(storage_error)?;
-        Ok(())
+        let now_s = ts(Self::now());
+        let changed = if let Some(owner) = owner {
+            self.conn
+                .execute(
+                    "UPDATE review_publication_intents SET status = 'applied',
+                        completed_steps_json = ?1, last_error_json = NULL,
+                        lease_owner = NULL, lease_expires_at = NULL, updated_at = ?2
+                     WHERE intent_id = ?3 AND status = 'pending' AND lease_owner = ?4
+                       AND lease_expires_at > ?5",
+                    params![bounded_json(&steps)?, now_s, intent_id, owner, now_s],
+                )
+                .map_err(storage_error)?
+        } else {
+            self.conn
+                .execute(
+                    "UPDATE review_publication_intents SET status = 'applied',
+                        completed_steps_json = ?1, last_error_json = NULL, updated_at = ?2
+                     WHERE intent_id = ?3 AND status = 'pending' AND lease_owner IS NULL",
+                    params![bounded_json(&steps)?, now_s, intent_id],
+                )
+                .map_err(storage_error)?
+        };
+        Ok(changed == 1)
     }
 
+    #[cfg(test)]
     pub fn set_review_publication_error(
         &mut self,
         intent_id: &str,
@@ -4487,7 +4707,7 @@ impl SqliteFactoryStore {
                 "UPDATE review_publication_intents SET status = ?1,
                     last_error_json = ?2, retry_count = retry_count + 1,
                     lease_owner = NULL, lease_expires_at = NULL, updated_at = ?3
-                    WHERE intent_id = ?4",
+                    WHERE intent_id = ?4 AND status = 'pending' AND lease_owner IS NULL",
                 params![
                     status.as_str(),
                     bounded_json(&error)?,
@@ -4497,15 +4717,100 @@ impl SqliteFactoryStore {
             )
             .map_err(storage_error)?;
         if changed == 0 {
-            return Err(SymphonyError::StorageError(format!(
-                "review intent {intent_id} not found"
-            )));
+            let exists: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT status FROM review_publication_intents WHERE intent_id = ?1",
+                    params![intent_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage_error)?;
+            if exists.is_none() {
+                return Err(SymphonyError::StorageError(format!(
+                    "review intent {intent_id} not found"
+                )));
+            }
         }
         Ok(())
     }
 
+    pub fn set_review_publication_error_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        status: PublicationStatus,
+        error: FactoryError,
+    ) -> Result<bool> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET status = ?1,
+                    last_error_json = ?2, retry_count = retry_count + 1,
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = ?3
+                 WHERE intent_id = ?4 AND status = 'pending' AND lease_owner = ?5
+                   AND lease_expires_at > ?3",
+                params![
+                    status.as_str(),
+                    bounded_json(&error)?,
+                    now_s,
+                    intent_id,
+                    owner,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
     /// Terminalize a publication intent whose artifact head was superseded by
     /// a newer review cycle without charging the publication retry budget.
+    pub fn supersede_review_publication_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        error: FactoryError,
+    ) -> Result<bool> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET status = ?1,
+                 last_error_json = ?2, lease_owner = NULL, lease_expires_at = NULL,
+                 updated_at = ?3
+                 WHERE intent_id = ?4 AND status = ?5 AND lease_owner = ?6
+                   AND lease_expires_at > ?3",
+                params![
+                    PublicationStatus::Conflict.as_str(),
+                    bounded_json(&error)?,
+                    now_s,
+                    intent_id,
+                    PublicationStatus::Pending.as_str(),
+                    owner,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed > 0 {
+            return Ok(true);
+        }
+        let exists: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT status FROM review_publication_intents WHERE intent_id = ?1",
+                params![intent_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        if exists.is_none() {
+            return Err(SymphonyError::StorageError(format!(
+                "review intent {intent_id} not found"
+            )));
+        }
+        Ok(false)
+    }
+
+    #[cfg(test)]
     pub fn supersede_review_publication(
         &mut self,
         intent_id: &str,
@@ -4520,7 +4825,7 @@ impl SqliteFactoryStore {
                  last_error_json = ?2, lease_owner = NULL, lease_expires_at = NULL,
                  updated_at = ?3
                  WHERE intent_id = ?4 AND status = ?5
-                   AND (lease_owner IS NULL OR lease_expires_at IS NULL OR lease_expires_at < ?3)",
+                   AND (lease_owner IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= ?3)",
                 params![
                     PublicationStatus::Conflict.as_str(),
                     bounded_json(&error)?,
@@ -7125,8 +7430,32 @@ mod tests {
                     observed_baseline_json, expected_projection_json,
                     created_at, updated_at
                  ) VALUES ('review-superseded', 'run-review', 'artifact-review',
-                    'automatic', 'pending', '[]', 0, '{}', '{}', '{}', ?1, ?1)",
+                    'automatic', 'pending', '[]', 4, '{}', '{}', '{}', ?1, ?1)",
                 params![now],
+            )
+            .unwrap();
+
+        assert!(store
+            .claim_review_publication("review-superseded", "owner-a", 900)
+            .unwrap());
+        assert!(!store
+            .supersede_review_publication(
+                "review-superseded",
+                FactoryError::new(
+                    "review_publication_superseded_active",
+                    "review_publisher",
+                    "an active publisher lease must win",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET lease_expires_at = ?1
+                 WHERE intent_id = 'review-superseded'",
+                params![ts(Utc::now() - Duration::seconds(1))],
             )
             .unwrap();
 
@@ -7160,12 +7489,246 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(intent.status, PublicationStatus::Conflict);
-        assert_eq!(intent.retry_count, 0);
+        assert_eq!(intent.retry_count, 4);
         assert_eq!(
             intent.last_error.unwrap().code,
             "review_publication_superseded"
         );
         assert!(store.list_pending_review_publications().unwrap().is_empty());
+    }
+
+    #[test]
+    fn terminal_review_publications_ignore_stale_writers() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        for (intent_id, status, retry_count) in [
+            ("review-applied", "applied", 2),
+            ("review-conflict", "conflict", 3),
+            ("review-blocked", "blocked", 4),
+        ] {
+            store
+                .conn
+                .execute(
+                    &format!(
+                        "INSERT INTO review_publication_intents (
+                            intent_id, run_id, artifact_id, kind, status,
+                            completed_steps_json, retry_count, desired_effects_json,
+                            observed_baseline_json, expected_projection_json,
+                            created_at, updated_at
+                         ) VALUES ('{intent_id}', 'run-review', 'artifact-{intent_id}',
+                            'formal', '{status}', '[]', {retry_count}, '{{}}', '{{}}', '{{}}', ?1, ?1)"
+                    ),
+                    params![now],
+                )
+                .unwrap();
+        }
+
+        for intent_id in ["review-applied", "review-conflict", "review-blocked"] {
+            store
+                .record_review_publication_step(
+                    intent_id,
+                    "comment_final",
+                    PublicationStatus::Pending,
+                    &serde_json::json!({"stale": true}),
+                )
+                .unwrap();
+            store
+                .set_review_publication_route_state(intent_id, "Human Review")
+                .unwrap();
+            store
+                .set_review_publication_error(
+                    intent_id,
+                    PublicationStatus::Blocked,
+                    FactoryError::new(
+                        "stale_writer",
+                        "review_publisher",
+                        "must not overwrite terminal state",
+                        false,
+                        None,
+                    ),
+                )
+                .unwrap();
+        }
+
+        for (intent_id, status, retry_count) in [
+            ("review-applied", PublicationStatus::Applied, 2),
+            ("review-conflict", PublicationStatus::Conflict, 3),
+            ("review-blocked", PublicationStatus::Blocked, 4),
+        ] {
+            let intent = store
+                .get_review_publication_intent(intent_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(intent.status, status);
+            assert_eq!(intent.retry_count, retry_count);
+            assert!(intent.completed_steps.is_empty());
+            assert!(intent.route_state.is_none());
+        }
+    }
+
+    #[test]
+    fn owned_publication_mutations_require_an_active_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, desired_effects_json,
+                    observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 ) VALUES ('review-owned', 'run-review', 'artifact-review',
+                    'formal', 'pending', '[]', 2, '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+
+        assert!(store
+            .claim_review_publication("review-owned", "owner-a", 900)
+            .unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET lease_expires_at = ?1
+                 WHERE intent_id = 'review-owned'",
+                params![ts(Utc::now() - Duration::seconds(1))],
+            )
+            .unwrap();
+
+        assert!(
+            !store
+                .bind_review_publication_comment_owned(
+                    "review-owned",
+                    "owner-a",
+                    "701",
+                    "symphony-bot",
+                )
+                .unwrap()
+        );
+        assert!(!store
+            .clear_review_publication_comment_owned("review-owned", "owner-a")
+            .unwrap());
+        assert!(!store
+            .bind_review_publication_review_owned(
+                "review-owned",
+                "owner-a",
+                "review-1",
+                "https://example.test/review-1",
+                "symphony-bot",
+            )
+            .unwrap());
+        assert!(!store
+            .set_review_publication_route_state_owned("review-owned", "owner-a", "Human Review")
+            .unwrap());
+        assert!(!store
+            .record_review_publication_step_owned(
+                "review-owned",
+                "owner-a",
+                "review_created",
+                PublicationStatus::Pending,
+                &serde_json::json!({"stale": true}),
+            )
+            .unwrap());
+        assert!(!store
+            .set_review_publication_error_owned(
+                "review-owned",
+                "owner-a",
+                PublicationStatus::Blocked,
+                FactoryError::new(
+                    "stale_writer",
+                    "review_publisher",
+                    "expired lease must not write",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap());
+
+        assert!(store
+            .claim_review_publication("review-owned", "owner-b", 900)
+            .unwrap());
+        store
+            .set_review_publication_route_state("review-owned", "Human Review")
+            .unwrap();
+        store
+            .record_review_publication_step(
+                "review-owned",
+                "route_applied",
+                PublicationStatus::Pending,
+                &serde_json::json!({"stale": true}),
+            )
+            .unwrap();
+        store
+            .set_review_publication_error(
+                "review-owned",
+                PublicationStatus::Blocked,
+                FactoryError::new(
+                    "stale_writer",
+                    "review_publisher",
+                    "unowned writer must not bypass owner-b",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap();
+        let pending = store
+            .get_review_publication_intent("review-owned")
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.status, PublicationStatus::Pending);
+        assert!(pending.completed_steps.is_empty());
+        assert!(pending.route_state.is_none());
+        assert_eq!(pending.retry_count, 2);
+
+        assert!(store
+            .bind_review_publication_review_owned(
+                "review-owned",
+                "owner-b",
+                "review-1",
+                "https://example.test/review-1",
+                "symphony-bot",
+            )
+            .unwrap());
+        assert!(store
+            .record_review_publication_step_owned(
+                "review-owned",
+                "owner-b",
+                "review_created",
+                PublicationStatus::Pending,
+                &serde_json::json!({"review_id": "review-1"}),
+            )
+            .unwrap());
+        assert!(store
+            .record_review_publication_step_owned(
+                "review-owned",
+                "owner-b",
+                "comment_final",
+                PublicationStatus::Pending,
+                &serde_json::json!({"review_id": "review-1"}),
+            )
+            .unwrap());
+
+        let applied = store
+            .get_review_publication_intent("review-owned")
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied.status, PublicationStatus::Applied);
+        assert_eq!(applied.retry_count, 2);
+        assert_eq!(applied.completed_steps, ["review_created", "comment_final"]);
+        assert_eq!(applied.route_state, None);
     }
 
     #[test]
@@ -7196,6 +7759,18 @@ mod tests {
             .claim_review_publication("review-lease", "owner-a", 900)
             .unwrap());
         assert!(!store
+            .supersede_review_publication(
+                "review-lease",
+                FactoryError::new(
+                    "review_publication_superseded",
+                    "review_publisher",
+                    "active lease must win",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap());
+        assert!(!store
             .claim_review_publication("review-lease", "owner-b", 900)
             .unwrap());
         store
@@ -7203,6 +7778,33 @@ mod tests {
             .unwrap();
         assert!(store
             .claim_review_publication("review-lease", "owner-b", 900)
+            .unwrap());
+        assert!(!store
+            .supersede_review_publication(
+                "review-lease",
+                FactoryError::new(
+                    "review_publication_superseded",
+                    "review_publisher",
+                    "active lease must still win",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap());
+        store
+            .clear_review_publication_lease("review-lease", "owner-b")
+            .unwrap();
+        assert!(store
+            .supersede_review_publication(
+                "review-lease",
+                FactoryError::new(
+                    "review_publication_superseded",
+                    "review_publisher",
+                    "released lease can be superseded",
+                    false,
+                    None,
+                ),
+            )
             .unwrap());
     }
 
