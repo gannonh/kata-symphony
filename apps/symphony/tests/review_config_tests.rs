@@ -59,8 +59,10 @@ fn review_defaults_validate_and_explicit_routes_parse() {
         serde_yaml::Value::String("Human Review".to_string());
     raw["review"]["changes_requested_route"]["state"] =
         serde_yaml::Value::String("Rework".to_string());
+    raw["review"]["permission_probe_pull_request"] = serde_yaml::Value::Number(17.into());
 
     let config = from_workflow(&raw).expect("explicit review settings should parse");
+    assert_eq!(config.review.permission_probe_pull_request, Some(17));
     assert!(config.review.enabled);
     assert_eq!(config.review.max_attempts, 4);
     assert_eq!(
@@ -151,6 +153,15 @@ fn review_prompt_and_trigger_state_must_be_non_empty() {
     let mut trigger = review_config();
     trigger.review.trigger_state = "  ".to_string();
     assert!(review_error(trigger).contains("review.trigger_state must be non-empty"));
+}
+
+#[test]
+fn review_permission_probe_pull_request_rejects_zero() {
+    let mut raw = raw_review_workflow();
+    raw["review"]["permission_probe_pull_request"] = serde_yaml::Value::Number(0.into());
+    let config = from_workflow(&raw).expect("zero probe PR should parse before validation");
+    let message = review_error(config);
+    assert!(message.contains("review.permission_probe_pull_request must be greater than 0"));
 }
 
 #[test]

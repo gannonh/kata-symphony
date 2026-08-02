@@ -574,6 +574,15 @@ impl SharedFactoryStore {
         })
     }
 
+    pub fn claim_review_publication(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        lease_seconds: i64,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| store.claim_review_publication(intent_id, owner, lease_seconds))
+    }
+
     pub fn list_pending_review_publications(
         &self,
     ) -> Result<Vec<crate::review::domain::ReviewPublicationIntent>> {
@@ -659,6 +668,10 @@ impl SharedFactoryStore {
 
     pub fn clear_review_publication_comment(&self, intent_id: &str) -> Result<()> {
         self.with_store_mut(|store| store.clear_review_publication_comment(intent_id))
+    }
+
+    pub fn clear_review_publication_lease(&self, intent_id: &str, owner: &str) -> Result<()> {
+        self.with_store_mut(|store| store.clear_review_publication_lease(intent_id, owner))
     }
 
     pub fn set_review_publication_error(
@@ -1824,17 +1837,38 @@ mod tests {
                 params![error, now],
             )
             .unwrap();
+        db.connection_for_test()
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, last_error_json,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('review-conflict', 'run-review', 'artifact-conflict',
+                    'formal', 'conflict', '[\"review_created\"]', 2, ?1,
+                    '{}', '{}', '{}', ?2, ?2)",
+                params![error, now],
+            )
+            .unwrap();
         drop(db);
 
         let blocked = FactoryRunQuery::blocked_publications(&store).unwrap();
-        assert_eq!(blocked.len(), 1);
-        assert_eq!(blocked[0].kind, "formal");
-        assert_eq!(blocked[0].last_step.as_deref(), Some("review_created"));
+        assert_eq!(blocked.len(), 2);
+        assert!(blocked
+            .iter()
+            .any(|intent| intent.intent_id == "review-blocked"));
+        assert!(blocked
+            .iter()
+            .any(|intent| intent.intent_id == "review-conflict"));
 
         let reset =
             FactoryRunQuery::reset_blocked_publication(&store, "review-blocked", "ada").unwrap();
         assert_eq!(reset.status, "pending");
         assert_eq!(reset.completed_steps, vec!["review_created"]);
+
+        let conflict_reset =
+            FactoryRunQuery::reset_blocked_publication(&store, "review-conflict", "ada").unwrap();
+        assert_eq!(conflict_reset.status, "pending");
         assert!(FactoryRunQuery::blocked_publications(&store)
             .unwrap()
             .is_empty());

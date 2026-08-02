@@ -486,6 +486,7 @@ struct RawReviewConfig {
     trigger_state: Option<String>,
     completion_route: Option<RawRouteMapping>,
     changes_requested_route: Option<RawRouteMapping>,
+    permission_probe_pull_request: Option<u64>,
 }
 
 // ── Section extraction helper ─────────────────────────────────────────────────
@@ -1634,6 +1635,9 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
             .unwrap_or(review_defaults.trigger_state),
         completion_route: review_route(raw_review.completion_route),
         changes_requested_route: review_route(raw_review.changes_requested_route),
+        permission_probe_pull_request: raw_review
+            .permission_probe_pull_request
+            .or(review_defaults.permission_probe_pull_request),
     };
 
     Ok(ServiceConfig {
@@ -2224,6 +2228,11 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
                     "{field} must be greater than 0"
                 )));
             }
+        }
+        if config.review.permission_probe_pull_request == Some(0) {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "review.permission_probe_pull_request must be greater than 0".to_string(),
+            ));
         }
         if config.review.trigger_state.trim().is_empty() {
             return Err(SymphonyError::InvalidWorkflowConfig(

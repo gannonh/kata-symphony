@@ -38,7 +38,7 @@ use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 /// Embedded migrations, applied in order while the exclusive store lock is held.
-const MIGRATIONS: [&str; 7] = [
+const MIGRATIONS: [&str; 8] = [
     include_str!("migrations/001_init.sql"),
     include_str!("migrations/002_route_observations.sql"),
     include_str!("migrations/003_spec_stage.sql"),
@@ -46,6 +46,7 @@ const MIGRATIONS: [&str; 7] = [
     include_str!("migrations/005_implementation_draft_pr.sql"),
     include_str!("migrations/006_review_stage.sql"),
     include_str!("migrations/007_review_publication.sql"),
+    include_str!("migrations/008_review_publication_lease.sql"),
 ];
 
 #[derive(Debug, Clone)]
@@ -508,7 +509,7 @@ impl SqliteFactoryStore {
         conn.busy_timeout(StdDuration::from_millis(busy_timeout_ms))
             .map_err(storage_error)?;
         for (index, migration) in MIGRATIONS.iter().enumerate() {
-            if index == 6 {
+            if index >= 6 {
                 apply_review_publication_migration(&conn, migration).map_err(storage_error)?;
             } else {
                 conn.execute_batch(migration).map_err(storage_error)?;
@@ -3624,6 +3625,7 @@ impl SqliteFactoryStore {
                  JOIN spec_run_state s ON s.run_id = r.run_id
                     AND s.approved_artifact_id IS NOT NULL
                  WHERE s.decision = 'approved'
+                   AND d.draft = 1
                    AND NOT EXISTS (
                      SELECT 1 FROM stage_runs sr
                      WHERE sr.run_id = r.run_id AND sr.stage = ?1
@@ -4120,6 +4122,46 @@ impl SqliteFactoryStore {
             })
     }
 
+    /// Claim a pending formal publication before any forge side effect.
+    ///
+    /// The conditional update is the cross-process compare-and-set. An
+    /// expired lease is reclaimable after a coordinator crash; an active lease
+    /// belongs exclusively to its current publisher.
+    pub fn claim_review_publication(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        lease_seconds: i64,
+    ) -> Result<bool> {
+        let now = Self::now();
+        let now_s = ts(now);
+        let expires_s = ts(now + Duration::seconds(lease_seconds.max(1)));
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET lease_owner = ?1, lease_expires_at = ?2, updated_at = ?3
+                 WHERE intent_id = ?4 AND status = 'pending'
+                   AND (lease_owner IS NULL OR lease_expires_at IS NULL
+                        OR lease_expires_at <= ?3)",
+                params![owner, expires_s, now_s, intent_id],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    pub fn clear_review_publication_lease(&mut self, intent_id: &str, owner: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET lease_owner = NULL, lease_expires_at = NULL, updated_at = ?1
+                 WHERE intent_id = ?2 AND lease_owner = ?3",
+                params![ts(Self::now()), intent_id, owner],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
     pub fn get_review_publication_intent(
         &self,
         intent_id: &str,
@@ -4159,7 +4201,7 @@ impl SqliteFactoryStore {
             .map_err(storage_error)
     }
 
-    /// List review publication intents terminalized as `blocked`, oldest first.
+    /// List review publication intents terminalized as `blocked` or `conflict`, oldest first.
     pub fn list_blocked_review_publications(&self) -> Result<Vec<ReviewPublicationIntent>> {
         let mut stmt = self
             .conn
@@ -4169,7 +4211,8 @@ impl SqliteFactoryStore {
                     publisher_login, review_id, review_url, route_state,
                     desired_effects_json, observed_baseline_json,
                     expected_projection_json, created_at, updated_at
-                 FROM review_publication_intents WHERE status = 'blocked'
+                 FROM review_publication_intents
+                 WHERE status IN ('blocked', 'conflict')
                  ORDER BY created_at ASC",
             )
             .map_err(storage_error)?;
@@ -4180,8 +4223,8 @@ impl SqliteFactoryStore {
             .map_err(storage_error)
     }
 
-    /// Return a blocked review publication intent to pending for operator
-    /// recovery. Completed steps and forge identities are preserved.
+    /// Return a blocked or conflict review publication intent to pending for
+    /// operator recovery. Completed steps and forge identities are preserved.
     pub fn reset_blocked_review_publication(
         &mut self,
         intent_id: &str,
@@ -4192,10 +4235,13 @@ impl SqliteFactoryStore {
                 "review publication intent {intent_id} not found"
             )));
         };
-        if intent.status != PublicationStatus::Blocked {
+        if !matches!(
+            intent.status,
+            PublicationStatus::Blocked | PublicationStatus::Conflict
+        ) {
             return Err(SymphonyError::TriageError(format!(
                 "review publication intent {intent_id} is {}, not blocked; \
-                 only a blocked intent can be reset",
+                 only a blocked or conflict intent can be reset",
                 intent.status.as_str()
             )));
         }
@@ -4211,14 +4257,10 @@ impl SqliteFactoryStore {
         let changed = tx
             .execute(
                 "UPDATE review_publication_intents
-                 SET status = ?1, last_error_json = NULL, retry_count = 0, updated_at = ?2
-                 WHERE intent_id = ?3 AND status = ?4",
-                params![
-                    PublicationStatus::Pending.as_str(),
-                    ts(now),
-                    intent_id,
-                    PublicationStatus::Blocked.as_str(),
-                ],
+                 SET status = ?1, last_error_json = NULL, retry_count = 0,
+                     lease_owner = NULL, lease_expires_at = NULL, updated_at = ?2
+                 WHERE intent_id = ?3 AND status IN ('blocked', 'conflict')",
+                params![PublicationStatus::Pending.as_str(), ts(now), intent_id],
             )
             .map_err(storage_error)?;
         if changed == 0 {
@@ -4388,7 +4430,10 @@ impl SqliteFactoryStore {
             .execute(
                 "UPDATE review_publication_intents
                  SET completed_steps_json = ?1, status = ?2, last_error_json = NULL,
-                     expected_projection_json = ?3, updated_at = ?4
+                     expected_projection_json = ?3,
+                     lease_owner = CASE WHEN ?6 = 'applied' THEN NULL ELSE lease_owner END,
+                     lease_expires_at = CASE WHEN ?6 = 'applied' THEN NULL ELSE lease_expires_at END,
+                     updated_at = ?4
                  WHERE intent_id = ?5",
                 params![
                     bounded_json(&steps)?,
@@ -4396,6 +4441,7 @@ impl SqliteFactoryStore {
                     bounded_json(expected_projection)?,
                     ts(Self::now()),
                     intent_id,
+                    next_status.as_str(),
                 ],
             )
             .map_err(storage_error)?;
@@ -4440,7 +4486,8 @@ impl SqliteFactoryStore {
             .execute(
                 "UPDATE review_publication_intents SET status = ?1,
                     last_error_json = ?2, retry_count = retry_count + 1,
-                    updated_at = ?3 WHERE intent_id = ?4",
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = ?3
+                    WHERE intent_id = ?4",
                 params![
                     status.as_str(),
                     bounded_json(&error)?,
@@ -5982,6 +6029,48 @@ mod tests {
                 params![now],
             )
             .unwrap();
+        // A published non-draft PR artifact for the same run must not enter the
+        // A4 queue, which only reviews draft PRs.
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_artifacts (
+                    artifact_id, run_id, stage_run_id, approved_artifact_id,
+                    approved_version, issue_revision, configuration_revision,
+                    schema_version, manifest_json, base_commit, approved_spec_path,
+                    validation_cycles, execution_profile, received_at, bytes_len
+                 ) VALUES ('non-draft-implementation', 'run-review',
+                    'implementation-stage-non-draft', 'spec-artifact', 1, 'issue-rev',
+                    'config-rev-non-draft', 1, '{}', 'base', 'spec.md', 1, 'default', ?1, 1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('non-draft-implementation-intent', 'run-review',
+                    'non-draft-implementation', 'draft_pr', 'applied', '[]', '{}', '{}',
+                    '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_draft_pr_artifacts (
+                    artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 ) VALUES ('non-draft-artifact', 'run-review', 'non-draft-implementation',
+                    'non-draft-implementation-intent', 43,
+                    'https://github.com/owner/repo/pull/43', 0, 'feature', 'main',
+                    'new-head', 'marker-non-draft', ?1)",
+                params![now],
+            )
+            .unwrap();
         for (attempt_id, stage_run_id, status) in [
             ("failed-1", "stage-failed-1", "failed"),
             ("blocked-1", "stage-blocked-1", "blocked"),
@@ -6003,6 +6092,8 @@ mod tests {
 
         let candidates = store.list_a4_eligible_review_runs(2).unwrap();
         assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].draft_pr_artifact_id, "draft-artifact");
+        assert!(candidates[0].draft);
         assert_eq!(candidates[0].head_sha, "old-head");
         assert_eq!(
             store
@@ -6898,12 +6989,41 @@ mod tests {
                 ],
             )
             .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, last_error_json,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('review-conflict', 'run-review', 'artifact-conflict',
+                    'formal', 'conflict', '[\"review_created\"]', 2,
+                    ?1, '{}', '{}', '{}', ?2, ?2)",
+                params![
+                    serde_json::json!({
+                        "code": "review_publication_conflict",
+                        "component": "review_publication",
+                        "remediation": "reconcile the forge review",
+                        "retryable": false
+                    })
+                    .to_string(),
+                    now,
+                ],
+            )
+            .unwrap();
 
         let blocked = store.list_blocked_review_publications().unwrap();
-        assert_eq!(blocked.len(), 1);
-        assert_eq!(blocked[0].intent_id, "review-blocked");
-        assert_eq!(blocked[0].completed_steps, ["review_created"]);
-        assert_eq!(blocked[0].retry_count, 4);
+        assert_eq!(blocked.len(), 2);
+        let blocked_intent = blocked
+            .iter()
+            .find(|intent| intent.intent_id == "review-blocked")
+            .unwrap();
+        assert_eq!(blocked_intent.completed_steps, ["review_created"]);
+        assert_eq!(blocked_intent.retry_count, 4);
+        assert!(blocked.iter().any(|intent| {
+            intent.intent_id == "review-conflict" && intent.status == PublicationStatus::Conflict
+        }));
 
         let reset = store
             .reset_blocked_review_publication("review-blocked", "operator")
@@ -6924,12 +7044,58 @@ mod tests {
             .unwrap();
         assert_eq!(event_type, "review_publication_reset");
         assert!(payload.contains("\"operator\":\"operator\""));
+        let remaining = store.list_blocked_review_publications().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].intent_id, "review-conflict");
+
+        let conflict_reset = store
+            .reset_blocked_review_publication("review-conflict", "operator")
+            .unwrap();
+        assert_eq!(conflict_reset.status, PublicationStatus::Pending);
         assert!(store.list_blocked_review_publications().unwrap().is_empty());
 
         let err = store
             .reset_blocked_review_publication("review-blocked", "operator")
             .unwrap_err();
         assert!(err.to_string().contains("not blocked"));
+    }
+
+    #[test]
+    fn review_publication_claim_is_single_owner_until_released_or_expired() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, desired_effects_json,
+                    observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 ) VALUES ('review-lease', 'run-review', 'artifact-review',
+                    'formal', 'pending', '[]', '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+
+        assert!(store
+            .claim_review_publication("review-lease", "owner-a", 900)
+            .unwrap());
+        assert!(!store
+            .claim_review_publication("review-lease", "owner-b", 900)
+            .unwrap());
+        store
+            .clear_review_publication_lease("review-lease", "owner-a")
+            .unwrap();
+        assert!(store
+            .claim_review_publication("review-lease", "owner-b", 900)
+            .unwrap());
     }
 
     #[test]

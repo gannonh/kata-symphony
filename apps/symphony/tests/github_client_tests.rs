@@ -428,6 +428,72 @@ async fn test_list_pull_request_reviews_returns_author_marker_and_commit() {
 }
 
 #[tokio::test]
+async fn test_probe_pull_request_review_permission_accepts_unprocessable_entity() {
+    let mut server = Server::new_async().await;
+    let client = test_client(&server);
+
+    let mock = server
+        .mock("POST", "/repos/kata-sh/kata-mono/pulls/11/reviews")
+        .match_body(Matcher::PartialJson(json!({ "event": "INVALID" })))
+        .with_status(422)
+        .with_body("invalid review event")
+        .create_async()
+        .await;
+
+    client
+        .probe_pull_request_review_permission(11)
+        .await
+        .expect("HTTP 422 proves review endpoint authorization");
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_probe_pull_request_review_permission_rejects_forbidden() {
+    let mut server = Server::new_async().await;
+    let client = test_client(&server);
+
+    let mock = server
+        .mock("POST", "/repos/kata-sh/kata-mono/pulls/11/reviews")
+        .with_status(403)
+        .with_body("forbidden")
+        .create_async()
+        .await;
+
+    let error = client
+        .probe_pull_request_review_permission(11)
+        .await
+        .expect_err("HTTP 403 must fail the permission probe");
+    mock.assert_async().await;
+    assert!(matches!(
+        error,
+        SymphonyError::GithubApiStatus { status: 403, .. }
+    ));
+}
+
+#[tokio::test]
+async fn test_probe_pull_request_review_permission_rejects_unexpected_success() {
+    let mut server = Server::new_async().await;
+    let client = test_client(&server);
+
+    let mock = server
+        .mock("POST", "/repos/kata-sh/kata-mono/pulls/11/reviews")
+        .with_status(201)
+        .with_body("created")
+        .create_async()
+        .await;
+
+    let error = client
+        .probe_pull_request_review_permission(11)
+        .await
+        .expect_err("successful review creation must fail the invalid-event probe");
+    mock.assert_async().await;
+    assert!(matches!(
+        error,
+        SymphonyError::GithubApiStatus { status: 201, .. }
+    ));
+}
+
+#[tokio::test]
 async fn test_create_pull_request_review_serializes_multiline_anchors_and_omits_single_line_fields()
 {
     let mut server = Server::new_async().await;

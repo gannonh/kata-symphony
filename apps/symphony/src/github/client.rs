@@ -566,6 +566,41 @@ impl GithubClient {
             .await
     }
 
+    /// Probe pull request review write authorization without creating a review.
+    ///
+    /// GitHub rejects the intentionally invalid event with HTTP 422 after it
+    /// authorizes the endpoint. Any other status is surfaced to the caller.
+    pub async fn probe_pull_request_review_permission(&self, number: u64) -> Result<()> {
+        let path = format!(
+            "/repos/{}/{}/pulls/{number}/reviews",
+            self.repo_owner, self.repo_name
+        );
+        let url = format!("{}{}", self.base_url, path);
+        let payload = serde_json::json!({ "event": "INVALID" });
+
+        self.wait_for_rate_limit_if_needed().await;
+        let response = self
+            .http_client
+            .request(Method::POST, &url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| {
+                SymphonyError::GithubApiRequest(format!("request to {url} failed: {err}"))
+            })?;
+        self.update_rate_limit_state(response.headers()).await;
+
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        if status == 422 {
+            return Ok(());
+        }
+        Err(SymphonyError::GithubApiStatus {
+            status,
+            message: truncate_error_preview(&body),
+        })
+    }
+
     /// Create one atomic review containing a summary and all inline comments.
     pub async fn create_pull_request_review(
         &self,

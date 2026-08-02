@@ -55,6 +55,8 @@ pub struct ReviewConfig {
     pub completion_route: Option<ReviewRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes_requested_route: Option<ReviewRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_probe_pull_request: Option<u64>,
 }
 
 impl Default for ReviewConfig {
@@ -73,6 +75,7 @@ impl Default for ReviewConfig {
             trigger_state: "Agent Review".to_string(),
             completion_route: None,
             changes_requested_route: None,
+            permission_probe_pull_request: None,
         }
     }
 }

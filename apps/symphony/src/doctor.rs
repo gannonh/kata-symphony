@@ -371,11 +371,54 @@ pub async fn check_review(config: &ServiceConfig) -> Vec<DoctorCheckResult> {
         }
     }
 
-    if !automatic {
-        results.push(DoctorCheckResult::skipped(
+    let probe_number = match review.permission_probe_pull_request {
+        Some(number) if number > 0 => Some(number),
+        Some(_) => {
+            results.push(DoctorCheckResult::error(
+                "GitHub Review API",
+                "review.permission_probe_pull_request must be greater than 0",
+            ));
+            None
+        }
+        None => match client.list_pull_requests("open", None, None, 1).await {
+            Ok(pull_requests) => pull_requests
+                .first()
+                .map(|pull_request| pull_request.number),
+            Err(err) => {
+                results.push(DoctorCheckResult::error(
+                    "GitHub Review API",
+                    format!("Could not find an open pull request for the review permission probe: {err}"),
+                ));
+                None
+            }
+        },
+    };
+
+    if let Some(number) = probe_number {
+        match client.probe_pull_request_review_permission(number).await {
+            Ok(()) => results.push(DoctorCheckResult::pass(
+                "GitHub Review API",
+                format!("Review endpoint authorization verified with pull request #{number}"),
+            )),
+            Err(err) => results.push(DoctorCheckResult::error(
+                "GitHub Review API",
+                format!(
+                    "Review endpoint authorization probe failed for pull request #{number}: {err}"
+                ),
+            )),
+        }
+    } else if review.permission_probe_pull_request.is_none()
+        && !results
+            .iter()
+            .any(|result| result.name == "GitHub Review API" && result.status == CheckStatus::Error)
+    {
+        results.push(DoctorCheckResult::error(
             "GitHub Review API",
-            "Skipped repository API write checks in preview mode",
+            "No open pull request is available for the review permission probe",
         ));
+    }
+
+    if !automatic {
         return results;
     }
 
@@ -388,26 +431,26 @@ pub async fn check_review(config: &ServiceConfig) -> Vec<DoctorCheckResult> {
                 .and_then(JsonValue::as_bool)
             {
                 Some(true) => results.push(DoctorCheckResult::warning(
-                    "GitHub Review API",
-                    "GitHub API reports repository push metadata; formal review permission was not verified",
+                    "GitHub Review Metadata",
+                    "GitHub API reports repository push permission; formal review permission is determined by the review endpoint probe",
                 )),
                 Some(false) => results.push(DoctorCheckResult::warning(
-                    "GitHub Review API",
-                    "GitHub API reports no repository push permission; review submission may be denied",
+                    "GitHub Review Metadata",
+                    "GitHub API reports no repository push permission; formal review permission is determined by the review endpoint probe",
                 )),
                 None => results.push(DoctorCheckResult::warning(
-                    "GitHub Review API",
-                    "GitHub API did not expose repository permission metadata; review write permission could not be verified",
+                    "GitHub Review Metadata",
+                    "GitHub API did not expose repository permission metadata; formal review permission is determined by the review endpoint probe",
                 )),
             },
             Err(err) => results.push(DoctorCheckResult::warning(
-                "GitHub Review API",
+                "GitHub Review Metadata",
                 format!("Could not decode repository permission metadata: {err}"),
             )),
         },
         Err(err) => results.push(DoctorCheckResult::warning(
-            "GitHub Review API",
-            format!("Could not check repository permission metadata without mutation: {err}"),
+            "GitHub Review Metadata",
+            format!("Could not check repository permission metadata: {err}"),
         )),
     }
 

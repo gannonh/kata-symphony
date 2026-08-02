@@ -598,7 +598,10 @@ where
                 "approved_spec_version": spec.version,
             }),
         )?;
-        let publisher = ReviewPublisher::new(self.comments.clone());
+        let publisher = ReviewPublisher::with_owner(
+            self.comments.clone(),
+            self.config.owner_instance.clone(),
+        );
         if service.review.mode == crate::review::domain::ReviewMode::Preview {
             if let Err(error) = publisher
                 .publish_preview(
@@ -638,7 +641,7 @@ where
                 return Err(error);
             }
         } else {
-            if let Err(error) = publisher
+            let formal_result = publisher
                 .publish_formal(
                     &self.store,
                     &self.github,
@@ -647,8 +650,11 @@ where
                     candidate.pr_number,
                     self.config.max_pages,
                 )
-                .await
-            {
+                .await;
+            if formal_result.as_ref().is_ok_and(|published| !published) {
+                return Ok(ProcessOutcome::Waiting);
+            }
+            if let Err(error) = formal_result {
                 let classified = classify_review_publication_error(&error);
                 let status = self.record_publication_failure(
                     &intent,
@@ -733,31 +739,68 @@ where
         .await;
 
         if let Err(error) = &result {
-            let cycle_reopened = error
-                .to_string()
-                .contains("review cycle reopened while worker was running");
-            let factory_error = FactoryError::new(
-                if cycle_reopened {
-                    "review_cycle_reopened"
-                } else {
-                    "review_attempt_failed"
-                },
-                "review_coordinator",
-                error.to_string(),
-                true,
-                None,
-            );
+            let error_message = error.to_string();
+            let cycle_reopened =
+                error_message.contains("review cycle reopened while worker was running");
+            let retry_exhausted = match self
+                .store
+                .count_review_attempt_failures_for_head(&candidate.run_id, &pull.head.sha)
+            {
+                Ok(failed_attempts) => {
+                    review_attempt_retry_exhausted(failed_attempts, service.review.max_attempts)
+                }
+                Err(count_error) => {
+                    tracing::error!(
+                        event = "review_attempt_retry_count_failed",
+                        run_id = %candidate.run_id,
+                        reviewed_head_sha = %pull.head.sha,
+                        error = %count_error,
+                        "could not determine review attempt retry ceiling"
+                    );
+                    false
+                }
+            };
+            let (status, factory_error) = if retry_exhausted {
+                (
+                    "blocked",
+                    FactoryError::new(
+                        "review_attempt_retry_exhausted",
+                        "review_coordinator",
+                        format!(
+                            "review attempt retry budget exhausted for head {}: {error_message}",
+                            pull.head.sha
+                        ),
+                        false,
+                        None,
+                    ),
+                )
+            } else {
+                (
+                    "failed",
+                    FactoryError::new(
+                        if cycle_reopened {
+                            "review_cycle_reopened"
+                        } else {
+                            "review_attempt_failed"
+                        },
+                        "review_coordinator",
+                        error_message.clone(),
+                        true,
+                        None,
+                    ),
+                )
+            };
             if let Err(cleanup_error) =
                 self.store
                     .update_review_attempt(UpdateReviewAttemptRequest {
                         attempt_id: &attempt_id,
-                        status: "failed",
+                        status,
                         reprompt_count: service.review.max_reprompts,
                         worker_turn: None,
                         manifest: None,
                         validation_result: Some(&serde_json::json!({
                             "accepted": false,
-                            "error": error.to_string()
+                            "error": error_message
                         })),
                         error: Some(&factory_error),
                     })
@@ -769,7 +812,9 @@ where
                     "could not persist failed review attempt"
                 );
             }
-            if let Err(cleanup_error) = self.store.fail_attempt(&stage.stage_run_id, factory_error)
+            if let Err(cleanup_error) = self
+                .store
+                .fail_attempt(&stage.stage_run_id, factory_error.clone())
             {
                 tracing::error!(
                     event = "review_stage_cleanup_failed",
@@ -778,12 +823,32 @@ where
                     "could not terminate failed review stage"
                 );
             }
+            if retry_exhausted {
+                if let Err(event_error) = self.record_event(
+                    Some(&candidate.run_id),
+                    Some(&stage.stage_run_id),
+                    "review_blocked",
+                    serde_json::json!({
+                        "status": "blocked",
+                        "error": factory_error,
+                        "reviewed_head_sha": pull.head.sha,
+                    }),
+                ) {
+                    tracing::error!(
+                        event = "review_attempt_blocked_event_failed",
+                        attempt_id = %attempt_id,
+                        error = %event_error,
+                        "could not persist review blocked event"
+                    );
+                }
+            }
         }
         result
     }
 
     async fn reconcile_pending_publications(&self, service: &ServiceConfig) -> Result<()> {
-        let publisher = ReviewPublisher::new(self.comments.clone());
+        let publisher =
+            ReviewPublisher::with_owner(self.comments.clone(), self.config.owner_instance.clone());
         let pending = self.store.list_pending_review_publications()?;
         let has_automatic = pending.iter().any(|intent| intent.kind == "automatic");
         let project_data = if has_automatic {
@@ -876,7 +941,13 @@ where
                             self.config.max_pages,
                         )
                         .await
-                        .map(|()| ReviewPublicationResult::Published)
+                        .map(|published| {
+                            if published {
+                                ReviewPublicationResult::Published
+                            } else {
+                                ReviewPublicationResult::Waiting
+                            }
+                        })
                 }
                 .await;
                 match publisher_result {
@@ -1194,6 +1265,10 @@ where
     }
 }
 
+fn review_attempt_retry_exhausted(failed_attempts: u32, max_attempts: u32) -> bool {
+    failed_attempts.saturating_add(1) >= max_attempts.max(1)
+}
+
 fn classify_review_publication_error(error: &SymphonyError) -> FactoryError {
     let message = error.to_string();
     let lower = message.to_ascii_lowercase();
@@ -1297,8 +1372,17 @@ enum ReviewPublicationResult {
 
 #[cfg(test)]
 mod tests {
-    use super::{pull_revision_changed, resolve_review_path};
+    use super::{pull_revision_changed, resolve_review_path, review_attempt_retry_exhausted};
     use crate::github::client::{GithubPullRequest, GithubPullRequestRef};
+
+    #[test]
+    fn review_attempt_retry_ceiling_resets_for_a_new_head() {
+        // With max_attempts=2, the first failure remains retryable and the
+        // second failure blocks the same head. A new head starts at zero.
+        assert!(!review_attempt_retry_exhausted(0, 2));
+        assert!(review_attempt_retry_exhausted(1, 2));
+        assert!(!review_attempt_retry_exhausted(0, 2));
+    }
 
     fn pull(head: &str, base: &str) -> GithubPullRequest {
         GithubPullRequest {

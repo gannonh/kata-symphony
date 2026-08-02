@@ -9,8 +9,10 @@ use crate::review::domain::{
 use crate::review::findings::{render_formal_review_body_with_records, render_preview_comment};
 use crate::triage::publisher::TriageCommentPort;
 use crate::triage::runtime::SharedFactoryStore;
+use uuid::Uuid;
 
 pub const REVIEW_PREVIEW_COMMENT_STEP: &str = "review_preview_comment";
+const REVIEW_PUBLICATION_LEASE_SECONDS: i64 = 900;
 pub const REVIEW_CREATED_STEP: &str = "review_created";
 pub const FINDINGS_RECORDED_STEP: &str = "findings_recorded";
 
@@ -23,6 +25,7 @@ pub trait ReviewPort: Send + Sync {
         number: u64,
         max_pages: u32,
     ) -> Result<Vec<GithubPullRequestReview>>;
+    async fn pull_request_head_sha(&self, number: u64) -> Result<String>;
     async fn create_pull_request_review(
         &self,
         number: u64,
@@ -53,6 +56,10 @@ impl ReviewPort for crate::github::client::GithubClient {
             .await
     }
 
+    async fn pull_request_head_sha(&self, number: u64) -> Result<String> {
+        Ok(self.get_pull_request(number).await?.head.sha)
+    }
+
     async fn create_pull_request_review(
         &self,
         number: u64,
@@ -70,6 +77,7 @@ impl ReviewPort for crate::github::client::GithubClient {
 #[derive(Clone)]
 pub struct ReviewPublisher<C> {
     comments: C,
+    owner_instance: String,
 }
 
 impl<C> ReviewPublisher<C>
@@ -77,7 +85,14 @@ where
     C: TriageCommentPort + Clone,
 {
     pub fn new(comments: C) -> Self {
-        Self { comments }
+        Self::with_owner(comments, format!("review-publisher-{}", Uuid::now_v7()))
+    }
+
+    pub fn with_owner(comments: C, owner_instance: impl Into<String>) -> Self {
+        Self {
+            comments,
+            owner_instance: owner_instance.into(),
+        }
     }
 
     pub async fn publish_formal<R>(
@@ -88,7 +103,7 @@ where
         artifact: &ReviewFindingsArtifactRecord,
         pull_request_number: u64,
         max_pages: u32,
-    ) -> Result<()>
+    ) -> Result<bool>
     where
         R: ReviewPort + ?Sized,
     {
@@ -103,7 +118,14 @@ where
             .iter()
             .any(|step| step == FINDINGS_RECORDED_STEP)
         {
-            return Ok(());
+            return Ok(true);
+        }
+        if !store.claim_review_publication(
+            &intent.intent_id,
+            &self.owner_instance,
+            REVIEW_PUBLICATION_LEASE_SECONDS,
+        )? {
+            return Ok(false);
         }
 
         let publisher_login = review_port.authenticated_login().await?;
@@ -202,6 +224,15 @@ where
             if let Some(existing) = owned {
                 Some(existing)
             } else {
+                let live_head = review_port
+                    .pull_request_head_sha(pull_request_number)
+                    .await?;
+                if live_head != artifact.reviewed_head_sha {
+                    return Err(SymphonyError::TriageError(format!(
+                        "formal review publication conflict: live head {} does not match expected {}",
+                        live_head, artifact.reviewed_head_sha
+                    )));
+                }
                 Some(
                     review_port
                         .create_pull_request_review(
@@ -248,7 +279,8 @@ where
                 "inline_comment_count": comments.len(),
             }),
         )?;
-        Ok(())
+        store.clear_review_publication_lease(&intent.intent_id, &self.owner_instance)?;
+        Ok(true)
     }
 
     pub async fn publish_preview(
@@ -551,6 +583,7 @@ mod tests {
 
     struct FakeReviews {
         login: String,
+        head_sha: Mutex<String>,
         reviews: Mutex<Vec<GithubPullRequestReview>>,
         review_payloads: Mutex<Vec<(String, Vec<GithubPullRequestReviewComment>)>>,
     }
@@ -559,6 +592,7 @@ mod tests {
         fn new(login: &str) -> Arc<Self> {
             Arc::new(Self {
                 login: login.to_string(),
+                head_sha: Mutex::new("head".to_string()),
                 reviews: Mutex::new(Vec::new()),
                 review_payloads: Mutex::new(Vec::new()),
             })
@@ -577,6 +611,10 @@ mod tests {
             _max_pages: u32,
         ) -> Result<Vec<GithubPullRequestReview>> {
             Ok(self.reviews.lock().unwrap().clone())
+        }
+
+        async fn pull_request_head_sha(&self, _number: u64) -> Result<String> {
+            Ok(self.head_sha.lock().unwrap().clone())
         }
 
         async fn create_pull_request_review(
@@ -1224,6 +1262,22 @@ mod tests {
             vec![REVIEW_CREATED_STEP, FINDINGS_RECORDED_STEP]
         );
         assert_eq!(persisted.review_id.as_deref(), Some("review-17"));
+        assert!(reviews.review_payloads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn formal_publication_rejects_live_head_change_before_create() {
+        let (_temp, store) = open_store();
+        let reviews = FakeReviews::new("symphony-bot");
+        let publisher = ReviewPublisher::new(FakeComments::new("symphony-bot"));
+        let (artifact, intent) = setup_review_fixture(&store, "formal").await;
+        *reviews.head_sha.lock().unwrap() = "new-head".to_string();
+
+        let error = publisher
+            .publish_formal(&store, &reviews, &intent, &artifact, 42, 2)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("live head"));
         assert!(reviews.review_payloads.lock().unwrap().is_empty());
     }
 
