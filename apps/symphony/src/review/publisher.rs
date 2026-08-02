@@ -6,7 +6,7 @@ use crate::review::domain::{
     ReviewFindingsArtifactRecord, ReviewPublicationIntent, REVIEW_COMMENT_MARKER_PREFIX,
     REVIEW_COMMENT_MARKER_SUFFIX,
 };
-use crate::review::findings::{render_formal_review_body, render_preview_comment};
+use crate::review::findings::{render_formal_review_body_with_records, render_preview_comment};
 use crate::triage::publisher::TriageCommentPort;
 use crate::triage::runtime::SharedFactoryStore;
 
@@ -111,13 +111,24 @@ where
             "{REVIEW_COMMENT_MARKER_PREFIX}{}{REVIEW_COMMENT_MARKER_SUFFIX}",
             intent.intent_id
         );
-        let body = render_formal_review_body(
+        // The approved specification version is captured in the intent at claim time.
+        // Older intents fall back to the review schema version for compatibility.
+        let approved_spec_version = intent
+            .desired_effects
+            .get("approved_spec_version")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|version| u32::try_from(version).ok());
+        let finding_records =
+            store.list_review_finding_records_for_artifact(&artifact.artifact_id)?;
+        let body = render_formal_review_body_with_records(
             pull_request_number,
             &intent.intent_id,
             &intent.run_id,
             artifact,
+            approved_spec_version,
+            &finding_records,
         );
-        let comments = render_review_comments(artifact);
+        let comments = render_review_comments(artifact, &finding_records);
 
         let review_created = intent
             .completed_steps
@@ -126,28 +137,33 @@ where
         let bound_identity = intent.review_id.is_some()
             && intent.review_url.is_some()
             && intent.publisher_login.is_some();
-        if bound_identity && !review_created {
+        if bound_identity {
             let review_id = intent.review_id.as_deref().expect("bound review id");
             let review_url = intent.review_url.as_deref().expect("bound review URL");
-            let publisher_login = intent
+            let durable_publisher_login = intent
                 .publisher_login
                 .as_deref()
                 .expect("bound publisher login");
-            store.record_review_publication_step(
-                &intent.intent_id,
-                REVIEW_CREATED_STEP,
-                crate::triage::domain::PublicationStatus::Pending,
-                &serde_json::json!({
-                    "review_id": review_id,
-                    "review_url": review_url,
-                    "publisher_login": publisher_login,
-                }),
-            )?;
+            if !durable_publisher_login.eq_ignore_ascii_case(&publisher_login) {
+                return Err(SymphonyError::TriageError(format!(
+                    "formal review publisher identity conflict: durable login {durable_publisher_login} does not match authenticated login {publisher_login}"
+                )));
+            }
+            if !review_created {
+                store.record_review_publication_step(
+                    &intent.intent_id,
+                    REVIEW_CREATED_STEP,
+                    crate::triage::domain::PublicationStatus::Pending,
+                    &serde_json::json!({
+                        "review_id": review_id,
+                        "review_url": review_url,
+                        "publisher_login": durable_publisher_login,
+                    }),
+                )?;
+            }
         }
 
-        let review = if review_created || bound_identity {
-            None
-        } else if intent.review_id.is_some() {
+        let review = if review_created || bound_identity || intent.review_id.is_some() {
             None
         } else {
             let existing = review_port
@@ -374,11 +390,19 @@ where
 
 fn render_review_comments(
     artifact: &ReviewFindingsArtifactRecord,
+    finding_records: &[crate::review::domain::ReviewFindingRecord],
 ) -> Vec<GithubPullRequestReviewComment> {
     artifact
         .manifest
         .findings
         .iter()
+        .filter(|finding| {
+            !finding_records.iter().any(|record| {
+                record.artifact_id == artifact.artifact_id
+                    && record.finding_id == finding.finding_id
+                    && record.lifecycle_state == "persisting"
+            })
+        })
         .map(|finding| {
             let end_line = finding.end_line.unwrap_or(finding.line);
             let multiline = end_line > finding.line;
@@ -420,7 +444,7 @@ mod tests {
         ImplementationEvidence, ImplementationManifest, ImplementationPublicationKind,
         ManifestStatus,
     };
-    use crate::review::domain::ReviewFindingsArtifactRecord;
+    use crate::review::domain::{ReviewFindingRecord, ReviewFindingsArtifactRecord};
     use crate::review::manifest::{
         ReviewFinding, ReviewFindingCategory, ReviewFindingsManifest, ReviewSeverity,
     };
@@ -433,6 +457,7 @@ mod tests {
         StoreReviewArtifactRequest, StoreReviewAttemptRequest, StoreSpecArtifactRequest,
     };
     use async_trait::async_trait;
+    use chrono::Utc;
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
     use tempfile::tempdir;
@@ -760,10 +785,119 @@ mod tests {
                 &artifact.run_id,
                 &artifact.artifact_id,
                 kind,
-                &serde_json::json!({"issue_number":42}),
+                &serde_json::json!({"issue_number":42, "approved_spec_version": 7}),
             )
             .unwrap();
         (artifact, intent)
+    }
+
+    #[test]
+    fn formal_comments_suppress_only_persisting_findings() {
+        let now = Utc::now();
+        let finding = |id: &str, claim: &str| ReviewFinding {
+            finding_id: id.to_string(),
+            severity: ReviewSeverity::Major,
+            category: ReviewFindingCategory::Correctness,
+            path: "src/lib.rs".to_string(),
+            line: 10,
+            end_line: None,
+            claim: claim.to_string(),
+            rationale: "rationale".to_string(),
+            remediation: "remediation".to_string(),
+            acceptance_criterion: None,
+            confidence: 0.9,
+        };
+        let artifact = ReviewFindingsArtifactRecord {
+            artifact_id: "artifact".to_string(),
+            run_id: "run".to_string(),
+            stage_run_id: "stage".to_string(),
+            attempt_id: "attempt".to_string(),
+            draft_pr_artifact_id: "draft".to_string(),
+            implementation_artifact_id: "implementation".to_string(),
+            spec_artifact_id: "spec".to_string(),
+            schema_version: 1,
+            reviewed_head_sha: "head".to_string(),
+            base_sha: "base".to_string(),
+            manifest: ReviewFindingsManifest {
+                schema_version: 1,
+                reviewed_head_sha: "head".to_string(),
+                base_sha: "base".to_string(),
+                spec_conformance_summary: "Conforms".to_string(),
+                no_findings: false,
+                findings: vec![
+                    finding("persisting", "keep in summary"),
+                    finding("new", "fresh"),
+                ],
+            },
+            no_findings: false,
+            finding_count: 2,
+            received_at: now,
+            bytes_len: 1,
+        };
+        let records = vec![
+            ReviewFindingRecord {
+                finding_record_id: "record-1".to_string(),
+                run_id: "run".to_string(),
+                artifact_id: "artifact".to_string(),
+                finding_id: "persisting".to_string(),
+                identity_key: "src/lib.rs:10:10:keep in summary".to_string(),
+                reviewed_head_sha: "head".to_string(),
+                severity: ReviewSeverity::Major,
+                category: ReviewFindingCategory::Correctness,
+                path: "src/lib.rs".to_string(),
+                line: 10,
+                end_line: None,
+                claim: "keep in summary".to_string(),
+                rationale: "rationale".to_string(),
+                remediation: "remediation".to_string(),
+                acceptance_criterion: None,
+                confidence: 0.9,
+                lifecycle_state: "persisting".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+            ReviewFindingRecord {
+                finding_record_id: "record-2".to_string(),
+                run_id: "run".to_string(),
+                artifact_id: "artifact".to_string(),
+                finding_id: "new".to_string(),
+                identity_key: "src/lib.rs:10:10:fresh".to_string(),
+                reviewed_head_sha: "head".to_string(),
+                severity: ReviewSeverity::Major,
+                category: ReviewFindingCategory::Correctness,
+                path: "src/lib.rs".to_string(),
+                line: 10,
+                end_line: None,
+                claim: "fresh".to_string(),
+                rationale: "rationale".to_string(),
+                remediation: "remediation".to_string(),
+                acceptance_criterion: None,
+                confidence: 0.9,
+                lifecycle_state: "new".to_string(),
+                created_at: now,
+                updated_at: now,
+            },
+        ];
+        let comments = render_review_comments(&artifact, &records);
+        assert_eq!(comments.len(), 1);
+        assert!(comments[0].body.contains("fresh"));
+        assert!(!comments[0].body.contains("keep in summary"));
+        let body =
+            render_formal_review_body_with_records(42, "intent", "run", &artifact, None, &records);
+        assert!(body.contains("keep in summary"));
+    }
+
+    #[tokio::test]
+    async fn artifact_head_lookup_distinguishes_review_cycles() {
+        let (_dir, store) = open_store();
+        let (artifact, _intent) = setup_preview_fixture(&store).await;
+
+        assert!(store
+            .review_artifact_exists_for_head(&artifact.run_id, "head")
+            .unwrap());
+        assert!(!store
+            .review_artifact_exists_for_head(&artifact.run_id, "new-head")
+            .unwrap());
     }
 
     #[tokio::test]
@@ -970,7 +1104,7 @@ mod tests {
         assert!(payloads[0].0.contains("formal review"));
         assert!(payloads[0].0.contains("Issue `#42`"));
         assert!(payloads[0].0.contains(&artifact.spec_artifact_id));
-        assert!(payloads[0].0.contains("version `1`"));
+        assert!(payloads[0].0.contains("version `7`"));
         assert!(payloads[0].0.contains(&artifact.run_id));
         assert!(payloads[0]
             .0
@@ -1018,6 +1152,41 @@ mod tests {
         assert_eq!(
             persisted.completed_steps,
             vec![REVIEW_CREATED_STEP, FINDINGS_RECORDED_STEP]
+        );
+    }
+
+    #[tokio::test]
+    async fn resuming_bound_formal_review_requires_the_durable_publisher_identity() {
+        let (_dir, store) = open_store();
+        let comments = FakeComments::new("comment-bot");
+        let reviews = FakeReviews::new("current-bot");
+        let publisher = ReviewPublisher::new(comments);
+        let (artifact, intent) = setup_review_fixture(&store, "formal").await;
+        store
+            .bind_review_publication_review(
+                &intent.intent_id,
+                "review-17",
+                "https://github.test/reviews/17",
+                "durable-bot",
+            )
+            .unwrap();
+        let bound_intent = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+
+        let error = publisher
+            .publish_formal(&store, &reviews, &bound_intent, &artifact, 42, 2)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("publisher identity conflict"));
+        assert_eq!(
+            store
+                .get_review_publication_intent(&intent.intent_id)
+                .unwrap()
+                .unwrap()
+                .retry_count,
+            0
         );
     }
 

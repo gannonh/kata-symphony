@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::review::manifest::ReviewSeverity;
 use crate::triage::domain::{FactoryError, StageUsage};
 
 pub const REVIEW_STAGE_NAME: &str = "review";
@@ -47,6 +48,8 @@ pub struct ReviewConfig {
     pub max_attempts: u32,
     pub max_reprompts: u32,
     pub max_findings: usize,
+    #[serde(default)]
+    pub blocking_severity: ReviewSeverity,
     pub trigger_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_route: Option<ReviewRoute>,
@@ -66,6 +69,7 @@ impl Default for ReviewConfig {
             max_attempts: 3,
             max_reprompts: REVIEW_MAX_REPROMPTS_DEFAULT,
             max_findings: REVIEW_MAX_FINDINGS_DEFAULT,
+            blocking_severity: ReviewSeverity::Blocking,
             trigger_state: "Agent Review".to_string(),
             completion_route: None,
             changes_requested_route: None,
@@ -175,6 +179,7 @@ pub struct ReviewMetricsAggregate {
     pub failed_attempts: u64,
     pub blocked_publications: u64,
     pub preview_publications: u64,
+    pub automatic_publications: u64,
     pub findings: u64,
     pub no_findings: u64,
     pub base: crate::triage::domain::TriageMetricsAggregate,

@@ -3,6 +3,7 @@
 use symphony::config::{from_workflow, validate};
 use symphony::domain::AgentBackend;
 use symphony::error::SymphonyError;
+use symphony::review::manifest::ReviewSeverity;
 
 const REVIEW_WORKFLOW: &str = r#"
 tracker:
@@ -71,6 +72,54 @@ fn review_defaults_validate_and_explicit_routes_parse() {
         Some("Human Review")
     );
     validate(&config).expect("complete automatic review configuration should validate");
+}
+
+#[test]
+fn review_blocking_severity_parses_all_supported_values() {
+    for (value, expected) in [
+        ("blocking", ReviewSeverity::Blocking),
+        ("major", ReviewSeverity::Major),
+        ("minor", ReviewSeverity::Minor),
+        ("nit", ReviewSeverity::Nit),
+    ] {
+        let mut raw = raw_review_workflow();
+        raw["review"]["blocking_severity"] = serde_yaml::Value::String(value.to_string());
+        let config = from_workflow(&raw).expect("blocking severity should parse");
+        assert_eq!(config.review.blocking_severity, expected);
+    }
+
+    let config = review_config();
+    assert_eq!(config.review.blocking_severity, ReviewSeverity::Blocking);
+}
+
+#[test]
+fn review_blocking_severity_rejects_invalid_values() {
+    let mut raw = raw_review_workflow();
+    raw["review"]["blocking_severity"] = serde_yaml::Value::String("critical".to_string());
+    let error = from_workflow(&raw).expect_err("invalid blocking severity should fail");
+    match error {
+        SymphonyError::InvalidWorkflowConfig(message) => {
+            assert!(message.contains(
+                "review.blocking_severity must be 'blocking', 'major', 'minor', or 'nit'"
+            ));
+            assert!(message.contains("got 'critical'"));
+        }
+        other => panic!("expected workflow config error, got {other}"),
+    }
+}
+
+#[test]
+fn review_config_deserialization_defaults_blocking_severity() {
+    let config = review_config();
+    let mut serialized =
+        serde_json::to_value(&config.review).expect("review config should serialize");
+    serialized
+        .as_object_mut()
+        .expect("serialized config should be an object")
+        .remove("blocking_severity");
+    let restored: symphony::review::domain::ReviewConfig =
+        serde_json::from_value(serialized).expect("old review config should deserialize");
+    assert_eq!(restored.blocking_severity, ReviewSeverity::Blocking);
 }
 
 #[test]

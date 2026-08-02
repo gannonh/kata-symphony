@@ -28,6 +28,7 @@ use crate::implementation::domain::{
 use crate::notifications;
 use crate::repo_url::repo_is_remote;
 use crate::review::domain::{ReviewConfig, ReviewMode, ReviewRoute};
+use crate::review::manifest::ReviewSeverity;
 use crate::spec::domain::{SpecApprovalRoute, SpecConfig, SpecDecisionLabels, SpecPromptsConfig};
 use crate::triage::domain::{
     RouteMapping, StorageConfig, TriageConfig, TriageMode, TriageRoutesConfig,
@@ -481,6 +482,7 @@ struct RawReviewConfig {
     max_attempts: Option<u32>,
     max_reprompts: Option<u32>,
     max_findings: Option<usize>,
+    blocking_severity: Option<String>,
     trigger_state: Option<String>,
     completion_route: Option<RawRouteMapping>,
     changes_requested_route: Option<RawRouteMapping>,
@@ -1593,6 +1595,18 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
                 .unwrap_or_default(),
         })
     };
+    let blocking_severity = match raw_review.blocking_severity.as_deref().map(str::trim) {
+        None => review_defaults.blocking_severity,
+        Some("blocking") => ReviewSeverity::Blocking,
+        Some("major") => ReviewSeverity::Major,
+        Some("minor") => ReviewSeverity::Minor,
+        Some("nit") => ReviewSeverity::Nit,
+        Some(other) => {
+            return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                "review.blocking_severity must be 'blocking', 'major', 'minor', or 'nit' (got '{other}')"
+            )));
+        }
+    };
     let review = ReviewConfig {
         enabled: raw_review.enabled.unwrap_or(review_defaults.enabled),
         mode: review_mode,
@@ -1611,6 +1625,7 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
         max_findings: raw_review
             .max_findings
             .unwrap_or(review_defaults.max_findings),
+        blocking_severity,
         trigger_state: raw_review
             .trigger_state
             .map(|value| resolve_env(&value))
@@ -2220,18 +2235,31 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
                 "review.model is not supported when agent.name is 'codex'".to_string(),
             ));
         }
-        if config.review.mode == ReviewMode::Automatic
-            && config
+        if config.review.mode == ReviewMode::Automatic {
+            if config
                 .review
                 .completion_route
                 .as_ref()
                 .map(|route| route.state.trim().is_empty())
                 .unwrap_or(true)
-        {
-            return Err(SymphonyError::InvalidWorkflowConfig(
-                "review.completion_route.state is required when review.mode is 'automatic'"
-                    .to_string(),
-            ));
+            {
+                return Err(SymphonyError::InvalidWorkflowConfig(
+                    "review.completion_route.state is required when review.mode is 'automatic'"
+                        .to_string(),
+                ));
+            }
+            if config
+                .review
+                .changes_requested_route
+                .as_ref()
+                .map(|route| route.state.trim().is_empty())
+                .unwrap_or(true)
+            {
+                return Err(SymphonyError::InvalidWorkflowConfig(
+                    "review.changes_requested_route.state is required when review.mode is 'automatic'"
+                        .to_string(),
+                ));
+            }
         }
     }
 
@@ -2475,6 +2503,64 @@ implementation:
         let config = from_workflow(&value).unwrap();
         let err = validate(&config).unwrap_err().to_string();
         assert!(err.contains("completion_route.state"));
+    }
+
+    #[test]
+    fn review_rejects_automatic_without_changes_requested_route() {
+        let mut yaml = github_base_yaml();
+        yaml.push_str(
+            r#"
+spec:
+  enabled: true
+implementation:
+  enabled: true
+  validation:
+    - name: unit
+      command: cargo test
+      timeout_ms: 60000
+review:
+  enabled: true
+  mode: automatic
+  completion_route:
+    state: Human Review
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("changes_requested_route.state"));
+    }
+
+    #[test]
+    fn review_parses_automatic_routes() {
+        let mut yaml = github_base_yaml();
+        yaml.push_str(
+            r#"
+spec:
+  enabled: true
+implementation:
+  enabled: true
+  validation:
+    - name: unit
+      command: cargo test
+      timeout_ms: 60000
+review:
+  enabled: true
+  mode: automatic
+  completion_route:
+    state: Human Review
+  changes_requested_route:
+    state: Implementation
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        validate(&config).unwrap();
+        assert_eq!(config.review.mode, ReviewMode::Automatic);
+        assert_eq!(
+            config.review.changes_requested_route.unwrap().state,
+            "Implementation"
+        );
     }
 
     #[test]

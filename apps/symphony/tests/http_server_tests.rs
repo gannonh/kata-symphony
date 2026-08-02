@@ -1457,12 +1457,37 @@ fn sample_blocked_publication() -> symphony::http_server::BlockedPublicationHttp
     }
 }
 
+fn sample_blocked_review_publication() -> symphony::http_server::BlockedPublicationHttpResponse {
+    symphony::http_server::BlockedPublicationHttpResponse {
+        intent_id: "review-intent-blocked-1".to_string(),
+        run_id: "run-review-7".to_string(),
+        kind: "formal".to_string(),
+        retry_count: 3,
+        last_step: Some("review_created".to_string()),
+        error_code: Some("review_publication_retry_exhausted".to_string()),
+        error_remediation: Some("Restore forge access and retry.".to_string()),
+        updated_at: Utc
+            .with_ymd_and_hms(2026, 7, 30, 9, 16, 0)
+            .single()
+            .expect("timestamp"),
+    }
+}
+
 fn sample_publication_reset() -> symphony::http_server::BlockedPublicationResetHttpResponse {
     symphony::http_server::BlockedPublicationResetHttpResponse {
         intent_id: "intent-blocked-1".to_string(),
         run_id: "run-7".to_string(),
         status: "pending".to_string(),
         completed_steps: vec!["comment_pending".to_string()],
+    }
+}
+
+fn sample_review_publication_reset() -> symphony::http_server::BlockedPublicationResetHttpResponse {
+    symphony::http_server::BlockedPublicationResetHttpResponse {
+        intent_id: "review-intent-blocked-1".to_string(),
+        run_id: "run-review-7".to_string(),
+        status: "pending".to_string(),
+        completed_steps: vec!["review_created".to_string()],
     }
 }
 
@@ -1714,6 +1739,7 @@ async fn test_factory_run_metrics_stage_validation() {
             },
             blocked_publications: 1,
             preview_publications: 1,
+            automatic_publications: 2,
             findings: 0,
             no_findings: 1,
         }),
@@ -1746,6 +1772,8 @@ async fn test_factory_run_metrics_stage_validation() {
     let review_payload = body_json(review).await;
     assert_eq!(review_payload["stage"], "review");
     assert_eq!(review_payload["blocked_publications"], 1);
+    assert_eq!(review_payload["preview_publications"], 1);
+    assert_eq!(review_payload["automatic_publications"], 2);
     assert_eq!(review_payload["no_findings"], 1);
 
     let missing_stage = app
@@ -1876,7 +1904,10 @@ async fn unused_base_url() -> String {
 #[tokio::test]
 async fn test_blocked_publications_route_returns_the_blocked_set() {
     let app = router_with_factory_query(FakeFactoryRunQuery {
-        blocked_publications: Some(vec![sample_blocked_publication()]),
+        blocked_publications: Some(vec![
+            sample_blocked_publication(),
+            sample_blocked_review_publication(),
+        ]),
         ..Default::default()
     });
 
@@ -1898,6 +1929,11 @@ async fn test_blocked_publications_route_returns_the_blocked_set() {
     assert_eq!(
         payload["blocked"][0]["error_code"],
         "publication_retry_exhausted"
+    );
+    assert_eq!(payload["blocked"][1]["kind"], "formal");
+    assert_eq!(
+        payload["blocked"][1]["intent_id"],
+        "review-intent-blocked-1"
     );
 }
 
@@ -1950,6 +1986,39 @@ async fn test_publication_reset_route_records_the_operator() {
     assert_eq!(
         operators.lock().expect("operators lock").as_slice(),
         [("intent-blocked-1".to_string(), "ada".to_string())]
+    );
+}
+
+#[tokio::test]
+async fn test_review_publication_reset_route_preserves_review_steps() {
+    let operators = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        resets: BTreeMap::from([(
+            "review-intent-blocked-1".to_string(),
+            Ok(sample_review_publication_reset()),
+        )]),
+        reset_operators: Arc::clone(&operators),
+        ..Default::default()
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v1/publications/review-intent-blocked-1/reset?operator=ada")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let payload = body_json(response).await;
+    assert_eq!(payload["intent_id"], "review-intent-blocked-1");
+    assert_eq!(payload["completed_steps"][0], "review_created");
+    assert_eq!(
+        operators.lock().expect("operators lock").as_slice(),
+        [("review-intent-blocked-1".to_string(), "ada".to_string())]
     );
 }
 

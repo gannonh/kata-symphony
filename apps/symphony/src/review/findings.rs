@@ -4,9 +4,28 @@ use std::collections::BTreeMap;
 
 use crate::github::client::GithubPullRequestFile;
 use crate::review::domain::{
-    ReviewFindingsArtifactRecord, REVIEW_COMMENT_MARKER_PREFIX, REVIEW_COMMENT_MARKER_SUFFIX,
+    ReviewFindingRecord, ReviewFindingsArtifactRecord, REVIEW_COMMENT_MARKER_PREFIX,
+    REVIEW_COMMENT_MARKER_SUFFIX,
 };
-use crate::review::manifest::{ReviewSeverity, ReviewedFile, ReviewedLineRange};
+use crate::review::manifest::{ReviewFinding, ReviewSeverity, ReviewedFile, ReviewedLineRange};
+
+/// Stable finding identity used for lifecycle carry-forward across review cycles.
+/// Location lines are deliberately excluded so edits that move a finding retain identity.
+pub fn finding_identity_key(finding: &ReviewFinding) -> String {
+    let category = match finding.category {
+        crate::review::manifest::ReviewFindingCategory::Correctness => "correctness",
+        crate::review::manifest::ReviewFindingCategory::Security => "security",
+        crate::review::manifest::ReviewFindingCategory::SpecConformance => "spec-conformance",
+        crate::review::manifest::ReviewFindingCategory::TestCoverage => "test-coverage",
+        crate::review::manifest::ReviewFindingCategory::Maintainability => "maintainability",
+    };
+    format!(
+        "{}:{}:{}",
+        finding.path.trim(),
+        category,
+        finding.claim.trim()
+    )
+}
 
 /// Convert GitHub file patches into the right-side line ranges accepted by
 /// review comments. A hunk's full new-file span includes both changed and
@@ -122,24 +141,75 @@ pub fn render_formal_review_body(
     intent_id: &str,
     run_id: &str,
     artifact: &ReviewFindingsArtifactRecord,
+    approved_spec_version: Option<u32>,
+) -> String {
+    render_formal_review_body_with_records(
+        issue_number,
+        intent_id,
+        run_id,
+        artifact,
+        approved_spec_version,
+        &[],
+    )
+}
+
+pub fn render_formal_review_body_with_records(
+    issue_number: u64,
+    intent_id: &str,
+    run_id: &str,
+    artifact: &ReviewFindingsArtifactRecord,
+    approved_spec_version: Option<u32>,
+    finding_records: &[ReviewFindingRecord],
 ) -> String {
     let marker = format!("{REVIEW_COMMENT_MARKER_PREFIX}{intent_id}{REVIEW_COMMENT_MARKER_SUFFIX}");
+    let persisting = finding_records
+        .iter()
+        .filter(|record| record.lifecycle_state == "persisting")
+        .collect::<Vec<_>>();
     let findings = if artifact.manifest.no_findings {
         "**No findings.** The worker explicitly affirmed `no_findings`.".to_string()
-    } else {
+    } else if persisting.is_empty() {
         format!(
             "Findings: {}. Every finding is attached as an inline comment.",
             artifact.finding_count
         )
+    } else {
+        format!(
+            "Findings: {}. New findings are attached as inline comments. {} persisting finding(s) remain summarized below.",
+            artifact.finding_count,
+            persisting.len()
+        )
+    };
+    let persisting_summary = if persisting.is_empty() {
+        String::new()
+    } else {
+        let mut summary = String::from("\n\n### Persisting findings\n\n");
+        summary.push_str("| ID | Location | Claim |\n| --- | --- | --- |\n");
+        for record in persisting {
+            let end = record
+                .end_line
+                .map(|line| format!("-{line}"))
+                .unwrap_or_default();
+            summary.push_str(&format!(
+                "| `{}` | `{}`:{}{} | {} |\n",
+                record.finding_id,
+                record.path,
+                record.line,
+                end,
+                record.claim.replace(['\r', '\n'], " ").replace('|', "\\|")
+            ));
+        }
+        summary
     };
     format!(
-        "{marker}\n## Symphony A4 formal review\n\nIssue `#{issue_number}`.\n\nSpec artifact `{}` (version `{}`).\n\nFactory run `{run_id}` reviewed head `{}` against base `{}`.\n\n{}\n\n{}\n",
+        "{marker}\n## Symphony A4 formal review\n\nIssue `#{issue_number}`.\n\nSpec artifact `{}` (version `{}`).\n\nFactory run `{run_id}` reviewed head `{}` against base `{}`.\n\n{}\n\n{}{}\n",
         artifact.spec_artifact_id,
-        artifact.schema_version,
+        approved_spec_version.unwrap_or(artifact.schema_version),
         artifact.reviewed_head_sha,
         artifact.base_sha,
         artifact.manifest.spec_conformance_summary.trim(),
         findings,
+        persisting_summary,
     )
 }
 

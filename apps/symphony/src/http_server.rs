@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -884,6 +884,16 @@ pub struct FactoryRunReviewHttp {
     pub no_findings: bool,
     pub received_at: chrono::DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_cycle: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle_count: Option<u32>,
+    #[serde(default)]
+    pub finding_counts_by_severity: BTreeMap<String, u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publication: Option<FactoryRunReviewPublicationHttp>,
 }
 
@@ -894,6 +904,8 @@ pub struct FactoryRunReviewPublicationHttp {
     pub status: String,
     pub completed_steps: Vec<String>,
     pub retry_count: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_state: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<crate::triage::domain::FactoryError>,
 }
@@ -958,9 +970,41 @@ pub fn attach_review_http_response(
     artifact: Option<&crate::review::domain::ReviewFindingsArtifactRecord>,
     publication: Option<&crate::review::domain::ReviewPublicationIntent>,
 ) {
+    attach_review_http_response_with_attempts(response, artifact, publication, &[]);
+}
+
+pub fn attach_review_http_response_with_attempts(
+    response: &mut FactoryRunHttpResponse,
+    artifact: Option<&crate::review::domain::ReviewFindingsArtifactRecord>,
+    publication: Option<&crate::review::domain::ReviewPublicationIntent>,
+    attempts: &[crate::triage::domain::StageRunRecord],
+) {
     let Some(artifact) = artifact else {
         return;
     };
+    let review_attempts = attempts
+        .iter()
+        .filter(|attempt| attempt.stage == crate::review::domain::REVIEW_STAGE_NAME)
+        .collect::<Vec<_>>();
+    let current_cycle = review_attempts.iter().map(|attempt| attempt.attempt).max();
+    let cycle_count = (!review_attempts.is_empty()).then_some(review_attempts.len() as u32);
+    let mut finding_counts_by_severity = BTreeMap::from([
+        ("blocking".to_string(), 0),
+        ("major".to_string(), 0),
+        ("minor".to_string(), 0),
+        ("nit".to_string(), 0),
+    ]);
+    for finding in &artifact.manifest.findings {
+        let severity = match finding.severity {
+            crate::review::manifest::ReviewSeverity::Blocking => "blocking",
+            crate::review::manifest::ReviewSeverity::Major => "major",
+            crate::review::manifest::ReviewSeverity::Minor => "minor",
+            crate::review::manifest::ReviewSeverity::Nit => "nit",
+        };
+        *finding_counts_by_severity
+            .entry(severity.to_string())
+            .or_insert(0) += 1;
+    }
     response.review = Some(FactoryRunReviewHttp {
         status: publication
             .map(|intent| intent.status.as_str().to_string())
@@ -971,12 +1015,18 @@ pub fn attach_review_http_response(
         finding_count: artifact.finding_count,
         no_findings: artifact.no_findings,
         received_at: artifact.received_at,
+        current_cycle,
+        cycle_count,
+        finding_counts_by_severity,
+        review_id: publication.and_then(|intent| intent.review_id.clone()),
+        review_url: publication.and_then(|intent| intent.review_url.clone()),
         publication: publication.map(|intent| FactoryRunReviewPublicationHttp {
             intent_id: intent.intent_id.clone(),
             kind: intent.kind.clone(),
             status: intent.status.as_str().to_string(),
             completed_steps: intent.completed_steps.clone(),
             retry_count: intent.retry_count,
+            route_state: intent.route_state.clone(),
             error: intent.last_error.clone(),
         }),
     });
@@ -1050,6 +1100,7 @@ pub struct ReviewRunMetricsHttpResponse {
     pub base: FactoryRunMetricsHttpResponse,
     pub blocked_publications: u64,
     pub preview_publications: u64,
+    pub automatic_publications: u64,
     pub findings: u64,
     pub no_findings: u64,
 }
@@ -1063,6 +1114,7 @@ pub fn review_run_metrics_http_response(
         base,
         blocked_publications: metrics.blocked_publications,
         preview_publications: metrics.preview_publications,
+        automatic_publications: metrics.automatic_publications,
         findings: metrics.findings,
         no_findings: metrics.no_findings,
     }
@@ -3439,5 +3491,56 @@ mod tests {
             err.message.contains(&allowed_values),
             "error should list deterministic allowed values"
         );
+    }
+
+    #[test]
+    fn review_http_fields_are_serialized_and_new_fields_default_on_old_payloads() {
+        let old_payload = serde_json::json!({
+            "status": "completed",
+            "artifact_id": "artifact-1",
+            "reviewed_head_sha": "head",
+            "base_sha": "base",
+            "finding_count": 1,
+            "no_findings": false,
+            "received_at": Utc::now(),
+            "publication": null
+        });
+        let old: FactoryRunReviewHttp = serde_json::from_value(old_payload).unwrap();
+        assert!(old.current_cycle.is_none());
+        assert!(old.review_id.is_none());
+        assert!(old.finding_counts_by_severity.is_empty());
+
+        let mut counts = BTreeMap::new();
+        counts.insert("blocking".to_string(), 1);
+        let review = FactoryRunReviewHttp {
+            status: "applied".to_string(),
+            artifact_id: "artifact-1".to_string(),
+            reviewed_head_sha: "head".to_string(),
+            base_sha: "base".to_string(),
+            finding_count: 1,
+            no_findings: false,
+            received_at: Utc::now(),
+            current_cycle: Some(2),
+            cycle_count: Some(2),
+            finding_counts_by_severity: counts,
+            review_id: Some("review-1".to_string()),
+            review_url: Some("https://github.com/review/1".to_string()),
+            publication: Some(FactoryRunReviewPublicationHttp {
+                intent_id: "intent-1".to_string(),
+                kind: "automatic".to_string(),
+                status: "applied".to_string(),
+                completed_steps: vec!["route_applied".to_string()],
+                retry_count: 0,
+                route_state: Some("Human Review".to_string()),
+                error: None,
+            }),
+        };
+        let payload = serde_json::to_value(review).unwrap();
+        assert_eq!(payload["current_cycle"], 2);
+        assert_eq!(payload["cycle_count"], 2);
+        assert_eq!(payload["finding_counts_by_severity"]["blocking"], 1);
+        assert_eq!(payload["review_id"], "review-1");
+        assert_eq!(payload["review_url"], "https://github.com/review/1");
+        assert_eq!(payload["publication"]["route_state"], "Human Review");
     }
 }

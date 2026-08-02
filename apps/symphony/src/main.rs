@@ -852,6 +852,10 @@ fn run_doctor(workflow_path: &Path) -> Result<i32, String> {
                         runtime.block_on(doctor::check_github(&service_config.tracker))
                     });
                     results.extend(github_results);
+                    let review_results = tokio::task::block_in_place(|| {
+                        runtime.block_on(doctor::check_review(&service_config))
+                    });
+                    results.extend(review_results);
 
                     results.extend(doctor::check_backend(&service_config));
                     results.extend(doctor::check_workspace(&service_config.workspace));
