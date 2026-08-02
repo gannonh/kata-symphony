@@ -11,7 +11,7 @@ timestamp: 2026-07-30T14:45:39Z
 
 ## Status
 
-Active — PR1 review findings preview and typed TUI state are implemented in the current mainline after [#610](https://github.com/gannonh/kata-symphony/pull/610) (`233caf88`). Direct draft-PR, Agent Review preview, and Ratatui TUI UAT passed on Project #16 with issue [#45](https://github.com/gannonh/uat-symphony/issues/45) and draft PR [#46](https://github.com/gannonh/uat-symphony/pull/46). PR2 formal review publication and routing remain planned. Restart-during-publication, full cleanup, and Docker evidence remain residuals.
+Active — PR1 review findings preview and typed TUI state are implemented in the current mainline after [#610](https://github.com/gannonh/kata-symphony/pull/610) (`233caf88`). PR2 formal review publication and routing are implemented on `feat/a4-review-publication`; automated gates, doctor permission probing, and preview-only Ratatui verification passed. Automatic formal-review UAT, restart-during-publication evidence, full cleanup, and Docker evidence remain residuals. See the [PR2 verify report](2026-08-02-a4-pr2-verify-report.md).
 
 ## Goal
 
@@ -29,6 +29,7 @@ A4 is **read-only with respect to the change under review**. It never edits code
 - [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md)
 - [ADR-0004 A3 implementation durability and bundles](/adrs/0004-a3-implementation-durability-and-bundles.md)
 - [A3 PR2 build report](2026-07-29-a3-pr2-build-report.md) / [verify report](2026-07-29-a3-pr2-verify-report.md)
+- [A4 PR2 verify report](2026-08-02-a4-pr2-verify-report.md)
 - [A2 Spec Stage](2026-07-18-a2-spec-stage-design.md)
 - [GitHub REST pull request reviews API](https://docs.github.com/en/rest/pulls/reviews)
 - [GitHub REST pull request files API](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests-files)
@@ -241,7 +242,7 @@ apps/symphony/src/{doctor,http_server}.rs
 
 **PR1 — review stage and findings preview.** **Implemented** in [#610](https://github.com/gannonh/kata-symphony/pull/610) (`233caf88`): eligibility, dispatch ownership, stage attempts, worker invocation and boundary, manifest schema and validation, bounded re-prompt, durable findings artifacts, preview comment, HTTP/events, and typed TUI state. No PR review, no routing.
 
-**PR2 — deterministic review publication and routing.** Atomic review creation, create-before-record recovery, progressive publication steps, routing decision, re-review cycles and carry-forward, retry/waiting/terminal semantics, doctor validation, operator recovery path.
+**PR2 — deterministic review publication and routing.** **Implemented on `feat/a4-review-publication`; verification pending.** Atomic review creation, create-before-record recovery, progressive publication steps, routing decision, re-review cycles and carry-forward, retry/waiting/terminal semantics, doctor validation, and operator recovery path are present. Automatic formal-review UAT and restart evidence remain open.
 
 ## Risks and mitigations
 

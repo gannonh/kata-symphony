@@ -6,13 +6,13 @@ Roadmap for planned and completed work. Historical Superpowers designs and plans
 
 * [Symphony Software Factory Platform PRD](symphony-software-factory-platform-prd.md) - product requirements and vertical-slice roadmap for the full software factory platform
 * [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md) - Complete; **PR1+PR2 shipped** (PR1 [#606](https://github.com/gannonh/kata-symphony/pull/606); PR2 [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`); [build](2026-07-29-a3-pr2-build-report.md), [verify](2026-07-29-a3-pr2-verify-report.md) Verified with residuals; [ADR-0004](../adrs/0004-a3-implementation-durability-and-bundles.md)); direct draft-PR, Agent Review preview, and Ratatui TUI UAT verified on Project #16
-* [A4 Agent Review Stage](2026-07-30-a4-agent-review-stage-design.md) - **Active**; PR1 review findings preview and typed TUI state are implemented; PR2 formal review publication and routing remain planned
+* [A4 Agent Review Stage](2026-07-30-a4-agent-review-stage-design.md) - **Active**; PR1 is implemented and PR2 is implemented on `feat/a4-review-publication`; [PR2 verify report](2026-08-02-a4-pr2-verify-report.md) is In verification pending automatic formal-review UAT
 * [Pi Symphony Extension Design](../superpowers/specs/2026-05-14-pi-symphony-extension-design.md) - Pi extension to init, launch, monitor, and steer Symphony
 * [Wave 4 Shared Context and Diagnostics Plan](../superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md) - dashboard parity for shared context + diagnostics
 
 # Planned
 
-* A4 PR2 formal review publication and routing — planned ([design](2026-07-30-a4-agent-review-stage-design.md); [PRD A4](symphony-software-factory-platform-prd.md))
+* A4 PR2 formal review publication and routing — implemented on `feat/a4-review-publication`; automatic formal-review UAT and restart evidence pending ([design](2026-07-30-a4-agent-review-stage-design.md); [verify](2026-08-02-a4-pr2-verify-report.md); [PRD A4](symphony-software-factory-platform-prd.md))
 
 # Blocked
 

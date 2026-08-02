@@ -1,6 +1,8 @@
 # Specs Update Log
 
 ## 2026-08-02
+* **A4 PR2 implementation verification started**: `feat/a4-review-publication` now contains atomic formal review publication, durable publication leases, changed-head waiting, conflict recovery, draft-only eligibility, retry ceilings, and doctor review-write permission probing. Automated gates and preview-only Ratatui verification pass; automatic formal-review UAT and restart evidence remain open in the [PR2 verify report](2026-08-02-a4-pr2-verify-report.md).
+
 * **Direct draft-PR, review-preview, and TUI UAT completed**: The real `gannonh/uat-symphony` Project #16 run for issue [#45](https://github.com/gannonh/uat-symphony/issues/45) created draft PR [#46](https://github.com/gannonh/uat-symphony/pull/46), reached `Agent Review` after publication, posted structured review findings, and showed typed factory sessions in the Ratatui TUI. Restart-during-publication, cleanup, and Docker evidence remain residuals.
 
 ## 2026-08-01
