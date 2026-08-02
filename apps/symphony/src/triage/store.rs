@@ -4510,28 +4510,44 @@ impl SqliteFactoryStore {
         &mut self,
         intent_id: &str,
         error: FactoryError,
-    ) -> Result<()> {
+    ) -> Result<bool> {
+        let now = Self::now();
+        let now_s = ts(now);
         let changed = self
             .conn
             .execute(
                 "UPDATE review_publication_intents SET status = ?1,
                  last_error_json = ?2, lease_owner = NULL, lease_expires_at = NULL,
                  updated_at = ?3
-                 WHERE intent_id = ?4",
+                 WHERE intent_id = ?4 AND status = ?5
+                   AND (lease_owner IS NULL OR lease_expires_at IS NULL OR lease_expires_at < ?3)",
                 params![
                     PublicationStatus::Conflict.as_str(),
                     bounded_json(&error)?,
-                    ts(Self::now()),
+                    now_s,
                     intent_id,
+                    PublicationStatus::Pending.as_str(),
                 ],
             )
             .map_err(storage_error)?;
-        if changed == 0 {
+        if changed > 0 {
+            return Ok(true);
+        }
+        let exists: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT status FROM review_publication_intents WHERE intent_id = ?1",
+                params![intent_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        if exists.is_none() {
             return Err(SymphonyError::StorageError(format!(
                 "review intent {intent_id} not found"
             )));
         }
-        Ok(())
+        Ok(false)
     }
 
     pub fn review_metrics(&self) -> Result<ReviewMetricsAggregate> {
@@ -7114,7 +7130,7 @@ mod tests {
             )
             .unwrap();
 
-        store
+        assert!(store
             .supersede_review_publication(
                 "review-superseded",
                 FactoryError::new(
@@ -7125,7 +7141,19 @@ mod tests {
                     None,
                 ),
             )
-            .unwrap();
+            .unwrap());
+        assert!(!store
+            .supersede_review_publication(
+                "review-superseded",
+                FactoryError::new(
+                    "review_publication_superseded_again",
+                    "review_publisher",
+                    "a stale caller must not overwrite terminal state",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap());
 
         let intent = store
             .get_review_publication_intent("review-superseded")

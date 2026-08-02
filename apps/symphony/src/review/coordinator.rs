@@ -1334,7 +1334,9 @@ where
         error: FactoryError,
     ) -> Result<()> {
         let store = self.store.clone();
-        store.supersede_review_publication(intent_id, error.clone())?;
+        if !store.supersede_review_publication(intent_id, error.clone())? {
+            return Ok(());
+        }
         self.record_event(
             Some(run_id),
             stage_run_id,
