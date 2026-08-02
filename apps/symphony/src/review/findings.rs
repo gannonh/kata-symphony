@@ -115,6 +115,34 @@ pub fn render_preview_comment(
     body
 }
 
+/// Render the marker-owned body used by an atomic GitHub pull-request review.
+/// Inline finding details are carried by the review comments themselves.
+pub fn render_formal_review_body(
+    issue_number: u64,
+    intent_id: &str,
+    run_id: &str,
+    artifact: &ReviewFindingsArtifactRecord,
+) -> String {
+    let marker = format!("{REVIEW_COMMENT_MARKER_PREFIX}{intent_id}{REVIEW_COMMENT_MARKER_SUFFIX}");
+    let findings = if artifact.manifest.no_findings {
+        "**No findings.** The worker explicitly affirmed `no_findings`.".to_string()
+    } else {
+        format!(
+            "Findings: {}. Every finding is attached as an inline comment.",
+            artifact.finding_count
+        )
+    };
+    format!(
+        "{marker}\n## Symphony A4 formal review\n\nIssue `#{issue_number}`.\n\nSpec artifact `{}` (version `{}`).\n\nFactory run `{run_id}` reviewed head `{}` against base `{}`.\n\n{}\n\n{}\n",
+        artifact.spec_artifact_id,
+        artifact.schema_version,
+        artifact.reviewed_head_sha,
+        artifact.base_sha,
+        artifact.manifest.spec_conformance_summary.trim(),
+        findings,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

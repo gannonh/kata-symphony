@@ -1,15 +1,71 @@
 //! Idempotent marker-owned findings preview publication.
 
 use crate::error::{Result, SymphonyError};
+use crate::github::client::{GithubPullRequestReview, GithubPullRequestReviewComment};
 use crate::review::domain::{
     ReviewFindingsArtifactRecord, ReviewPublicationIntent, REVIEW_COMMENT_MARKER_PREFIX,
     REVIEW_COMMENT_MARKER_SUFFIX,
 };
-use crate::review::findings::render_preview_comment;
+use crate::review::findings::{render_formal_review_body, render_preview_comment};
 use crate::triage::publisher::TriageCommentPort;
 use crate::triage::runtime::SharedFactoryStore;
 
 pub const REVIEW_PREVIEW_COMMENT_STEP: &str = "review_preview_comment";
+pub const REVIEW_CREATED_STEP: &str = "review_created";
+pub const FINDINGS_RECORDED_STEP: &str = "findings_recorded";
+
+/// Forge operations required for atomic pull-request review publication.
+#[async_trait::async_trait]
+pub trait ReviewPort: Send + Sync {
+    async fn authenticated_login(&self) -> Result<String>;
+    async fn list_pull_request_reviews(
+        &self,
+        number: u64,
+        max_pages: u32,
+    ) -> Result<Vec<GithubPullRequestReview>>;
+    async fn create_pull_request_review(
+        &self,
+        number: u64,
+        commit_id: &str,
+        body: &str,
+        comments: &[GithubPullRequestReviewComment],
+    ) -> Result<GithubPullRequestReview>;
+}
+
+#[async_trait::async_trait]
+impl ReviewPort for crate::github::client::GithubClient {
+    async fn authenticated_login(&self) -> Result<String> {
+        let user = self.get_authenticated_user().await?;
+        if user.login.trim().is_empty() {
+            return Err(SymphonyError::GithubApiRequest(
+                "authenticated GitHub user login is empty".to_string(),
+            ));
+        }
+        Ok(user.login)
+    }
+
+    async fn list_pull_request_reviews(
+        &self,
+        number: u64,
+        max_pages: u32,
+    ) -> Result<Vec<GithubPullRequestReview>> {
+        crate::github::client::GithubClient::list_pull_request_reviews(self, number, max_pages)
+            .await
+    }
+
+    async fn create_pull_request_review(
+        &self,
+        number: u64,
+        commit_id: &str,
+        body: &str,
+        comments: &[GithubPullRequestReviewComment],
+    ) -> Result<GithubPullRequestReview> {
+        crate::github::client::GithubClient::create_pull_request_review(
+            self, number, commit_id, body, comments,
+        )
+        .await
+    }
+}
 
 #[derive(Clone)]
 pub struct ReviewPublisher<C> {
@@ -22,6 +78,161 @@ where
 {
     pub fn new(comments: C) -> Self {
         Self { comments }
+    }
+
+    pub async fn publish_formal<R>(
+        &self,
+        store: &SharedFactoryStore,
+        review_port: &R,
+        intent: &ReviewPublicationIntent,
+        artifact: &ReviewFindingsArtifactRecord,
+        pull_request_number: u64,
+        max_pages: u32,
+    ) -> Result<()>
+    where
+        R: ReviewPort + ?Sized,
+    {
+        if intent.kind != "automatic" && intent.kind != "formal" {
+            return Err(SymphonyError::TriageError(format!(
+                "formal review publisher cannot reconcile kind={}",
+                intent.kind
+            )));
+        }
+        if intent
+            .completed_steps
+            .iter()
+            .any(|step| step == FINDINGS_RECORDED_STEP)
+        {
+            return Ok(());
+        }
+
+        let publisher_login = review_port.authenticated_login().await?;
+        let marker = format!(
+            "{REVIEW_COMMENT_MARKER_PREFIX}{}{REVIEW_COMMENT_MARKER_SUFFIX}",
+            intent.intent_id
+        );
+        let body = render_formal_review_body(
+            pull_request_number,
+            &intent.intent_id,
+            &intent.run_id,
+            artifact,
+        );
+        let comments = render_review_comments(artifact);
+
+        let review_created = intent
+            .completed_steps
+            .iter()
+            .any(|step| step == REVIEW_CREATED_STEP);
+        let bound_identity = intent.review_id.is_some()
+            && intent.review_url.is_some()
+            && intent.publisher_login.is_some();
+        if bound_identity && !review_created {
+            let review_id = intent.review_id.as_deref().expect("bound review id");
+            let review_url = intent.review_url.as_deref().expect("bound review URL");
+            let publisher_login = intent
+                .publisher_login
+                .as_deref()
+                .expect("bound publisher login");
+            store.record_review_publication_step(
+                &intent.intent_id,
+                REVIEW_CREATED_STEP,
+                crate::triage::domain::PublicationStatus::Pending,
+                &serde_json::json!({
+                    "review_id": review_id,
+                    "review_url": review_url,
+                    "publisher_login": publisher_login,
+                }),
+            )?;
+        }
+
+        let review = if review_created || bound_identity {
+            None
+        } else if intent.review_id.is_some() {
+            None
+        } else {
+            let existing = review_port
+                .list_pull_request_reviews(pull_request_number, max_pages)
+                .await?;
+            let mut owned = None;
+            for candidate in existing.into_iter().filter(|review| {
+                review
+                    .body
+                    .as_deref()
+                    .is_some_and(|body| body.contains(&marker))
+            }) {
+                let author = candidate
+                    .user
+                    .as_ref()
+                    .map(|user| user.login.as_str())
+                    .unwrap_or_default();
+                if !author.eq_ignore_ascii_case(&publisher_login) {
+                    return Err(SymphonyError::TriageError(format!(
+                        "formal review marker {marker} is owned by another GitHub login {author}"
+                    )));
+                }
+                if candidate.commit_id != artifact.reviewed_head_sha {
+                    return Err(SymphonyError::TriageError(format!(
+                        "formal review marker {marker} conflict: head {} does not match expected {}",
+                        candidate.commit_id, artifact.reviewed_head_sha
+                    )));
+                }
+                if owned.is_some() {
+                    return Err(SymphonyError::TriageError(format!(
+                        "multiple formal reviews found for marker {marker}"
+                    )));
+                }
+                owned = Some(candidate);
+            }
+            if let Some(existing) = owned {
+                Some(existing)
+            } else {
+                Some(
+                    review_port
+                        .create_pull_request_review(
+                            pull_request_number,
+                            &artifact.reviewed_head_sha,
+                            &body,
+                            &comments,
+                        )
+                        .await?,
+                )
+            }
+        };
+
+        if let Some(review) = review {
+            let review_url = review.html_url.clone().unwrap_or_default();
+            store.bind_review_publication_review(
+                &intent.intent_id,
+                &review.id.to_string(),
+                &review_url,
+                &publisher_login,
+            )?;
+            store.record_review_publication_step(
+                &intent.intent_id,
+                REVIEW_CREATED_STEP,
+                crate::triage::domain::PublicationStatus::Pending,
+                &serde_json::json!({
+                    "review_id": review.id.to_string(),
+                    "review_url": review_url,
+                    "publisher_login": publisher_login,
+                }),
+            )?;
+        } else if !review_created && !bound_identity {
+            return Err(SymphonyError::TriageError(
+                "formal review has no forge identity to record".to_string(),
+            ));
+        }
+
+        store.record_review_publication_step(
+            &intent.intent_id,
+            FINDINGS_RECORDED_STEP,
+            crate::triage::domain::PublicationStatus::Pending,
+            &serde_json::json!({
+                "finding_count": artifact.finding_count,
+                "inline_comment_count": comments.len(),
+            }),
+        )?;
+        Ok(())
     }
 
     pub async fn publish_preview(
@@ -161,17 +372,58 @@ where
     }
 }
 
+fn render_review_comments(
+    artifact: &ReviewFindingsArtifactRecord,
+) -> Vec<GithubPullRequestReviewComment> {
+    artifact
+        .manifest
+        .findings
+        .iter()
+        .map(|finding| {
+            let end_line = finding.end_line.unwrap_or(finding.line);
+            let multiline = end_line > finding.line;
+            let severity = serde_json::to_string(&finding.severity)
+                .unwrap_or_else(|_| "\"unknown\"".to_string())
+                .trim_matches('"')
+                .to_string();
+            let category = serde_json::to_string(&finding.category)
+                .unwrap_or_else(|_| "\"unknown\"".to_string())
+                .trim_matches('"')
+                .to_string();
+            let mut body = format!(
+                "**{severity}** ({category})\n\n{}\n\n**Why:** {}\n\n**Suggested remediation:** {}",
+                finding.claim, finding.rationale, finding.remediation
+            );
+            if let Some(criterion) = finding.acceptance_criterion.as_deref() {
+                body.push_str(&format!("\n\n**Acceptance criterion:** {criterion}"));
+            }
+            GithubPullRequestReviewComment {
+                path: finding.path.clone(),
+                line: end_line,
+                side: "RIGHT".to_string(),
+                start_line: multiline.then_some(finding.line),
+                start_side: multiline.then_some("RIGHT".to_string()),
+                body,
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::github::client::{GithubIssueComment, GithubUser};
+    use crate::github::client::{
+        GithubIssueComment, GithubPullRequestReview, GithubPullRequestReviewComment, GithubUser,
+    };
     use crate::implementation::domain::{
         AcceptanceCriterionClaim, CriterionStatus, EvidenceKind, ExecutionProfile,
         ImplementationEvidence, ImplementationManifest, ImplementationPublicationKind,
         ManifestStatus,
     };
     use crate::review::domain::ReviewFindingsArtifactRecord;
-    use crate::review::manifest::ReviewFindingsManifest;
+    use crate::review::manifest::{
+        ReviewFinding, ReviewFindingCategory, ReviewFindingsManifest, ReviewSeverity,
+    };
     use crate::spec::domain::{SpecArtifact, SpecPublicationKind};
     use crate::triage::domain::PublicationStatus;
     use crate::triage::publisher::TriageCommentPort;
@@ -269,6 +521,63 @@ mod tests {
                     })?;
             comment.body = Some(body.to_string());
             Ok(comment.clone())
+        }
+    }
+
+    struct FakeReviews {
+        login: String,
+        reviews: Mutex<Vec<GithubPullRequestReview>>,
+        review_payloads: Mutex<Vec<(String, Vec<GithubPullRequestReviewComment>)>>,
+    }
+
+    impl FakeReviews {
+        fn new(login: &str) -> Arc<Self> {
+            Arc::new(Self {
+                login: login.to_string(),
+                reviews: Mutex::new(Vec::new()),
+                review_payloads: Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ReviewPort for Arc<FakeReviews> {
+        async fn authenticated_login(&self) -> Result<String> {
+            Ok(self.login.clone())
+        }
+
+        async fn list_pull_request_reviews(
+            &self,
+            _number: u64,
+            _max_pages: u32,
+        ) -> Result<Vec<GithubPullRequestReview>> {
+            Ok(self.reviews.lock().unwrap().clone())
+        }
+
+        async fn create_pull_request_review(
+            &self,
+            _number: u64,
+            commit_id: &str,
+            body: &str,
+            comments: &[GithubPullRequestReviewComment],
+        ) -> Result<GithubPullRequestReview> {
+            self.review_payloads
+                .lock()
+                .unwrap()
+                .push((body.to_string(), comments.to_vec()));
+            let review = GithubPullRequestReview {
+                id: 900,
+                user: Some(GithubUser {
+                    login: self.login.clone(),
+                }),
+                body: Some(body.to_string()),
+                commit_id: commit_id.to_string(),
+                state: "COMMENTED".to_string(),
+                html_url: Some("https://github.test/reviews/900".to_string()),
+                submitted_at: None,
+            };
+            self.reviews.lock().unwrap().push(review.clone());
+            Ok(review)
         }
     }
 
@@ -625,6 +934,204 @@ mod tests {
             .unwrap();
         assert_eq!(unchanged.status, PublicationStatus::Pending);
         assert!(unchanged.completed_steps.is_empty());
+    }
+
+    #[tokio::test]
+    async fn formal_publication_sends_one_atomic_review_with_multiline_anchor() {
+        let (_dir, store) = open_store();
+        let comments = FakeComments::new("comment-bot");
+        let reviews = FakeReviews::new("symphony-bot");
+        let publisher = ReviewPublisher::new(comments.clone());
+        let (mut artifact, intent) = setup_review_fixture(&store, "automatic").await;
+        artifact.manifest.no_findings = false;
+        artifact.manifest.findings = vec![ReviewFinding {
+            finding_id: "f-1".to_string(),
+            severity: ReviewSeverity::Major,
+            category: ReviewFindingCategory::Correctness,
+            path: "src/lib.rs".to_string(),
+            line: 10,
+            end_line: Some(12),
+            claim: "The retry loses the error".to_string(),
+            rationale: "The error is discarded in the changed branch".to_string(),
+            remediation: "Return the original error".to_string(),
+            acceptance_criterion: None,
+            confidence: 0.9,
+        }];
+        artifact.finding_count = 1;
+
+        publisher
+            .publish_formal(&store, &reviews, &intent, &artifact, 42, 2)
+            .await
+            .unwrap();
+
+        let payloads = reviews.review_payloads.lock().unwrap();
+        assert_eq!(payloads.len(), 1);
+        assert!(payloads[0].0.contains("<!-- symphony:review:"));
+        assert!(payloads[0].0.contains("formal review"));
+        assert!(payloads[0].0.contains("Issue `#42`"));
+        assert!(payloads[0].0.contains(&artifact.spec_artifact_id));
+        assert!(payloads[0].0.contains("version `1`"));
+        assert!(payloads[0].0.contains(&artifact.run_id));
+        assert!(payloads[0]
+            .0
+            .contains("reviewed head `head` against base `base`"));
+        assert_eq!(payloads[0].1.len(), 1);
+        assert_eq!(payloads[0].1[0].line, 12);
+        assert_eq!(payloads[0].1[0].start_line, Some(10));
+        assert_eq!(payloads[0].1[0].start_side.as_deref(), Some("RIGHT"));
+        let persisted = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, PublicationStatus::Pending);
+        assert_eq!(persisted.review_id.as_deref(), Some("900"));
+        assert_eq!(persisted.publisher_login.as_deref(), Some("symphony-bot"));
+        assert_eq!(
+            persisted.completed_steps,
+            vec![REVIEW_CREATED_STEP, FINDINGS_RECORDED_STEP]
+        );
+    }
+
+    #[tokio::test]
+    async fn formal_publication_adopts_owned_marker_without_duplicate_create() {
+        let (_dir, store) = open_store();
+        let comments = FakeComments::new("comment-bot");
+        let reviews = FakeReviews::new("symphony-bot");
+        let publisher = ReviewPublisher::new(comments.clone());
+        let (artifact, intent) = setup_review_fixture(&store, "formal").await;
+
+        publisher
+            .publish_formal(&store, &reviews, &intent, &artifact, 42, 2)
+            .await
+            .unwrap();
+        publisher
+            .publish_formal(&store, &reviews, &intent, &artifact, 42, 2)
+            .await
+            .unwrap();
+
+        assert_eq!(reviews.review_payloads.lock().unwrap().len(), 1);
+        let persisted = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, PublicationStatus::Pending);
+        assert_eq!(
+            persisted.completed_steps,
+            vec![REVIEW_CREATED_STEP, FINDINGS_RECORDED_STEP]
+        );
+    }
+
+    #[tokio::test]
+    async fn formal_publication_recovers_bound_identity_before_recorded_step() {
+        let (_dir, store) = open_store();
+        let comments = FakeComments::new("symphony-bot");
+        let reviews = FakeReviews::new("symphony-bot");
+        let publisher = ReviewPublisher::new(comments);
+        let (artifact, intent) = setup_review_fixture(&store, "formal").await;
+        store
+            .bind_review_publication_review(
+                &intent.intent_id,
+                "review-17",
+                "https://github.test/reviews/17",
+                "symphony-bot",
+            )
+            .unwrap();
+        let bound = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+
+        publisher
+            .publish_formal(&store, &reviews, &bound, &artifact, 42, 2)
+            .await
+            .unwrap();
+
+        let persisted = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            persisted.completed_steps,
+            vec![REVIEW_CREATED_STEP, FINDINGS_RECORDED_STEP]
+        );
+        assert_eq!(persisted.review_id.as_deref(), Some("review-17"));
+        assert!(reviews.review_payloads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn formal_publication_rejects_marker_with_stale_head() {
+        let (_dir, store) = open_store();
+        let comments = FakeComments::new("symphony-bot");
+        let reviews = FakeReviews::new("symphony-bot");
+        let publisher = ReviewPublisher::new(comments);
+        let (artifact, intent) = setup_review_fixture(&store, "formal").await;
+        let marker = format!(
+            "{REVIEW_COMMENT_MARKER_PREFIX}{}{REVIEW_COMMENT_MARKER_SUFFIX}",
+            intent.intent_id
+        );
+        reviews
+            .reviews
+            .lock()
+            .unwrap()
+            .push(GithubPullRequestReview {
+                id: 901,
+                user: Some(GithubUser {
+                    login: "symphony-bot".to_string(),
+                }),
+                body: Some(marker),
+                commit_id: "stale-head".to_string(),
+                state: "COMMENTED".to_string(),
+                html_url: Some("https://github.test/reviews/901".to_string()),
+                submitted_at: None,
+            });
+
+        let error = publisher
+            .publish_formal(&store, &reviews, &intent, &artifact, 42, 2)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("conflict"));
+        assert!(reviews.review_payloads.lock().unwrap().is_empty());
+        assert!(store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap()
+            .completed_steps
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn formal_publication_rejects_foreign_marker_owner() {
+        let (_dir, store) = open_store();
+        let comments = FakeComments::new("symphony-bot");
+        let reviews = FakeReviews::new("symphony-bot");
+        let publisher = ReviewPublisher::new(comments.clone());
+        let (artifact, intent) = setup_review_fixture(&store, "automatic").await;
+        let marker = format!(
+            "{REVIEW_COMMENT_MARKER_PREFIX}{}{REVIEW_COMMENT_MARKER_SUFFIX}",
+            intent.intent_id
+        );
+        reviews
+            .reviews
+            .lock()
+            .unwrap()
+            .push(GithubPullRequestReview {
+                id: 901,
+                user: Some(GithubUser {
+                    login: "human".to_string(),
+                }),
+                body: Some(marker),
+                commit_id: "head".to_string(),
+                state: "COMMENTED".to_string(),
+                html_url: Some("https://github.test/reviews/901".to_string()),
+                submitted_at: None,
+            });
+
+        let error = publisher
+            .publish_formal(&store, &reviews, &intent, &artifact, 42, 2)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("another GitHub login"));
+        assert!(reviews.review_payloads.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
