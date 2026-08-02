@@ -19,7 +19,7 @@ Branch: `feat/a4-review-publication`
 
 - `cargo fmt --check` — Pass
 - `cargo clippy -- -D warnings` — Pass
-- `cargo test` — Pass: 402 library tests plus all integration suites
+- `cargo test -- --test-threads=1` — Pass: 403 library tests plus all integration suites. An unconstrained parallel run showed intermittent pre-existing Codex/mock-server timing failures in `orchestrator_tests`; the serial gate passed all tests.
 - `pnpm run validate:affected` — Pass: 2 Turborepo tasks, including the Symphony suite
 - Formal review client tests cover multiline anchors, marker adoption, foreign identity conflicts, stale heads, invalid permission probes, and unexpected successful permission probes.
 - Store tests cover draft-PR eligibility, changed-head retry budgets, conflict recovery, publication leases, migration reapplication, and publication-step persistence.
@@ -43,7 +43,7 @@ A fresh direct Ratatui run used the feature binary and the existing preview-only
 
 Evidence bundle: `/tmp/kata-symphony-current-uat-evidence/a4-pr2/`
 
-- `state.json` contains the Project #16 URL, empty active queues, and `supervisor.status=active`.
+- `state.json` contains the Project #16 URL, empty active queues, and `supervisor.status=active` after the current feature binary reached its first poll.
 - `doctor.txt` contains the complete preflight output.
 - `tui-session.ansi` and `tui-session-initial.ansi` contain the direct Ratatui terminal captures.
 - `logs/log/symphony.log` contains startup, HTTP binding, TUI enablement, and review poll events.
