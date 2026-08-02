@@ -160,8 +160,6 @@ where
             && intent.review_url.is_some()
             && intent.publisher_login.is_some();
         if bound_identity {
-            let review_id = intent.review_id.as_deref().expect("bound review id");
-            let review_url = intent.review_url.as_deref().expect("bound review URL");
             let durable_publisher_login = intent
                 .publisher_login
                 .as_deref()
@@ -170,18 +168,6 @@ where
                 return Err(SymphonyError::TriageError(format!(
                     "formal review publisher identity conflict: durable login {durable_publisher_login} does not match authenticated login {publisher_login}"
                 )));
-            }
-            if !review_created {
-                store.record_review_publication_step(
-                    &intent.intent_id,
-                    REVIEW_CREATED_STEP,
-                    crate::triage::domain::PublicationStatus::Pending,
-                    &serde_json::json!({
-                        "review_id": review_id,
-                        "review_url": review_url,
-                        "publisher_login": durable_publisher_login,
-                    }),
-                )?;
             }
         }
 
@@ -278,6 +264,25 @@ where
                     live_head, artifact.reviewed_head_sha
                 )));
             }
+        }
+
+        if bound_identity && !review_created {
+            let review_id = intent.review_id.as_deref().expect("bound review id");
+            let review_url = intent.review_url.as_deref().expect("bound review URL");
+            let durable_publisher_login = intent
+                .publisher_login
+                .as_deref()
+                .expect("bound publisher login");
+            store.record_review_publication_step(
+                &intent.intent_id,
+                REVIEW_CREATED_STEP,
+                crate::triage::domain::PublicationStatus::Pending,
+                &serde_json::json!({
+                    "review_id": review_id,
+                    "review_url": review_url,
+                    "publisher_login": durable_publisher_login,
+                }),
+            )?;
         }
 
         if let Some(review) = review {
@@ -1480,10 +1485,7 @@ mod tests {
             .get_review_publication_intent(&intent.intent_id)
             .unwrap()
             .unwrap();
-        assert!(!persisted
-            .completed_steps
-            .iter()
-            .any(|step| step == FINDINGS_RECORDED_STEP));
+        assert!(persisted.completed_steps.is_empty());
         assert_eq!(persisted.retry_count, 0);
     }
 
