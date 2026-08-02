@@ -145,6 +145,34 @@ pub struct GithubPullRequestFile {
     pub patch: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct GithubPullRequestReview {
+    pub id: u64,
+    #[serde(default)]
+    pub user: Option<GithubUser>,
+    #[serde(default)]
+    pub body: Option<String>,
+    pub commit_id: String,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub html_url: Option<String>,
+    #[serde(default)]
+    pub submitted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GithubPullRequestReviewComment {
+    pub path: String,
+    pub line: u32,
+    pub side: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_side: Option<String>,
+    pub body: String,
+}
+
 #[derive(Clone)]
 pub struct GithubClient {
     pub http_client: reqwest::Client,
@@ -518,6 +546,45 @@ impl GithubClient {
         url.query_pairs_mut().append_pair("per_page", "100");
         self.paginated_get_capped(url.as_ref(), max_pages, "pull files")
             .await
+    }
+
+    /// List reviews for a pull request, including author, body, and reviewed commit.
+    pub async fn list_pull_request_reviews(
+        &self,
+        number: u64,
+        max_pages: u32,
+    ) -> Result<Vec<GithubPullRequestReview>> {
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/repos/{}/{}/pulls/{number}/reviews",
+            self.base_url, self.repo_owner, self.repo_name
+        ))
+        .map_err(|err| {
+            SymphonyError::GithubApiRequest(format!("invalid pull reviews URL: {err}"))
+        })?;
+        url.query_pairs_mut().append_pair("per_page", "100");
+        self.paginated_get_capped(url.as_ref(), max_pages, "pull reviews")
+            .await
+    }
+
+    /// Create one atomic review containing a summary and all inline comments.
+    pub async fn create_pull_request_review(
+        &self,
+        number: u64,
+        commit_id: &str,
+        body: &str,
+        comments: &[GithubPullRequestReviewComment],
+    ) -> Result<GithubPullRequestReview> {
+        let path = format!(
+            "/repos/{}/{}/pulls/{number}/reviews",
+            self.repo_owner, self.repo_name
+        );
+        let payload = serde_json::json!({
+            "commit_id": commit_id,
+            "body": body,
+            "event": "COMMENT",
+            "comments": comments,
+        });
+        self.request_json(Method::POST, &path, Some(&payload)).await
     }
 
     /// Create a pull request. Callers that need draft publication pass `draft: true`.
