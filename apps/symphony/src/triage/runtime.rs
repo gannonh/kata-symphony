@@ -1085,6 +1085,9 @@ impl EventHubEmitter {
                 )
                 | ("review", "review_published" | "review_blocked")
         );
+        if is_start && stage.status.is_terminal() {
+            return;
+        }
 
         let Ok(mut registry) = self.factory_sessions.lock() else {
             return;
