@@ -1,6 +1,6 @@
 {
   "name": "@kata-sh/pi-symphony-extension",
-  "version": "2.3.2",
+  "version": "2.3.3",
   "description": "Pi extension for launching, attaching to, and monitoring Kata Symphony",
   "license": "MIT",
   "private": false,
