@@ -1,7 +1,7 @@
 ---
 type: Spec
 title: A3 Implementation Stage
-status: Active
+status: Complete
 description: Design for turning a pinned A2 approved specification into a validated change bundle and linked draft GitHub pull request.
 tags: [symphony, software-factory, implementation-stage, github, docker]
 timestamp: 2026-07-27T16:30:13Z
@@ -11,7 +11,7 @@ timestamp: 2026-07-27T16:30:13Z
 
 ## Status
 
-Complete — PR1 implementation/validation preview **shipped** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](2026-07-29-a3-pr1-build-report.md), [verify](2026-07-29-a3-pr1-verify-report.md)). **PR2** deterministic draft-PR publication and Agent Review handoff **shipped** in [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`) ([build](2026-07-29-a3-pr2-build-report.md), [verify](2026-07-29-a3-pr2-verify-report.md) Incomplete). Live AC20 UAT was **not executed** and is deferred by maintainer decision; the verify report is not superseded. **Next:** [A4 Agent Review Stage](2026-07-30-a4-agent-review-stage-design.md).
+Complete — PR1 implementation/validation preview **shipped** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](2026-07-29-a3-pr1-build-report.md), [verify](2026-07-29-a3-pr1-verify-report.md)). **PR2** deterministic draft-PR publication and Agent Review handoff **shipped** in [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`) ([build](2026-07-29-a3-pr2-build-report.md), [verify](2026-07-29-a3-pr2-verify-report.md) Verified with residuals). Direct GitHub draft-PR, Agent Review preview, and Ratatui TUI UAT passed on Project #16 using issue [#45](https://github.com/gannonh/uat-symphony/issues/45) and draft PR [#46](https://github.com/gannonh/uat-symphony/pull/46). Restart-during-publication, full cleanup, and Docker evidence remain residuals. **Next:** [A4 Agent Review Stage](2026-07-30-a4-agent-review-stage-design.md).
 
 ## Goal
 

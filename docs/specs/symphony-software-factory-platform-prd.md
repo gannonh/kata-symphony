@@ -237,12 +237,12 @@ A spec-routed issue produces versioned product behavior, technical approach, acc
 
 Implementation consumes the approved artifact version, runs repository validation, and opens a draft PR that links the issue, spec version, factory run, and validation summary.
 
-**Progress (2026-07-29):** **PR1 implemented** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](/specs/2026-07-29-a3-pr1-build-report.md), [verify](/specs/2026-07-29-a3-pr1-verify-report.md), [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md)). **PR2 shipped** in [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`) ([build](/specs/2026-07-29-a3-pr2-build-report.md), [verify](/specs/2026-07-29-a3-pr2-verify-report.md) Incomplete — live AC20 UAT deferred by maintainer decision, not executed). Design: [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md). A4 proceeds without the live A3 UAT.
+**Progress (2026-08-02):** **PR1 implemented** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](/specs/2026-07-29-a3-pr1-build-report.md), [verify](/specs/2026-07-29-a3-pr1-verify-report.md), [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md)). **PR2 shipped** in [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`) ([build](/specs/2026-07-29-a3-pr2-build-report.md), [verify](/specs/2026-07-29-a3-pr2-verify-report.md) Verified with residuals). Direct GitHub draft-PR, Agent Review preview, and Ratatui TUI UAT passed on Project #16 with issue [#45](https://github.com/gannonh/uat-symphony/issues/45) and draft PR [#46](https://github.com/gannonh/uat-symphony/pull/46). Restart-during-publication, full cleanup, and Docker evidence remain residuals. Design: [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md).
 
 | Slice | Status | Notes |
 | --- | --- | --- |
 | PR1 implementation and validation preview | **Implemented** ([#606](https://github.com/gannonh/kata-symphony/pull/606)) | Local preview path; Docker profile fail-closes pending full container orchestration; live UAT residual |
-| PR2 deterministic draft-PR publication | **Shipped** ([#607](https://github.com/gannonh/kata-symphony/pull/607)) | Expected-projection branch push, owned draft PR, restart recovery, Agent Review handoff, bounded publication retries; live UAT deferred |
+| PR2 deterministic draft-PR publication | **Shipped** ([#607](https://github.com/gannonh/kata-symphony/pull/607)) | Expected-projection branch push, owned draft PR, Agent Review handoff, bounded publication retries; direct GitHub/TUI UAT passed, restart-during-publication and Docker residuals remain |
 
 **Demo:** Approve a spec and watch Symphony produce a draft PR whose description records the intended behavior and evidence.
 
@@ -250,7 +250,7 @@ Implementation consumes the approved artifact version, runs repository validatio
 
 #### A4. Draft PR → structured, read-only agent review
 
-A review stage consumes the PR description, diff, repository context, and approved spec. It emits schema-validated findings. A deterministic publisher creates PR comments using narrow credentials.
+A review stage consumes the PR description, diff, repository context, and approved spec. It emits schema-validated findings. PR1 is implemented as a preview-only issue comment flow with typed TUI state; formal GitHub review publication and routing remain planned.
 
 **Demo:** Open or update a PR, receive a review summary and inline findings, push a correction, and see contextual re-review.
 

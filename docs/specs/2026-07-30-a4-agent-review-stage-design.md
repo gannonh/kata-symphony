@@ -1,7 +1,7 @@
 ---
 type: Spec
 title: A4 Agent Review Stage
-status: Planned
+status: Active
 description: Design for turning an owned draft pull request into a structured, read-only agent review that emits schema-validated findings and publishes them deterministically.
 tags: [symphony, software-factory, review-stage, github]
 timestamp: 2026-07-30T14:45:39Z
@@ -11,7 +11,7 @@ timestamp: 2026-07-30T14:45:39Z
 
 ## Status
 
-Planned — successor to [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md), shipped in [#606](https://github.com/gannonh/kata-symphony/pull/606) and [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`). A3's live AC20 UAT was deferred by maintainer decision, so A4 proceeds against A3's automated-gate evidence rather than live-UAT evidence. See [Inherited risk](#inherited-risk-from-the-deferred-a3-uat).
+Active — PR1 review findings preview and typed TUI state are implemented in the current mainline after [#610](https://github.com/gannonh/kata-symphony/pull/610) (`233caf88`). Direct draft-PR, Agent Review preview, and Ratatui TUI UAT passed on Project #16 with issue [#45](https://github.com/gannonh/uat-symphony/issues/45) and draft PR [#46](https://github.com/gannonh/uat-symphony/pull/46). PR2 formal review publication and routing remain planned. Restart-during-publication, full cleanup, and Docker evidence remain residuals.
 
 ## Goal
 
@@ -239,15 +239,15 @@ apps/symphony/src/{doctor,http_server}.rs
 
 ## Delivery slices
 
-**PR1 — review stage and findings preview.** Eligibility, dispatch ownership, stage attempts, worker invocation and boundary, manifest schema and validation, bounded re-prompt, durable findings artifacts, preview comment, HTTP/events. No PR review, no routing.
+**PR1 — review stage and findings preview.** **Implemented** in [#610](https://github.com/gannonh/kata-symphony/pull/610) (`233caf88`): eligibility, dispatch ownership, stage attempts, worker invocation and boundary, manifest schema and validation, bounded re-prompt, durable findings artifacts, preview comment, HTTP/events, and typed TUI state. No PR review, no routing.
 
 **PR2 — deterministic review publication and routing.** Atomic review creation, create-before-record recovery, progressive publication steps, routing decision, re-review cycles and carry-forward, retry/waiting/terminal semantics, doctor validation, operator recovery path.
 
 ## Risks and mitigations
 
-### Inherited risk from the deferred A3 UAT
+### Residual risk from the incomplete A3 recovery matrix
 
-A3's live AC20 UAT was never executed. A4 consumes A3's draft-PR artifacts, so any live-only defect in A3 publication surfaces first as an A4 eligibility or anchoring failure, where it will be harder to diagnose. Mitigation: A4 PR1 treats a malformed or unresolvable draft-PR artifact as an explicit blocked state with an actionable error naming A3 as the source, rather than failing obscurely. Running the A3 live UAT before A4 PR2 remains the cheaper option.
+Direct A3 draft-PR, Agent Review preview, and Ratatui TUI UAT are now verified on Project #16. Restart-during-publication recovery, full cleanup proof, and Docker execution remain unverified. A4 PR1 continues to treat malformed or unresolvable draft-PR artifacts as explicit blocked states with actionable errors.
 
 ### No operator recovery from `blocked`
 

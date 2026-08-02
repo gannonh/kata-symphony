@@ -1,5 +1,8 @@
 # Docs Update Log
 
+## 2026-08-02
+* **Direct draft-PR, review-preview, and TUI UAT completed**: The real `gannonh/uat-symphony` Project #16 run for issue [#45](https://github.com/gannonh/uat-symphony/issues/45) created draft PR [#46](https://github.com/gannonh/uat-symphony/pull/46), reached `Agent Review` after publication, posted structured review findings, and showed typed factory sessions in the Ratatui TUI. Restart-during-publication, cleanup, and Docker evidence remain residuals.
+
 ## 2026-08-01
 * **Typed factory state is now visible in the TUI**: Specification, implementation, and review lifecycle events feed a live factory-session snapshot, including active rows, bounded completions, stage usage totals, and issue identifiers. The TUI no longer depends on legacy worker state for typed-stage progress; the additive snapshot field remains backward-compatible for API consumers.
 * **Automatic publication and review hardening**: Automatic implementation refreshes the pinned remote base before capturing its commit, verifies the completion route after label/state mutations, and publication rejects a captured base that is absent from the remote before importing a thin result bundle. The review coordinator resolves relative repository/workspace paths before isolated worker setup. These checks prevent local-only UAT/configuration commits, Projects automation races, and relative-path failures from producing opaque UAT stalls.

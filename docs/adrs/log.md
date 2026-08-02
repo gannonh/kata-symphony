@@ -1,5 +1,8 @@
 # ADRs Update Log
 
+## 2026-08-02
+* **Updated**: [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md) records the additive typed factory snapshot used by the TUI and the completed direct draft-PR, Agent Review preview, and Ratatui UAT evidence on Project #16. Restart-during-publication, cleanup, and Docker coverage remain residuals.
+
 ## 2026-07-30
 * **Updated**: [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md) records that publication recovery is served over the admin HTTP surface with a direct-store fallback. A store-only command could never work while Symphony ran, because the orchestrator holds the store's exclusive lock for its lifetime — the exact moment a blocked intent is discovered.
 * **Updated**: [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md) now documents the operator recovery path for a `blocked` publication intent (`symphony publication list-blocked` / `reset`), closing the gap where the ADR promised operator recovery that no code path provided. `conflict` remains deliberately terminal.
