@@ -1,8 +1,8 @@
 ---
 type: Verify Report
 title: A4 PR2 Formal Review Publication Verify Report
-status: In verification
-description: Automated and preview-only Ratatui verification for A4 PR2 formal review publication and routing; live automatic publication and full restart matrix remain open.
+status: Verified with residuals
+description: Automated, live automatic, restart-matrix, and Ratatui verification for A4 PR2 formal review publication and routing; live worker credential-isolation and broader Docker evidence remain residual.
 tags: [symphony, review-stage, a4, pr2, verify]
 timestamp: 2026-08-02T16:40:00Z
 ---
@@ -11,7 +11,7 @@ timestamp: 2026-08-02T16:40:00Z
 
 ## Status
 
-**In verification** — the feature branch implements deterministic formal review publication, durable routing, changed-head cycles, operator recovery, and doctor permission probing. Automated validation and a fresh preview-only Ratatui run passed. Automatic formal-review UAT remains separate from the mainline/UAT preview workflow.
+**Verified with residuals** — the feature branch implements deterministic formal review publication, durable routing, changed-head cycles, operator recovery, active lease fencing, and doctor permission probing. Automated validation, live automatic reconciliation, restart-boundary recovery, and a direct Ratatui run passed. Mainline and the maintained UAT workflow remain preview-only.
 
 Branch: `feat/a4-review-publication`
 
@@ -19,11 +19,12 @@ Branch: `feat/a4-review-publication`
 
 - `cargo fmt --check` — Pass
 - `cargo clippy -- -D warnings` — Pass
-- `cargo test -- --test-threads=1` — Pass: 403 library tests plus all integration suites. An unconstrained parallel run showed intermittent pre-existing Codex/mock-server timing failures in `orchestrator_tests`; the serial gate passed all tests.
-- `pnpm run validate:affected` — Pass: 2 Turborepo tasks, including the Symphony suite
+- `cargo test -- --test-threads=1` — Pass: 410 library tests plus all integration suites.
+- `pnpm run validate:affected` — Pass: 2 Turborepo tasks, including the Symphony suite; no TypeScript files changed in the final fencing fix.
 - Formal review client tests cover multiline anchors, marker adoption, foreign identity conflicts, stale heads, invalid permission probes, and unexpected successful permission probes.
-- Store tests cover draft-PR eligibility, changed-head retry budgets, conflict recovery, publication leases, migration reapplication, and publication-step persistence.
-- Coordinator tests cover retry-ceiling classification and live revision guards.
+- Store tests cover draft-PR eligibility, changed-head retry budgets, conflict recovery, active and expired publication leases, terminal stale writers, supersession retry preservation, migration reapplication, and publication-step persistence.
+- Publisher tests cover marker adoption, foreign identity conflicts, stale heads, preview lease ownership, and restart-safe progressive publication.
+- Coordinator paths claim before failure recording, changed-head supersession, Projects v2 routing, and finalization.
 
 ## Doctor evidence
 
@@ -49,9 +50,16 @@ Evidence bundle: `/tmp/kata-symphony-current-uat-evidence/a4-pr2/`
 - `logs/log/symphony.log` contains startup, HTTP binding, TUI enablement, and review poll events.
 - The SQLite lock was available after shutdown.
 
+A latest-branch automatic reconciliation used commit `5cd42db1` and a seeded copy of the formal SQLite database. It adopted the existing marker-owned review `4839451136`, applied all four publication steps, moved the Project item to `Human Review`, then restored it to `Agent Review`. Evidence bundle: `/tmp/kata-symphony-current-uat-evidence/a4-pr2/formal-latest/`.
+
+- `uat-summary.json` records the applied durable projection, single remote review, route restoration, head/base SHAs, and known warnings.
+- `db-summary.json`, `pull-request.json`, and `project-item-after-restore.json` provide durable/API read-backs.
+- `doctor-latest.txt` exits `0`; its explicit warnings are documented in `uat-summary.json`.
+- `symphony.log` and `tui-session.ansi` capture the direct Ratatui run with HTTP observability and the active supervisor.
+
 ## Acceptance coverage
 
-Implemented and automated:
+Implemented, automated, and live-verified where marked:
 
 1. Durable A3 draft and draft-only eligibility
 2. Review attempt ownership and per-head retry accounting
@@ -64,13 +72,16 @@ Implemented and automated:
 9. Changed-head waiting semantics and stale-creation protection
 10. Finding carry-forward and persisting-finding suppression
 11. Doctor validation of formal review endpoint authorization
+12. Live automatic formal review reconciliation on `gannonh/uat-symphony` PR #46, with one existing marker-owned review adopted and no duplicate review created
+13. Live restart matrix for `create-before-record`, `after-review-created`, and `after-findings-recorded`, each recovering to `applied` with `retry_count=0`
+14. Live Projects v2 route mutation to `Human Review`, followed by restoration to `Agent Review`
+15. Active-lease CAS fencing for identity, route, step, error, preview completion, finalization, and changed-head supersession
 
-## Open verification work
+## Residual verification work
 
-1. Run automatic formal-review UAT on an isolated feature workflow with a disposable or explicitly approved UAT issue/PR.
-2. Capture restart evidence at each publication boundary: after review creation, findings recording, route update, and before finalization.
-3. Exercise a real changed-head re-review and verify resolved, persisting, and new findings on the remote PR.
+1. Capture a dedicated live worker credential-isolation proof bundle across the formal worker process boundary.
+2. Capture broader Docker execution evidence for the review worker; the existing Rust Docker integration suite passes.
+3. Exercise a real changed-head re-review with changed remote content and verify resolved, persisting, and new findings on the remote PR.
 4. Confirm foreign-review conflict listing and reset over the live HTTP operator path.
-5. Update the A4 design and roadmap to Completed only after these checks pass.
 
-Mainline and the maintained UAT workflow remain preview-only until the automatic path is accepted.
+Mainline and the maintained UAT workflow remain preview-only. Formal evidence is isolated under `/tmp/kata-symphony-current-uat-evidence/a4-pr2/formal-latest/`.

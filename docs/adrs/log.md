@@ -1,6 +1,9 @@
 # ADRs Update Log
 
 ## 2026-08-02
+* **Accepted**: [ADR-0005 A4 durable review publication fencing](0005-a4-review-publication-fencing.md) records active lease CAS writes, heartbeat renewal during forge calls, changed-head supersession ownership, and the explicit operator reset boundary.
+
+## 2026-08-02
 * **Updated**: [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md) records the additive typed factory snapshot used by the TUI and the completed direct draft-PR, Agent Review preview, and Ratatui UAT evidence on Project #16. Restart-during-publication, cleanup, and Docker coverage remain residuals.
 
 ## 2026-07-30

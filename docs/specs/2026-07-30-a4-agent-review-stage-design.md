@@ -11,7 +11,7 @@ timestamp: 2026-07-30T14:45:39Z
 
 ## Status
 
-Active — PR1 review findings preview and typed TUI state are implemented in the current mainline after [#610](https://github.com/gannonh/kata-symphony/pull/610) (`233caf88`). PR2 formal review publication and routing are implemented on `feat/a4-review-publication`; automated gates, doctor permission probing, and preview-only Ratatui verification passed. Automatic formal-review UAT, restart-during-publication evidence, full cleanup, and Docker evidence remain residuals. See the [PR2 verify report](2026-08-02-a4-pr2-verify-report.md).
+Active — PR1 review findings preview and typed TUI state are implemented in the current mainline after [#610](https://github.com/gannonh/kata-symphony/pull/610) (`233caf88`). PR2 formal review publication and routing are implemented on `feat/a4-review-publication`; automated gates, active-lease fencing, doctor permission probing, automatic formal-review UAT, and restart-matrix evidence pass. Credential-isolation proof for a live worker and broader Docker evidence remain residuals. See the [PR2 verify report](2026-08-02-a4-pr2-verify-report.md) and [ADR-0005](../adrs/0005-a4-review-publication-fencing.md).
 
 ## Goal
 
@@ -28,6 +28,7 @@ A4 is **read-only with respect to the change under review**. It never edits code
 - [Symphony Software Factory Platform PRD, A4](/specs/symphony-software-factory-platform-prd.md)
 - [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md)
 - [ADR-0004 A3 implementation durability and bundles](/adrs/0004-a3-implementation-durability-and-bundles.md)
+- [ADR-0005 A4 durable review publication fencing](/adrs/0005-a4-review-publication-fencing.md)
 - [A3 PR2 build report](2026-07-29-a3-pr2-build-report.md) / [verify report](2026-07-29-a3-pr2-verify-report.md)
 - [A4 PR2 verify report](2026-08-02-a4-pr2-verify-report.md)
 - [A2 Spec Stage](2026-07-18-a2-spec-stage-design.md)
@@ -44,7 +45,7 @@ A4 is **read-only with respect to the change under review**. It never edits code
 - The review worker receives the diff, PR description, approved specification, implementation manifest, and read-only repository context. It receives no forge, tracker-helper, SSH, or Git push credentials — the A3 worker boundary applies unchanged.
 - The worker emits a typed **review findings manifest**. Unknown fields are rejected. A malformed manifest is a bounded re-prompt, not a partial publish.
 - Symphony alone publishes to GitHub, as a **single atomic review** (summary body plus inline comments) rather than N independent comments, so a partial failure cannot leave half a review on the PR.
-- Publication is idempotent and restart-safe using the marker and create-before-record recovery A3 established.
+- Publication is idempotent and restart-safe using the marker and create-before-record recovery A3 established. Every worker-owned durable publication mutation is fenced by a pending status, an active owner lease, and a one-second lease heartbeat during forge and Projects v2 calls. Changed-head supersession claims the same lease before terminalizing the stale cycle; the explicit operator reset path remains separately auditable.
 - A new head SHA opens a **new review cycle**. Prior findings are carried forward and classified as resolved, persisting, or new by comparing anchors and finding identity.
 - The routing decision is derived from findings, not from the worker's own claim: blocking findings route to the configured changes-requested state; otherwise the item advances toward A5.
 - A4 does not apply fixes, approve PRs, run acceptance verification, merge, or deploy. Those remain A5 and A6.
@@ -242,13 +243,13 @@ apps/symphony/src/{doctor,http_server}.rs
 
 **PR1 — review stage and findings preview.** **Implemented** in [#610](https://github.com/gannonh/kata-symphony/pull/610) (`233caf88`): eligibility, dispatch ownership, stage attempts, worker invocation and boundary, manifest schema and validation, bounded re-prompt, durable findings artifacts, preview comment, HTTP/events, and typed TUI state. No PR review, no routing.
 
-**PR2 — deterministic review publication and routing.** **Implemented on `feat/a4-review-publication`; verification pending.** Atomic review creation, create-before-record recovery, progressive publication steps, routing decision, re-review cycles and carry-forward, retry/waiting/terminal semantics, doctor validation, and operator recovery path are present. Automatic formal-review UAT and restart evidence remain open.
+**PR2 — deterministic review publication and routing.** **Implemented on `feat/a4-review-publication`; verified with residuals.** Atomic review creation, create-before-record recovery, active-lease fencing, progressive publication steps, routing decision, re-review cycles and carry-forward, retry/waiting/terminal semantics, doctor validation, and operator recovery path are present. Live formal UAT and restart-matrix evidence pass; live worker credential-isolation proof and broader Docker evidence remain residuals.
 
 ## Risks and mitigations
 
-### Residual risk from the incomplete A3 recovery matrix
+### Residual risk from provider-side operation windows
 
-Direct A3 draft-PR, Agent Review preview, and Ratatui TUI UAT are now verified on Project #16. Restart-during-publication recovery, full cleanup proof, and Docker execution remain unverified. A4 PR1 continues to treat malformed or unresolvable draft-PR artifacts as explicit blocked states with actionable errors.
+Durable publication writes are fenced by active leases and the publisher renews its lease during forge and Projects v2 calls. A provider request already accepted before a process failure cannot be cancelled by SQLite; marker ownership, live-head validation, reconciliation, and idempotent route writes handle recovery. A live worker credential-isolation proof and broader Docker execution evidence remain unverified. A4 continues to treat malformed or unresolvable draft-PR artifacts as explicit blocked states with actionable errors.
 
 ### No operator recovery from `blocked`
 
