@@ -263,20 +263,22 @@ where
                         return Err(error);
                     }
                 };
-                let live_head = review_port
-                    .pull_request_head_sha(pull_request_number)
-                    .await?;
-                if live_head != artifact.reviewed_head_sha {
-                    store
-                        .clear_review_publication_lease(&intent.intent_id, &self.owner_instance)?;
-                    return Err(SymphonyError::TriageError(format!(
-                        "review cycle reopened after formal review creation: live head {} does not match expected {}",
-                        live_head, artifact.reviewed_head_sha
-                    )));
-                }
                 Some(created)
             }
         };
+
+        if review.is_some() || bound_identity {
+            let live_head = review_port
+                .pull_request_head_sha(pull_request_number)
+                .await?;
+            if live_head != artifact.reviewed_head_sha {
+                store.clear_review_publication_lease(&intent.intent_id, &self.owner_instance)?;
+                return Err(SymphonyError::TriageError(format!(
+                    "review cycle reopened while accepting formal review identity: live head {} does not match expected {}",
+                    live_head, artifact.reviewed_head_sha
+                )));
+            }
+        }
 
         if let Some(review) = review {
             let review_url = review.html_url.clone().unwrap_or_default();
@@ -1405,6 +1407,84 @@ mod tests {
             .unwrap()
             .completed_steps
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn formal_publication_waits_when_owned_marker_head_changes_after_precheck() {
+        let (_dir, store) = open_store();
+        let comments = FakeComments::new("symphony-bot");
+        let reviews = FakeReviews::new("symphony-bot");
+        let publisher = ReviewPublisher::new(comments);
+        let (artifact, intent) = setup_review_fixture(&store, "formal").await;
+        let marker = format!(
+            "{REVIEW_COMMENT_MARKER_PREFIX}{}{REVIEW_COMMENT_MARKER_SUFFIX}",
+            intent.intent_id
+        );
+        reviews
+            .reviews
+            .lock()
+            .unwrap()
+            .push(GithubPullRequestReview {
+                id: 902,
+                user: Some(GithubUser {
+                    login: "symphony-bot".to_string(),
+                }),
+                body: Some(marker),
+                commit_id: "head".to_string(),
+                state: "COMMENTED".to_string(),
+                html_url: Some("https://github.test/reviews/902".to_string()),
+                submitted_at: None,
+            });
+        *reviews.head_sha.lock().unwrap() = "new-head".to_string();
+
+        let error = publisher
+            .publish_formal(&store, &reviews, &intent, &artifact, 42, 2)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("review cycle reopened"));
+        assert!(store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap()
+            .completed_steps
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn formal_publication_waits_when_bound_identity_head_changes_after_precheck() {
+        let (_dir, store) = open_store();
+        let comments = FakeComments::new("symphony-bot");
+        let reviews = FakeReviews::new("symphony-bot");
+        let publisher = ReviewPublisher::new(comments);
+        let (artifact, intent) = setup_review_fixture(&store, "formal").await;
+        store
+            .bind_review_publication_review(
+                &intent.intent_id,
+                "review-17",
+                "https://github.test/reviews/17",
+                "symphony-bot",
+            )
+            .unwrap();
+        *reviews.head_sha.lock().unwrap() = "new-head".to_string();
+        let bound = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+
+        let error = publisher
+            .publish_formal(&store, &reviews, &bound, &artifact, 42, 2)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("review cycle reopened"));
+        let persisted = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert!(!persisted
+            .completed_steps
+            .iter()
+            .any(|step| step == FINDINGS_RECORDED_STEP));
+        assert_eq!(persisted.retry_count, 0);
     }
 
     #[tokio::test]
