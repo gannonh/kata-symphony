@@ -1069,6 +1069,7 @@ impl EventHubEmitter {
             })
             .unwrap_or_else(|| run_id.unwrap_or("-").to_string());
         let message = event_message(payload);
+        let total_tokens = event_total_tokens(payload);
         let is_start = matches!(
             event_name,
             "spec_started" | "implementation_started" | "review_started"
@@ -1088,7 +1089,10 @@ impl EventHubEmitter {
         let Ok(mut registry) = self.factory_sessions.lock() else {
             return;
         };
-        if is_start {
+        if registry.has_completed(stage_run_id) {
+            return;
+        }
+        if is_start || !registry.has_session(stage_run_id) {
             registry.begin(FactorySessionInfo {
                 stage: stage.stage.clone(),
                 issue_identifier,
@@ -1103,11 +1107,10 @@ impl EventHubEmitter {
                 last_event_message: message.clone(),
                 session_id: None,
                 turn_count: 0,
-                total_tokens: 0,
+                total_tokens: total_tokens.unwrap_or(0),
             });
-        } else {
-            registry.update_event(stage_run_id, event_name, message);
         }
+        registry.update_event(stage_run_id, event_name, message, total_tokens);
 
         if is_terminal {
             registry.finish(
@@ -1167,6 +1170,18 @@ fn event_message(payload: &serde_json::Value) -> Option<String> {
                 .get(key)
                 .and_then(|value| value.as_str())
                 .map(str::to_string)
+        })
+}
+
+fn event_total_tokens(payload: &serde_json::Value) -> Option<u64> {
+    payload
+        .get("total_tokens")
+        .and_then(|value| value.as_u64())
+        .or_else(|| {
+            payload
+                .get("usage")
+                .and_then(|usage| usage.get("total_tokens"))
+                .and_then(|value| value.as_u64())
         })
 }
 
@@ -1474,6 +1489,32 @@ impl TriageRuntime {
             .unwrap_or_default()
     }
 
+    fn reconcile_factory_sessions(&self) {
+        let active_stage_runs = self
+            .factory_sessions
+            .lock()
+            .map(|registry| registry.active_stage_run_ids())
+            .unwrap_or_default();
+        for stage_run_id in active_stage_runs {
+            let Ok(Some(stage)) = self.store.get_stage_run(&stage_run_id) else {
+                continue;
+            };
+            if !stage.status.is_terminal() {
+                continue;
+            }
+            if let Ok(mut registry) = self.factory_sessions.lock() {
+                registry.finish(
+                    &stage_run_id,
+                    stage.status.as_str(),
+                    stage.usage.input_tokens,
+                    stage.usage.output_tokens,
+                    stage.usage.total_tokens,
+                    stage.error.map(|error| error.remediation),
+                );
+            }
+        }
+    }
+
     /// Issue IDs / intake labels that must not enter implementation dispatch
     /// while automatic publication is still nonterminal.
     pub fn pending_automatic_dispatch_guards(&self) -> Result<Vec<PendingAutomaticDispatchGuard>> {
@@ -1481,6 +1522,7 @@ impl TriageRuntime {
     }
 
     pub async fn poll(&mut self, config: &ServiceConfig) -> Result<TriagePollSummary> {
+        self.reconcile_factory_sessions();
         let triage = if let Some(coordinator) = self.coordinator.as_mut() {
             coordinator.poll_once(config).await?
         } else {
@@ -1578,6 +1620,7 @@ impl TriageRuntime {
                 }
             }
         }
+        self.reconcile_factory_sessions();
         Ok(triage)
     }
 }

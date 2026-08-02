@@ -514,7 +514,7 @@ fn test_orchestrator_snapshot_serializes() {
 fn factory_session_registry_tracks_running_and_completed_attempts() {
     let started_at = Utc::now();
     let mut registry = FactorySessionRegistry::default();
-    registry.begin(FactorySessionInfo {
+    let info = FactorySessionInfo {
         stage: "implementation".into(),
         issue_identifier: "#42".into(),
         run_id: "run-42".into(),
@@ -529,11 +529,14 @@ fn factory_session_registry_tracks_running_and_completed_attempts() {
         session_id: None,
         turn_count: 0,
         total_tokens: 0,
-    });
+    };
+    registry.begin(info.clone());
+    registry.begin(info);
     registry.update_event(
         "stage-42",
         "implementation_validation",
         Some("validation running".into()),
+        Some(12),
     );
 
     let running = registry.snapshot();

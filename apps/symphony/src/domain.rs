@@ -1508,14 +1508,31 @@ impl FactorySessionRegistry {
     }
 
     pub fn begin(&mut self, info: FactorySessionInfo) {
-        if self
-            .sessions
-            .insert(info.stage_run_id.clone(), info)
-            .is_none()
+        if self.sessions.contains_key(&info.stage_run_id)
+            || self
+                .completed
+                .iter()
+                .any(|entry| entry.stage_run_id == info.stage_run_id)
         {
-            self.totals.attempts_started = self.totals.attempts_started.saturating_add(1);
+            return;
         }
+        self.sessions.insert(info.stage_run_id.clone(), info);
+        self.totals.attempts_started = self.totals.attempts_started.saturating_add(1);
         self.notify();
+    }
+
+    pub fn has_session(&self, stage_run_id: &str) -> bool {
+        self.sessions.contains_key(stage_run_id)
+    }
+
+    pub fn has_completed(&self, stage_run_id: &str) -> bool {
+        self.completed
+            .iter()
+            .any(|entry| entry.stage_run_id == stage_run_id)
+    }
+
+    pub fn active_stage_run_ids(&self) -> Vec<String> {
+        self.sessions.keys().cloned().collect()
     }
 
     pub fn update_event(
@@ -1523,6 +1540,7 @@ impl FactorySessionRegistry {
         stage_run_id: &str,
         event: impl Into<String>,
         message: Option<String>,
+        total_tokens: Option<u64>,
     ) {
         if let Some(info) = self.sessions.get_mut(stage_run_id) {
             let event = event.into();
@@ -1532,6 +1550,9 @@ impl FactorySessionRegistry {
             info.last_event = Some(event);
             info.last_event_message = message;
             info.last_activity_at = Some(Utc::now());
+            if let Some(total_tokens) = total_tokens {
+                info.total_tokens = info.total_tokens.max(total_tokens);
+            }
             self.notify();
         }
     }

@@ -535,7 +535,7 @@ fn build_summary_lines(snapshot: &OrchestratorSnapshot, throughput_line: &str) -
     counts.push(format!(
         "Factory: {} running | {} completed | {} tokens",
         snapshot.factory.running.len(),
-        snapshot.factory.completed.len(),
+        snapshot.factory.totals.attempts_completed,
         format_tokens(snapshot.factory.totals.total_tokens),
     ));
 
