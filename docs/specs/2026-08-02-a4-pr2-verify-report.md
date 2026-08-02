@@ -57,6 +57,8 @@ A latest-branch automatic reconciliation used commit `5cd42db1` and a seeded cop
 - `doctor-latest.txt` exits `0`; its explicit warnings are documented in `uat-summary.json`.
 - `symphony.log` and `tui-session.ansi` capture the direct Ratatui run with HTTP observability and the active supervisor.
 
+A fresh manual formal UAT used the current branch binary and UAT workflow with issue [#47](https://github.com/gannonh/uat-symphony/issues/47) and draft PR [#48](https://github.com/gannonh/uat-symphony/pull/48). The real review worker produced one blocking scope finding. Symphony published one authenticated `COMMENTED` review (`4839847481`), applied `review_created`, `findings_recorded`, `route_applied`, and `comment_final` with `retry_count=0`, and routed Project #16 to `Rework`. After a stop/start restart, reconciliation kept one remote review and the applied intent; no duplicate publication occurred. The fixture, branch, issue, and Project item were cleaned up after capture. Evidence bundle: `/tmp/kata-symphony-current-uat-evidence/a4-pr2/manual-47/`.
+
 ## Acceptance coverage
 
 Implemented, automated, and live-verified where marked:
@@ -76,6 +78,7 @@ Implemented, automated, and live-verified where marked:
 13. Live restart matrix for `create-before-record`, `after-review-created`, and `after-findings-recorded`, each recovering to `applied` with `retry_count=0`
 14. Live Projects v2 route mutation to `Human Review`, followed by restoration to `Agent Review`
 15. Active-lease CAS fencing for identity, route, step, error, preview completion, finalization, and changed-head supersession
+16. Live formal blocking-finding publication, `Rework` routing, and restart reconciliation with one remote review
 
 ## Residual verification work
 

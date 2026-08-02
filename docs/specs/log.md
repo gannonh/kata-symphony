@@ -1,6 +1,7 @@
 # Specs Update Log
 
 ## 2026-08-02
+* **A4 PR2 manual formal UAT completed**: The [verify report](2026-08-02-a4-pr2-verify-report.md) records a real blocking finding published as one `COMMENTED` review on PR #48, durable four-step publication, `Rework` routing, and stop/start reconciliation with no duplicate review. Evidence is under `/tmp/kata-symphony-current-uat-evidence/a4-pr2/manual-47/`; credential-isolation and broader Docker proof remain open.
 * **A4 PR2 verification completed with residuals**: The [verify report](2026-08-02-a4-pr2-verify-report.md) records 410 passing Rust tests, live automatic marker adoption and route restoration on PR #46, all three restart-matrix cases, active lease CAS fencing, and the latest-branch evidence bundle. Credential-isolation and broader Docker proof remain open.
 
 ## 2026-08-02

@@ -4,6 +4,7 @@
 * **OKF frontmatter repaired**: Quoted colon-bearing titles and descriptions in the issue-tracker guide, active Wave 4 plan, and retained historical Superpowers plans/specs. Both standard and strict-link OKF validation now pass.
 
 ## 2026-08-02
+* **A4 PR2 manual formal UAT completed**: The [PR2 verify report](specs/2026-08-02-a4-pr2-verify-report.md) records live blocking-finding publication, `Rework` routing, restart reconciliation, one remote review, and cleanup for issue #47 / PR #48. Evidence is under `/tmp/kata-symphony-current-uat-evidence/a4-pr2/manual-47/`.
 * **A4 PR2 verified with residuals**: The [A4 design](specs/2026-07-30-a4-agent-review-stage-design.md) and [PR2 verify report](specs/2026-08-02-a4-pr2-verify-report.md) now record live automatic publication, restart-matrix recovery, active-lease fencing, and latest-branch formal UAT evidence. [ADR-0005](adrs/0005-a4-review-publication-fencing.md) records the lease and supersession decision. Live worker credential-isolation and broader Docker evidence remain residuals.
 
 ## 2026-08-02
