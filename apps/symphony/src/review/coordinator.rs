@@ -667,6 +667,22 @@ where
                             "reviewed_head_sha": pull.head.sha,
                         }),
                     )?;
+                    let superseded = FactoryError::new(
+                        "review_publication_superseded",
+                        "review_publisher",
+                        format!(
+                            "review publication intent {} was superseded after the PR head changed: {}",
+                            intent.intent_id, error
+                        ),
+                        false,
+                        None,
+                    );
+                    self.supersede_publication(
+                        &intent.intent_id,
+                        &candidate.run_id,
+                        Some(&stage.stage_run_id),
+                        superseded,
+                    )?;
                     return Ok(ProcessOutcome::Waiting);
                 }
                 let classified = classify_review_publication_error(&error);
@@ -947,6 +963,22 @@ where
                                 "observed_head_sha": pull.head.sha,
                             }),
                         )?;
+                        let superseded = FactoryError::new(
+                            "review_publication_superseded",
+                            "review_publisher",
+                            format!(
+                                "review publication intent {} was superseded because the PR head changed from {} to {}",
+                                intent.intent_id, expected_head, pull.head.sha
+                            ),
+                            false,
+                            None,
+                        );
+                        self.supersede_publication(
+                            &intent.intent_id,
+                            &intent.run_id,
+                            None,
+                            superseded,
+                        )?;
                         return Ok(ReviewPublicationResult::Waiting);
                     }
                     publisher
@@ -980,6 +1012,22 @@ where
                                 "reason": "publication_head_sha_changed_during_creation",
                                 "intent_id": intent.intent_id,
                             }),
+                        )?;
+                        let superseded = FactoryError::new(
+                            "review_publication_superseded",
+                            "review_publisher",
+                            format!(
+                                "review publication intent {} was superseded after the PR head changed: {}",
+                                intent.intent_id, error
+                            ),
+                            false,
+                            None,
+                        );
+                        self.supersede_publication(
+                            &intent.intent_id,
+                            &intent.run_id,
+                            None,
+                            superseded,
                         )?;
                         Ok(ReviewPublicationResult::Waiting)
                     }
@@ -1276,6 +1324,27 @@ where
             )?;
         }
         Ok(())
+    }
+
+    fn supersede_publication(
+        &self,
+        intent_id: &str,
+        run_id: &str,
+        stage_run_id: Option<&str>,
+        error: FactoryError,
+    ) -> Result<()> {
+        let store = self.store.clone();
+        store.supersede_review_publication(intent_id, error.clone())?;
+        self.record_event(
+            Some(run_id),
+            stage_run_id,
+            "review_publication_superseded",
+            serde_json::json!({
+                "status": "conflict",
+                "intent_id": intent_id,
+                "error": error,
+            }),
+        )
     }
 
     fn record_event(

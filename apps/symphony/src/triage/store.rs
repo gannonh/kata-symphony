@@ -4504,6 +4504,36 @@ impl SqliteFactoryStore {
         Ok(())
     }
 
+    /// Terminalize a publication intent whose artifact head was superseded by
+    /// a newer review cycle without charging the publication retry budget.
+    pub fn supersede_review_publication(
+        &mut self,
+        intent_id: &str,
+        error: FactoryError,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET status = ?1,
+                 last_error_json = ?2, lease_owner = NULL, lease_expires_at = NULL,
+                 updated_at = ?3
+                 WHERE intent_id = ?4",
+                params![
+                    PublicationStatus::Conflict.as_str(),
+                    bounded_json(&error)?,
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "review intent {intent_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn review_metrics(&self) -> Result<ReviewMetricsAggregate> {
         use crate::triage::domain::{TriageMetricsDuration, TriageMetricsTokenTotals};
         use std::collections::BTreeMap;
@@ -7058,6 +7088,56 @@ mod tests {
             .reset_blocked_review_publication("review-blocked", "operator")
             .unwrap_err();
         assert!(err.to_string().contains("not blocked"));
+    }
+
+    #[test]
+    fn superseding_review_publication_preserves_retry_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, desired_effects_json,
+                    observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 ) VALUES ('review-superseded', 'run-review', 'artifact-review',
+                    'automatic', 'pending', '[]', 0, '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+
+        store
+            .supersede_review_publication(
+                "review-superseded",
+                FactoryError::new(
+                    "review_publication_superseded",
+                    "review_publisher",
+                    "new head opened a review cycle",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap();
+
+        let intent = store
+            .get_review_publication_intent("review-superseded")
+            .unwrap()
+            .unwrap();
+        assert_eq!(intent.status, PublicationStatus::Conflict);
+        assert_eq!(intent.retry_count, 0);
+        assert_eq!(
+            intent.last_error.unwrap().code,
+            "review_publication_superseded"
+        );
+        assert!(store.list_pending_review_publications().unwrap().is_empty());
     }
 
     #[test]

@@ -683,6 +683,10 @@ impl SharedFactoryStore {
         self.with_store_mut(|store| store.set_review_publication_error(intent_id, status, error))
     }
 
+    pub fn supersede_review_publication(&self, intent_id: &str, error: FactoryError) -> Result<()> {
+        self.with_store_mut(|store| store.supersede_review_publication(intent_id, error))
+    }
+
     pub fn review_metrics(&self) -> Result<crate::review::domain::ReviewMetricsAggregate> {
         self.with_store(|store| store.review_metrics())
     }
