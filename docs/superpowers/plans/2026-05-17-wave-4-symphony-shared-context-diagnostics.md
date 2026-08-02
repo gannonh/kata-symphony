@@ -1,7 +1,7 @@
 ---
 type: Plan
 title: Wave 4 Symphony Shared Context and Diagnostics
-description: Implementation plan for Wave 4 dashboard parity: shared context and diagnostics.
+description: "Implementation plan for Wave 4 dashboard parity: shared context and diagnostics."
 tags: [symphony, pi, dashboard]
 timestamp: 2026-07-15T20:00:00Z
 ---

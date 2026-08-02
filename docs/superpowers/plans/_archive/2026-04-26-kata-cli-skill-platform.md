@@ -1,7 +1,7 @@
 ---
 type: Plan
 title: Kata Cli Skill Platform
-description: Archived implementation plan: Kata Cli Skill Platform.
+description: "Archived implementation plan: Kata Cli Skill Platform."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---

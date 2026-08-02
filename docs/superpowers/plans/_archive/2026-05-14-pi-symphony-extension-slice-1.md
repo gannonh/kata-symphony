@@ -1,7 +1,7 @@
 ---
 type: Plan
 title: Pi Symphony Extension Slice 1
-description: Archived implementation plan: Pi Symphony Extension Slice 1.
+description: "Archived implementation plan: Pi Symphony Extension Slice 1."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---

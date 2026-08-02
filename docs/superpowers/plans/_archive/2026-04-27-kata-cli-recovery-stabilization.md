@@ -1,7 +1,7 @@
 ---
 type: Plan
 title: Kata Cli Recovery Stabilization
-description: Archived implementation plan: Kata Cli Recovery Stabilization.
+description: "Archived implementation plan: Kata Cli Recovery Stabilization."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---

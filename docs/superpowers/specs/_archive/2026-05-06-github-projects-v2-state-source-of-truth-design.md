@@ -1,7 +1,7 @@
 ---
 type: Spec
 title: Github Projects V2 State Source Of Truth Design
-description: Archived spec document: Github Projects V2 State Source Of Truth Design.
+description: "Archived spec document: Github Projects V2 State Source Of Truth Design."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---

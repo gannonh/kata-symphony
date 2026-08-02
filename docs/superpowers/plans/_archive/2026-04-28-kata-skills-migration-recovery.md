@@ -1,7 +1,7 @@
 ---
 type: Plan
 title: Kata Skills Migration Recovery
-description: Archived implementation plan: Kata Skills Migration Recovery.
+description: "Archived implementation plan: Kata Skills Migration Recovery."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---

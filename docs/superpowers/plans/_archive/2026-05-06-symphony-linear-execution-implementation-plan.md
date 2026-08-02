@@ -1,7 +1,7 @@
 ---
 type: Plan
 title: Symphony Linear Execution Implementation Plan
-description: Archived implementation plan: Symphony Linear Execution Implementation Plan.
+description: "Archived implementation plan: Symphony Linear Execution Implementation Plan."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---

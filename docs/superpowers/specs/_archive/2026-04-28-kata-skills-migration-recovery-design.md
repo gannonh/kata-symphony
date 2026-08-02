@@ -1,7 +1,7 @@
 ---
 type: Spec
 title: Kata Skills Migration Recovery Design
-description: Archived spec document: Kata Skills Migration Recovery Design.
+description: "Archived spec document: Kata Skills Migration Recovery Design."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---

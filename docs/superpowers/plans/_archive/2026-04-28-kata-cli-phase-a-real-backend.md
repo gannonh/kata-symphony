@@ -1,7 +1,7 @@
 ---
 type: Plan
 title: Kata Cli Phase A Real Backend
-description: Archived implementation plan: Kata Cli Phase A Real Backend.
+description: "Archived implementation plan: Kata Cli Phase A Real Backend."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---

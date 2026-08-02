@@ -1,7 +1,7 @@
 ---
 type: Spec
 title: Symphony Progress Indicators Design
-description: Archived spec document: Symphony Progress Indicators Design.
+description: "Archived spec document: Symphony Progress Indicators Design."
 tags: [archive, symphony]
 timestamp: 2026-07-15T20:00:00Z
 ---
