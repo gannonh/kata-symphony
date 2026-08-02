@@ -228,21 +228,42 @@ where
                     .pull_request_head_sha(pull_request_number)
                     .await?;
                 if live_head != artifact.reviewed_head_sha {
+                    store
+                        .clear_review_publication_lease(&intent.intent_id, &self.owner_instance)?;
                     return Err(SymphonyError::TriageError(format!(
-                        "formal review publication conflict: live head {} does not match expected {}",
+                        "review cycle reopened before formal review creation: live head {} does not match expected {}",
                         live_head, artifact.reviewed_head_sha
                     )));
                 }
-                Some(
-                    review_port
-                        .create_pull_request_review(
-                            pull_request_number,
-                            &artifact.reviewed_head_sha,
-                            &body,
-                            &comments,
-                        )
-                        .await?,
-                )
+                let created = match review_port
+                    .create_pull_request_review(
+                        pull_request_number,
+                        &artifact.reviewed_head_sha,
+                        &body,
+                        &comments,
+                    )
+                    .await
+                {
+                    Ok(review) => review,
+                    Err(error) => {
+                        let live_head =
+                            review_port.pull_request_head_sha(pull_request_number).await;
+                        if let Ok(live_head) = live_head {
+                            if live_head != artifact.reviewed_head_sha {
+                                store.clear_review_publication_lease(
+                                    &intent.intent_id,
+                                    &self.owner_instance,
+                                )?;
+                                return Err(SymphonyError::TriageError(format!(
+                                    "review cycle reopened during formal review creation: live head {} does not match expected {}",
+                                    live_head, artifact.reviewed_head_sha
+                                )));
+                            }
+                        }
+                        return Err(error);
+                    }
+                };
+                Some(created)
             }
         };
 
@@ -584,6 +605,7 @@ mod tests {
     struct FakeReviews {
         login: String,
         head_sha: Mutex<String>,
+        change_head_on_create: Mutex<bool>,
         reviews: Mutex<Vec<GithubPullRequestReview>>,
         review_payloads: Mutex<Vec<(String, Vec<GithubPullRequestReviewComment>)>>,
     }
@@ -593,6 +615,7 @@ mod tests {
             Arc::new(Self {
                 login: login.to_string(),
                 head_sha: Mutex::new("head".to_string()),
+                change_head_on_create: Mutex::new(false),
                 reviews: Mutex::new(Vec::new()),
                 review_payloads: Mutex::new(Vec::new()),
             })
@@ -624,6 +647,13 @@ mod tests {
             body: &str,
             comments: &[GithubPullRequestReviewComment],
         ) -> Result<GithubPullRequestReview> {
+            if *self.change_head_on_create.lock().unwrap() {
+                *self.head_sha.lock().unwrap() = "new-head".to_string();
+                return Err(SymphonyError::GithubApiStatus {
+                    status: 422,
+                    message: "head changed during create".to_string(),
+                });
+            }
             self.review_payloads
                 .lock()
                 .unwrap()
@@ -1278,6 +1308,22 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("live head"));
+        assert!(reviews.review_payloads.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn formal_publication_waits_when_head_changes_during_create() {
+        let (_temp, store) = open_store();
+        let reviews = FakeReviews::new("symphony-bot");
+        *reviews.change_head_on_create.lock().unwrap() = true;
+        let publisher = ReviewPublisher::new(FakeComments::new("symphony-bot"));
+        let (artifact, intent) = setup_review_fixture(&store, "formal").await;
+
+        let error = publisher
+            .publish_formal(&store, &reviews, &intent, &artifact, 42, 2)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("review cycle reopened"));
         assert!(reviews.review_payloads.lock().unwrap().is_empty());
     }
 

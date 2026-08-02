@@ -655,6 +655,20 @@ where
                 return Ok(ProcessOutcome::Waiting);
             }
             if let Err(error) = formal_result {
+                if is_review_cycle_reopened_error(&error) {
+                    self.record_event(
+                        Some(&candidate.run_id),
+                        Some(&stage.stage_run_id),
+                        "review_cycle_reopened",
+                        serde_json::json!({
+                            "status": "waiting",
+                            "reason": "publication_head_sha_changed_during_creation",
+                            "pr_number": candidate.pr_number,
+                            "reviewed_head_sha": pull.head.sha,
+                        }),
+                    )?;
+                    return Ok(ProcessOutcome::Waiting);
+                }
                 let classified = classify_review_publication_error(&error);
                 let status = self.record_publication_failure(
                     &intent,
@@ -952,6 +966,19 @@ where
                 .await;
                 match publisher_result {
                     Ok(ReviewPublicationResult::Waiting) => Ok(ReviewPublicationResult::Waiting),
+                    Err(error) if is_review_cycle_reopened_error(&error) => {
+                        self.record_event(
+                            Some(&intent.run_id),
+                            None,
+                            "review_cycle_reopened",
+                            serde_json::json!({
+                                "status": "waiting",
+                                "reason": "publication_head_sha_changed_during_creation",
+                                "intent_id": intent.intent_id,
+                            }),
+                        )?;
+                        Ok(ReviewPublicationResult::Waiting)
+                    }
                     Err(error) => Err(error),
                     Ok(ReviewPublicationResult::Published) => self
                         .apply_automatic_route_with_data(
@@ -1267,6 +1294,13 @@ where
 
 fn review_attempt_retry_exhausted(failed_attempts: u32, max_attempts: u32) -> bool {
     failed_attempts.saturating_add(1) >= max_attempts.max(1)
+}
+
+fn is_review_cycle_reopened_error(error: &SymphonyError) -> bool {
+    error
+        .to_string()
+        .to_ascii_lowercase()
+        .contains("review cycle reopened")
 }
 
 fn classify_review_publication_error(error: &SymphonyError) -> FactoryError {
