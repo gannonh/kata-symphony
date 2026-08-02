@@ -556,6 +556,40 @@ impl SharedFactoryStore {
         self.with_store_mut(|store| store.complete_review_publication(intent_id, step))
     }
 
+    pub fn record_review_publication_step(
+        &self,
+        intent_id: &str,
+        step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.record_review_publication_step(intent_id, step, status, expected_projection)
+        })
+    }
+
+    pub fn bind_review_publication_review(
+        &self,
+        intent_id: &str,
+        review_id: &str,
+        review_url: &str,
+        publisher_login: &str,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.bind_review_publication_review(intent_id, review_id, review_url, publisher_login)
+        })
+    }
+
+    pub fn set_review_publication_route_state(
+        &self,
+        intent_id: &str,
+        route_state: &str,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.set_review_publication_route_state(intent_id, route_state)
+        })
+    }
+
     pub fn bind_review_publication_comment(
         &self,
         intent_id: &str,

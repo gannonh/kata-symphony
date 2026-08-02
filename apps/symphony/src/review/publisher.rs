@@ -173,6 +173,7 @@ mod tests {
     use crate::review::domain::ReviewFindingsArtifactRecord;
     use crate::review::manifest::ReviewFindingsManifest;
     use crate::spec::domain::{SpecArtifact, SpecPublicationKind};
+    use crate::triage::domain::PublicationStatus;
     use crate::triage::publisher::TriageCommentPort;
     use crate::triage::runtime::SharedFactoryStore;
     use crate::triage::store::{
@@ -299,6 +300,16 @@ mod tests {
 
     async fn setup_preview_fixture(
         store: &SharedFactoryStore,
+    ) -> (
+        ReviewFindingsArtifactRecord,
+        crate::review::domain::ReviewPublicationIntent,
+    ) {
+        setup_review_fixture(store, "preview").await
+    }
+
+    async fn setup_review_fixture(
+        store: &SharedFactoryStore,
+        kind: &str,
     ) -> (
         ReviewFindingsArtifactRecord,
         crate::review::domain::ReviewPublicationIntent,
@@ -439,7 +450,7 @@ mod tests {
             .create_review_publication_intent(
                 &artifact.run_id,
                 &artifact.artifact_id,
-                "preview",
+                kind,
                 &serde_json::json!({"issue_number":42}),
             )
             .unwrap();
@@ -488,6 +499,132 @@ mod tests {
         assert_eq!(comments.comments.lock().unwrap().len(), 1);
         assert_eq!(*comments.create_count.lock().unwrap(), 1);
         assert_eq!(*comments.update_count.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn fresh_intent_round_trips_formal_identity_and_progressive_steps() {
+        let (_dir, store) = open_store();
+        let (_artifact, intent) = setup_preview_fixture(&store).await;
+
+        let fresh = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(fresh.review_id, None);
+        assert_eq!(fresh.review_url, None);
+        assert_eq!(fresh.route_state, None);
+
+        store
+            .bind_review_publication_review(
+                &intent.intent_id,
+                "review-17",
+                "https://example.test/reviews/17",
+                "symphony-bot",
+            )
+            .unwrap();
+        store
+            .set_review_publication_route_state(&intent.intent_id, "Human Review")
+            .unwrap();
+        store
+            .record_review_publication_step(
+                &intent.intent_id,
+                "review_created",
+                PublicationStatus::Pending,
+                &serde_json::json!({"review_id": "review-17"}),
+            )
+            .unwrap();
+        let pending = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.status, PublicationStatus::Pending);
+        assert_eq!(pending.review_id.as_deref(), Some("review-17"));
+        assert_eq!(
+            pending.review_url.as_deref(),
+            Some("https://example.test/reviews/17")
+        );
+        assert_eq!(pending.route_state.as_deref(), Some("Human Review"));
+
+        store
+            .record_review_publication_step(
+                &intent.intent_id,
+                "findings_recorded",
+                PublicationStatus::Pending,
+                &serde_json::json!({"finding_count": 0}),
+            )
+            .unwrap();
+        store
+            .record_review_publication_step(
+                &intent.intent_id,
+                "route_applied",
+                PublicationStatus::Pending,
+                &serde_json::json!({"route_state": "Human Review"}),
+            )
+            .unwrap();
+        store
+            .record_review_publication_step(
+                &intent.intent_id,
+                "comment_final",
+                PublicationStatus::Pending,
+                &serde_json::json!({"comment_id": "701"}),
+            )
+            .unwrap();
+        let applied = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied.status, PublicationStatus::Applied);
+        assert_eq!(applied.completed_steps.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn applied_formal_intent_stays_terminal_when_a_nonfinal_step_replays() {
+        let (_dir, store) = open_store();
+        let (_artifact, intent) = setup_review_fixture(&store, "formal").await;
+
+        store
+            .record_review_publication_step(
+                &intent.intent_id,
+                "comment_final",
+                PublicationStatus::Pending,
+                &serde_json::json!({"comment_id":"701"}),
+            )
+            .unwrap();
+        store
+            .record_review_publication_step(
+                &intent.intent_id,
+                "route_applied",
+                PublicationStatus::Pending,
+                &serde_json::json!({"route_state":"Human Review"}),
+            )
+            .unwrap();
+
+        let applied = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied.status, PublicationStatus::Applied);
+        assert_eq!(applied.completed_steps, vec!["comment_final"]);
+        assert_eq!(
+            applied.expected_projection,
+            serde_json::json!({"comment_id":"701"})
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_completion_helper_rejects_formal_intents() {
+        let (_dir, store) = open_store();
+        let (_artifact, intent) = setup_review_fixture(&store, "formal").await;
+
+        assert!(store
+            .complete_review_publication(&intent.intent_id, REVIEW_PREVIEW_COMMENT_STEP)
+            .is_err());
+        let unchanged = store
+            .get_review_publication_intent(&intent.intent_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.status, PublicationStatus::Pending);
+        assert!(unchanged.completed_steps.is_empty());
     }
 
     #[tokio::test]

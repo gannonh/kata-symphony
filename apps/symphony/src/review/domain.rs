@@ -132,6 +132,12 @@ pub struct ReviewPublicationIntent {
     pub comment_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher_login: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_state: Option<String>,
     pub desired_effects: serde_json::Value,
     pub observed_baseline: serde_json::Value,
     pub expected_projection: serde_json::Value,

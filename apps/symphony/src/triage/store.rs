@@ -36,13 +36,14 @@ use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 /// Embedded migrations, applied in order while the exclusive store lock is held.
-const MIGRATIONS: [&str; 6] = [
+const MIGRATIONS: [&str; 7] = [
     include_str!("migrations/001_init.sql"),
     include_str!("migrations/002_route_observations.sql"),
     include_str!("migrations/003_spec_stage.sql"),
     include_str!("migrations/004_implementation_stage.sql"),
     include_str!("migrations/005_implementation_draft_pr.sql"),
     include_str!("migrations/006_review_stage.sql"),
+    include_str!("migrations/007_review_publication.sql"),
 ];
 
 #[derive(Debug, Clone)]
@@ -499,8 +500,12 @@ impl SqliteFactoryStore {
         let conn = Connection::open(path).map_err(storage_error)?;
         conn.busy_timeout(StdDuration::from_millis(busy_timeout_ms))
             .map_err(storage_error)?;
-        for migration in MIGRATIONS {
-            conn.execute_batch(migration).map_err(storage_error)?;
+        for (index, migration) in MIGRATIONS.iter().enumerate() {
+            if index == 6 {
+                apply_review_publication_migration(&conn, migration).map_err(storage_error)?;
+            } else {
+                conn.execute_batch(migration).map_err(storage_error)?;
+            }
         }
 
         Ok(Self {
@@ -4001,7 +4006,8 @@ impl SqliteFactoryStore {
             .query_row(
                 "SELECT intent_id, run_id, artifact_id, kind, status,
                     completed_steps_json, retry_count, last_error_json, comment_id,
-                    publisher_login, desired_effects_json, observed_baseline_json,
+                    publisher_login, review_id, review_url, route_state,
+                    desired_effects_json, observed_baseline_json,
                     expected_projection_json, created_at, updated_at
                  FROM review_publication_intents WHERE intent_id = ?1",
                 params![intent_id],
@@ -4017,7 +4023,8 @@ impl SqliteFactoryStore {
             .prepare(
                 "SELECT intent_id, run_id, artifact_id, kind, status,
                     completed_steps_json, retry_count, last_error_json, comment_id,
-                    publisher_login, desired_effects_json, observed_baseline_json,
+                    publisher_login, review_id, review_url, route_state,
+                    desired_effects_json, observed_baseline_json,
                     expected_projection_json, created_at, updated_at
                  FROM review_publication_intents WHERE status = 'pending'
                  ORDER BY created_at ASC",
@@ -4039,7 +4046,8 @@ impl SqliteFactoryStore {
             .prepare(
                 "SELECT intent_id, run_id, artifact_id, kind, status,
                     completed_steps_json, retry_count, last_error_json, comment_id,
-                    publisher_login, desired_effects_json, observed_baseline_json,
+                    publisher_login, review_id, review_url, route_state,
+                    desired_effects_json, observed_baseline_json,
                     expected_projection_json, created_at, updated_at
                  FROM review_publication_intents WHERE run_id = ?1
                  ORDER BY created_at DESC",
@@ -4080,12 +4088,117 @@ impl SqliteFactoryStore {
         Ok(())
     }
 
+    /// Bind the identity returned by the forge for a formal review.
+    pub fn bind_review_publication_review(
+        &mut self,
+        intent_id: &str,
+        review_id: &str,
+        review_url: &str,
+        publisher_login: &str,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET review_id = ?1, review_url = ?2, publisher_login = ?3,
+                     updated_at = ?4 WHERE intent_id = ?5",
+                params![
+                    review_id,
+                    review_url,
+                    publisher_login,
+                    ts(Self::now()),
+                    intent_id
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "review intent {intent_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn set_review_publication_route_state(
+        &mut self,
+        intent_id: &str,
+        route_state: &str,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET route_state = ?1, updated_at = ?2 WHERE intent_id = ?3",
+                params![route_state, ts(Self::now()), intent_id],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "review intent {intent_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Record one formal publication step. Only `comment_final` terminalizes
+    /// the intent, allowing restart to resume at the first incomplete step.
+    pub fn record_review_publication_step(
+        &mut self,
+        intent_id: &str,
+        step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        let intent = self
+            .get_review_publication_intent(intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!("review intent {intent_id} not found"))
+            })?;
+        if intent.status == PublicationStatus::Applied {
+            return Ok(());
+        }
+        let mut steps = intent.completed_steps;
+        let trimmed = step.trim();
+        if !trimmed.is_empty() && !steps.iter().any(|existing| existing == trimmed) {
+            steps.push(trimmed.to_string());
+        }
+        let next_status = if trimmed == "comment_final" {
+            PublicationStatus::Applied
+        } else if status == PublicationStatus::Applied {
+            PublicationStatus::Pending
+        } else {
+            status
+        };
+        self.conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET completed_steps_json = ?1, status = ?2, last_error_json = NULL,
+                     expected_projection_json = ?3, updated_at = ?4
+                 WHERE intent_id = ?5",
+                params![
+                    bounded_json(&steps)?,
+                    next_status.as_str(),
+                    bounded_json(expected_projection)?,
+                    ts(Self::now()),
+                    intent_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
     pub fn complete_review_publication(&mut self, intent_id: &str, step: &str) -> Result<()> {
         let intent = self
             .get_review_publication_intent(intent_id)?
             .ok_or_else(|| {
                 SymphonyError::StorageError(format!("review intent {intent_id} not found"))
             })?;
+        if intent.kind != "preview" {
+            return Err(SymphonyError::TriageError(format!(
+                "review publication helper only supports preview intents, got kind={}",
+                intent.kind
+            )));
+        }
         let mut steps = intent.completed_steps;
         if !steps.iter().any(|existing| existing == step) {
             steps.push(step.to_string());
@@ -4560,6 +4673,35 @@ fn review_artifact_from_row(
     })
 }
 
+fn apply_review_publication_migration(conn: &Connection, migration: &str) -> rusqlite::Result<()> {
+    let migration = migration
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for statement in migration
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let column = statement
+            .split_whitespace()
+            .nth(5)
+            .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('review_publication_intents') WHERE name = ?1
+            )",
+            params![column],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            conn.execute_batch(statement)?;
+        }
+    }
+    Ok(())
+}
+
 fn review_publication_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<ReviewPublicationIntent> {
@@ -4575,11 +4717,14 @@ fn review_publication_from_row(
         last_error: optional_from_json(row.get::<_, Option<String>>(7)?)?,
         comment_id: row.get(8)?,
         publisher_login: row.get(9)?,
-        desired_effects: serde_json::from_str(&row.get::<_, String>(10)?).map_err(row_error)?,
-        observed_baseline: serde_json::from_str(&row.get::<_, String>(11)?).map_err(row_error)?,
-        expected_projection: serde_json::from_str(&row.get::<_, String>(12)?).map_err(row_error)?,
-        created_at: parse_ts_row(row.get::<_, String>(13)?)?,
-        updated_at: parse_ts_row(row.get::<_, String>(14)?)?,
+        review_id: row.get(10)?,
+        review_url: row.get(11)?,
+        route_state: row.get(12)?,
+        desired_effects: serde_json::from_str(&row.get::<_, String>(13)?).map_err(row_error)?,
+        observed_baseline: serde_json::from_str(&row.get::<_, String>(14)?).map_err(row_error)?,
+        expected_projection: serde_json::from_str(&row.get::<_, String>(15)?).map_err(row_error)?,
+        created_at: parse_ts_row(row.get::<_, String>(16)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(17)?)?,
     })
 }
 
@@ -6074,6 +6219,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn reopening_store_reapplies_review_publication_migration_idempotently() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let first = store(&path);
+        drop(first);
+
+        let reopened = store(&path);
+        for column in ["review_id", "review_url", "route_state"] {
+            let exists: bool = reopened
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM pragma_table_info('review_publication_intents')
+                        WHERE name = ?1
+                    )",
+                    params![column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing review publication column {column}");
+        }
     }
 
     #[test]
