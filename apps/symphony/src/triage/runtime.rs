@@ -1,9 +1,13 @@
 //! Runtime wiring for triage: shared store, HTTP query, and event emission.
 
+use chrono::Utc;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::domain::{EventKind, EventSeverity, ServiceConfig};
+use crate::domain::{
+    EventKind, EventSeverity, FactorySessionInfo, FactorySessionRegistry, FactorySnapshot,
+    ServiceConfig,
+};
 use crate::error::{Result, SymphonyError};
 use crate::event_stream::EventHub;
 use crate::github::client::GithubClient;
@@ -1017,16 +1021,117 @@ impl FactoryRunQuery for SharedFactoryStore {
 
 pub struct EventHubEmitter {
     hub: EventHub,
+    store: SharedFactoryStore,
+    factory_sessions: Arc<Mutex<FactorySessionRegistry>>,
 }
 
 impl EventHubEmitter {
-    pub fn new(hub: EventHub) -> Self {
-        Self { hub }
+    pub fn new(
+        hub: EventHub,
+        store: SharedFactoryStore,
+        factory_sessions: Arc<Mutex<FactorySessionRegistry>>,
+    ) -> Self {
+        Self {
+            hub,
+            store,
+            factory_sessions,
+        }
+    }
+
+    fn update_factory_session(
+        &self,
+        event_name: &str,
+        issue: Option<&str>,
+        run_id: Option<&str>,
+        stage_run_id: Option<&str>,
+        payload: &serde_json::Value,
+    ) {
+        let Some(stage_run_id) = stage_run_id else {
+            return;
+        };
+        let Ok(Some(stage)) = self.store.get_stage_run(stage_run_id) else {
+            return;
+        };
+        if stage.stage == crate::triage::domain::TRIAGE_STAGE_NAME {
+            return;
+        }
+
+        let issue_identifier = issue
+            .map(str::to_string)
+            .or_else(|| {
+                run_id.and_then(|id| {
+                    self.store
+                        .get_run_by_id(id)
+                        .ok()
+                        .flatten()
+                        .map(|run| run.issue_identifier)
+                })
+            })
+            .unwrap_or_else(|| run_id.unwrap_or("-").to_string());
+        let message = event_message(payload);
+        let is_start = matches!(
+            event_name,
+            "spec_started" | "implementation_started" | "review_started"
+        );
+        let is_terminal = matches!(
+            (stage.stage.as_str(), event_name),
+            ("spec", "spec_published" | "spec_failed")
+                | (
+                    "implementation",
+                    "implementation_completed"
+                        | "implementation_failed"
+                        | "implementation_preview_published"
+                )
+                | ("review", "review_published" | "review_blocked")
+        );
+
+        let Ok(mut registry) = self.factory_sessions.lock() else {
+            return;
+        };
+        if is_start {
+            registry.begin(FactorySessionInfo {
+                stage: stage.stage.clone(),
+                issue_identifier,
+                run_id: stage.run_id.clone(),
+                stage_run_id: stage.stage_run_id.clone(),
+                attempt: stage.attempt,
+                harness: stage.harness.clone(),
+                model: stage.model.clone(),
+                started_at: stage.started_at.unwrap_or_else(Utc::now),
+                last_activity_at: Some(Utc::now()),
+                last_event: Some(event_name.to_string()),
+                last_event_message: message.clone(),
+                session_id: None,
+                turn_count: 0,
+                total_tokens: 0,
+            });
+        } else {
+            registry.update_event(stage_run_id, event_name, message);
+        }
+
+        if is_terminal {
+            registry.finish(
+                stage_run_id,
+                stage.status.as_str(),
+                stage.usage.input_tokens,
+                stage.usage.output_tokens,
+                stage.usage.total_tokens,
+                stage.error.map(|error| error.remediation),
+            );
+        }
     }
 }
 
 impl EventEmitter for EventHubEmitter {
-    fn emit_triage_event(&self, event_name: &str, issue: Option<&str>, payload: serde_json::Value) {
+    fn emit_triage_event(
+        &self,
+        event_name: &str,
+        issue: Option<&str>,
+        run_id: Option<&str>,
+        stage_run_id: Option<&str>,
+        payload: serde_json::Value,
+    ) {
+        self.update_factory_session(event_name, issue, run_id, stage_run_id, &payload);
         let severity = if event_name.contains("failed")
             || event_name.contains("conflict")
             || event_name.contains("blocked")
@@ -1035,14 +1140,34 @@ impl EventEmitter for EventHubEmitter {
         } else {
             EventSeverity::Info
         };
+        let display_issue = issue.map(str::to_string).or_else(|| {
+            run_id.and_then(|id| {
+                self.store
+                    .get_run_by_id(id)
+                    .ok()
+                    .flatten()
+                    .map(|run| run.issue_identifier)
+            })
+        });
         self.hub.publish(
             EventKind::Triage,
             severity,
-            issue.map(str::to_string),
+            display_issue,
             event_name,
             payload,
         );
     }
+}
+
+fn event_message(payload: &serde_json::Value) -> Option<String> {
+    ["summary", "error", "error_preview", "message", "status"]
+        .into_iter()
+        .find_map(|key| {
+            payload
+                .get(key)
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
 }
 
 /// Owns the GitHub-backed triage coordinator for the orchestrator poll loop.
@@ -1054,6 +1179,7 @@ pub struct TriageRuntime {
     review_coordinator: Option<ReviewCoordinator<GithubClient, LiveReviewWorker>>,
     store: SharedFactoryStore,
     sessions: Arc<Mutex<crate::domain::TriageSessionRegistry>>,
+    factory_sessions: Arc<Mutex<FactorySessionRegistry>>,
 }
 
 impl TriageRuntime {
@@ -1221,8 +1347,14 @@ impl TriageRuntime {
         let owner_instance = format!("symphony-{}-{}", std::process::id(), uuid::Uuid::new_v4());
         let project_display_name = format!("#{project_number}");
         let sessions = Arc::new(Mutex::new(crate::domain::TriageSessionRegistry::default()));
-        let emitter =
-            event_hub.map(|hub| Arc::new(EventHubEmitter::new(hub)) as Arc<dyn EventEmitter>);
+        let factory_sessions = Arc::new(Mutex::new(FactorySessionRegistry::default()));
+        let emitter = event_hub.map(|hub| {
+            Arc::new(EventHubEmitter::new(
+                hub,
+                store.clone(),
+                factory_sessions.clone(),
+            )) as Arc<dyn EventEmitter>
+        });
 
         let coordinator = if config.triage.enabled {
             let mut coordinator = TriageCoordinator::new(
@@ -1319,6 +1451,7 @@ impl TriageRuntime {
             review_coordinator: Some(review_coordinator),
             store,
             sessions,
+            factory_sessions,
         }))
     }
 
@@ -1328,6 +1461,17 @@ impl TriageRuntime {
 
     pub fn sessions(&self) -> Arc<Mutex<crate::domain::TriageSessionRegistry>> {
         self.sessions.clone()
+    }
+
+    pub fn factory_sessions(&self) -> Arc<Mutex<FactorySessionRegistry>> {
+        self.factory_sessions.clone()
+    }
+
+    pub fn factory_snapshot(&self) -> FactorySnapshot {
+        self.factory_sessions
+            .lock()
+            .map(|registry| registry.snapshot())
+            .unwrap_or_default()
     }
 
     /// Issue IDs / intake labels that must not enter implementation dispatch

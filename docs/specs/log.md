@@ -1,6 +1,7 @@
 # Specs Update Log
 
 ## 2026-08-01
+* **Typed factory state is now visible in the TUI**: Specification, implementation, and review lifecycle events feed a live factory-session snapshot, including active rows, bounded completions, stage usage totals, and issue identifiers. The TUI no longer depends on legacy worker state for typed-stage progress; the additive snapshot field remains backward-compatible for API consumers.
 * **Automatic publication and review hardening**: Automatic implementation refreshes the configured remote base before capturing the attempt SHA, verifies the completion route after label/state mutations, and branch publication verifies that the pinned base remains reachable before importing the thin result bundle. The review coordinator resolves relative repository/workspace paths before isolated worker setup. Missing base history is a terminal publication conflict with no branch push or retry loop.
 * **Implementation preview runtime hardening**: Relative workflow workspace paths now resolve to absolute paths before child-process execution and Git bundle creation. Validation recognizes shell command substitution, preserving the existing UAT command form. Direct UAT on `gannonh/uat-symphony` Project #16 verified preview publication, bundle metadata, and tracker preservation.
 

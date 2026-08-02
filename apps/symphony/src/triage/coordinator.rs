@@ -48,7 +48,14 @@ const DESIRED_KIND_AUTOMATIC: &str = "automatic_route";
 
 /// Live triage event sink (optional). Durable events are always written to the store.
 pub trait EventEmitter: Send + Sync {
-    fn emit_triage_event(&self, event_name: &str, issue: Option<&str>, payload: serde_json::Value);
+    fn emit_triage_event(
+        &self,
+        event_name: &str,
+        issue: Option<&str>,
+        run_id: Option<&str>,
+        stage_run_id: Option<&str>,
+        payload: serde_json::Value,
+    );
 }
 
 /// Executable triage stage. Production uses [`DefaultTriageExecutor`]; tests inject fakes.
@@ -1514,7 +1521,7 @@ where
         payload: serde_json::Value,
     ) -> Result<()> {
         if let Some(emitter) = &self.events {
-            emitter.emit_triage_event(event_name, issue, payload.clone());
+            emitter.emit_triage_event(event_name, issue, run_id, stage_run_id, payload.clone());
         }
         self.store.record_event(FactoryEventRecord {
             event_id: Uuid::now_v7().to_string(),
@@ -1781,6 +1788,8 @@ mod tests {
             &self,
             event_name: &str,
             issue: Option<&str>,
+            _run_id: Option<&str>,
+            _stage_run_id: Option<&str>,
             _payload: serde_json::Value,
         ) {
             self.events

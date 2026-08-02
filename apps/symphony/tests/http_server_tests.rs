@@ -166,6 +166,7 @@ fn fixture_snapshot() -> OrchestratorSnapshot {
             poll_count: 42,
         },
         triage_sessions: vec![],
+        factory: symphony::domain::FactorySnapshot::default(),
     }
 }
 

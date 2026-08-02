@@ -532,6 +532,13 @@ fn build_summary_lines(snapshot: &OrchestratorSnapshot, throughput_line: &str) -
         ));
     }
 
+    counts.push(format!(
+        "Factory: {} running | {} completed | {} tokens",
+        snapshot.factory.running.len(),
+        snapshot.factory.completed.len(),
+        format_tokens(snapshot.factory.totals.total_tokens),
+    ));
+
     let mut lines = vec![counts.join("  |  "), throughput_line.to_string()];
     lines.push(supervisor_summary_line(snapshot));
 
@@ -901,6 +908,46 @@ fn running_rows(snapshot: &OrchestratorSnapshot, now: DateTime<Utc>) -> Vec<Row<
         rows.push(row);
     }
 
+    for session in &snapshot.factory.running {
+        let last_activity = session.last_activity_at.or(Some(session.started_at));
+        let activity_message = format_activity_message(
+            None,
+            None,
+            session
+                .last_event_message
+                .as_deref()
+                .or(session.last_event.as_deref()),
+        );
+        rows.push(Row::new(vec![
+            Cell::from(status_dot(
+                session.last_event.as_deref(),
+                last_activity,
+                now,
+                false,
+            )),
+            Cell::from(session.issue_identifier.clone()),
+            Cell::from(compact_session_id(Some(&session.stage_run_id))),
+            Cell::from(format!(
+                "{}#{}",
+                factory_stage_label(&session.stage),
+                session.attempt
+            )),
+            Cell::from(session.turn_count.to_string()),
+            Cell::from(truncate_for_display(
+                session.last_event.as_deref().unwrap_or("-"),
+                LAST_EVENT_COLUMN_WIDTH as usize,
+            )),
+            Cell::from(truncate_for_display(
+                &activity_message,
+                MESSAGE_COLUMN_TRUNCATE_WIDTH,
+            )),
+            Cell::from(format_age(last_activity, now)),
+            Cell::from(format_tokens(session.total_tokens)),
+            Cell::from(session.model.clone().unwrap_or_else(|| "-".to_string())),
+            Cell::from(format!("factory/{}", session.harness)),
+        ]));
+    }
+
     if rows.is_empty() {
         rows.push(Row::new(vec![
             Cell::from(""),
@@ -962,6 +1009,15 @@ fn triage_rows(snapshot: &OrchestratorSnapshot, now: DateTime<Utc>) -> Vec<Row<'
     }
 
     rows
+}
+
+fn factory_stage_label(stage: &str) -> &str {
+    match stage {
+        "implementation" => "impl",
+        "review" => "review",
+        "spec" => "spec",
+        other => other,
+    }
 }
 
 fn compact_session_id(session_id: Option<&str>) -> String {
@@ -1087,11 +1143,11 @@ fn retry_rows(snapshot: &OrchestratorSnapshot) -> Vec<Row<'static>> {
 }
 
 fn completed_items(snapshot: &OrchestratorSnapshot) -> Vec<ListItem<'static>> {
-    if snapshot.completed.is_empty() {
+    if snapshot.completed.is_empty() && snapshot.factory.completed.is_empty() {
         return vec![ListItem::new("(empty)")];
     }
 
-    snapshot
+    let mut items = snapshot
         .completed
         .iter()
         .map(|entry| {
@@ -1105,7 +1161,17 @@ fn completed_items(snapshot: &OrchestratorSnapshot) -> Vec<ListItem<'static>> {
                 entry.identifier, entry.title, timestamp
             ))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    items.extend(snapshot.factory.completed.iter().map(|entry| {
+        ListItem::new(format!(
+            "{} - factory {} ({}, {} tokens)",
+            entry.issue_identifier,
+            entry.stage,
+            entry.status,
+            format_tokens(entry.total_tokens),
+        ))
+    }));
+    items
 }
 
 fn activity_items(
@@ -1396,6 +1462,7 @@ mod tests {
                 poll_count: 0,
             },
             triage_sessions: Vec::new(),
+            factory: crate::domain::FactorySnapshot::default(),
         }
     }
 
@@ -1658,6 +1725,65 @@ mod tests {
         assert!(
             rendered.contains("#42"),
             "running table should render github issue identifiers verbatim, got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn test_tui_renders_factory_sessions_and_summary() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 3, 22, 16, 15, 0)
+            .single()
+            .expect("valid fixture timestamp");
+        let mut snapshot = snapshot_fixture(0, None);
+        snapshot
+            .factory
+            .running
+            .push(crate::domain::FactorySessionInfo {
+                stage: "implementation".into(),
+                issue_identifier: "#43".into(),
+                run_id: "run-43".into(),
+                stage_run_id: "stage-43".into(),
+                attempt: 1,
+                harness: "pi".into(),
+                model: Some("openai-codex/gpt-5.6-luna:max".into()),
+                started_at: now,
+                last_activity_at: Some(now),
+                last_event: Some("implementation_started".into()),
+                last_event_message: Some("preparing workspace".into()),
+                session_id: None,
+                turn_count: 1,
+                total_tokens: 12,
+            });
+        snapshot.factory.totals.attempts_started = 1;
+        snapshot.factory.totals.total_tokens = 12;
+
+        let backend = TestBackend::new(180, 48);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        let activity_log = ActivityLog::default();
+        terminal
+            .draw(|frame| {
+                draw_dashboard(
+                    frame,
+                    &snapshot,
+                    &activity_log,
+                    now,
+                    "Throughput: 0.0 tps ▁▁▁▁▁▁▁▁",
+                )
+            })
+            .expect("dashboard draw should succeed");
+
+        let rendered = render_text(terminal.backend());
+        assert!(
+            rendered.contains("#43"),
+            "factory issue should render: {rendered}"
+        );
+        assert!(
+            rendered.contains("impl#1"),
+            "factory stage should render: {rendered}"
+        );
+        assert!(
+            rendered.contains("Factory: 1 running"),
+            "factory summary should render: {rendered}"
         );
     }
 

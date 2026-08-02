@@ -1495,7 +1495,7 @@ where
             payload: payload.clone(),
         })?;
         if let Some(events) = &self.events {
-            events.emit_triage_event(event_type, None, payload);
+            events.emit_triage_event(event_type, None, run_id, stage_run_id, payload);
         }
         Ok(())
     }

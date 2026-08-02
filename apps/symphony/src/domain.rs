@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::ops::Deref;
 
@@ -1405,6 +1405,190 @@ impl TriageSessionRegistry {
     }
 }
 
+/// Live view of a non-legacy factory stage attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactorySessionInfo {
+    pub stage: String,
+    pub issue_identifier: String,
+    pub run_id: String,
+    pub stage_run_id: String,
+    pub attempt: u32,
+    pub harness: String,
+    #[serde(default)]
+    pub model: Option<String>,
+    pub started_at: DateTime<Utc>,
+    #[serde(default)]
+    pub last_activity_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub last_event: Option<String>,
+    #[serde(default)]
+    pub last_event_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub turn_count: u32,
+    #[serde(default)]
+    pub total_tokens: u64,
+}
+
+/// Retained terminal record for a factory stage attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FactoryCompletedEntry {
+    pub stage: String,
+    pub issue_identifier: String,
+    pub stage_run_id: String,
+    pub status: String,
+    pub completed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Aggregate usage and attempt counts for typed factory stages.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FactoryTotals {
+    #[serde(default)]
+    pub attempts_started: u64,
+    #[serde(default)]
+    pub attempts_completed: u64,
+    #[serde(default)]
+    pub attempts_failed: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+}
+
+/// Snapshot of typed factory stage activity for TUI/API consumers.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct FactorySnapshot {
+    #[serde(default)]
+    pub running: Vec<FactorySessionInfo>,
+    #[serde(default)]
+    pub completed: Vec<FactoryCompletedEntry>,
+    #[serde(default)]
+    pub totals: FactoryTotals,
+}
+
+const FACTORY_COMPLETED_HISTORY_LIMIT: usize = 20;
+
+/// Shared live registry for typed factory stage attempts.
+#[derive(Default)]
+pub struct FactorySessionRegistry {
+    sessions: BTreeMap<String, FactorySessionInfo>,
+    completed: VecDeque<FactoryCompletedEntry>,
+    totals: FactoryTotals,
+    on_change: Option<std::sync::Arc<dyn Fn(FactorySnapshot) + Send + Sync>>,
+}
+
+impl std::fmt::Debug for FactorySessionRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FactorySessionRegistry")
+            .field("sessions", &self.sessions)
+            .field("completed", &self.completed)
+            .field("totals", &self.totals)
+            .field("on_change", &self.on_change.as_ref().map(|_| "set"))
+            .finish()
+    }
+}
+
+impl FactorySessionRegistry {
+    pub fn set_on_change(
+        &mut self,
+        callback: std::sync::Arc<dyn Fn(FactorySnapshot) + Send + Sync>,
+    ) {
+        self.on_change = Some(callback);
+    }
+
+    pub fn begin(&mut self, info: FactorySessionInfo) {
+        if self
+            .sessions
+            .insert(info.stage_run_id.clone(), info)
+            .is_none()
+        {
+            self.totals.attempts_started = self.totals.attempts_started.saturating_add(1);
+        }
+        self.notify();
+    }
+
+    pub fn update_event(
+        &mut self,
+        stage_run_id: &str,
+        event: impl Into<String>,
+        message: Option<String>,
+    ) {
+        if let Some(info) = self.sessions.get_mut(stage_run_id) {
+            let event = event.into();
+            if event.ends_with("_turn_completed") {
+                info.turn_count = info.turn_count.saturating_add(1);
+            }
+            info.last_event = Some(event);
+            info.last_event_message = message;
+            info.last_activity_at = Some(Utc::now());
+            self.notify();
+        }
+    }
+
+    pub fn finish(
+        &mut self,
+        stage_run_id: &str,
+        status: impl Into<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+        total_tokens: u64,
+        error: Option<String>,
+    ) {
+        let Some(session) = self.sessions.remove(stage_run_id) else {
+            return;
+        };
+        let status = status.into();
+        if status == "completed" {
+            self.totals.attempts_completed = self.totals.attempts_completed.saturating_add(1);
+        } else if status == "failed" {
+            self.totals.attempts_failed = self.totals.attempts_failed.saturating_add(1);
+        }
+        self.totals.input_tokens = self.totals.input_tokens.saturating_add(input_tokens);
+        self.totals.output_tokens = self.totals.output_tokens.saturating_add(output_tokens);
+        self.totals.total_tokens = self.totals.total_tokens.saturating_add(total_tokens);
+        self.completed.push_front(FactoryCompletedEntry {
+            stage: session.stage,
+            issue_identifier: session.issue_identifier,
+            stage_run_id: session.stage_run_id,
+            status,
+            completed_at: Utc::now(),
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            error,
+        });
+        while self.completed.len() > FACTORY_COMPLETED_HISTORY_LIMIT {
+            let _ = self.completed.pop_back();
+        }
+        self.notify();
+    }
+
+    pub fn snapshot(&self) -> FactorySnapshot {
+        FactorySnapshot {
+            running: self.sessions.values().cloned().collect(),
+            completed: self.completed.iter().cloned().collect(),
+            totals: self.totals.clone(),
+        }
+    }
+
+    fn notify(&self) {
+        if let Some(callback) = &self.on_change {
+            callback(self.snapshot());
+        }
+    }
+}
+
 /// Read-only serializable view of orchestrator state for the HTTP API.
 /// Uses `BTreeMap` for deterministic JSON key ordering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1434,6 +1618,8 @@ pub struct OrchestratorSnapshot {
     pub polling: PollingSnapshot,
     #[serde(default)]
     pub triage_sessions: Vec<TriageSessionInfo>,
+    #[serde(default)]
+    pub factory: FactorySnapshot,
 }
 
 // ── RefreshRequestOutcome (S07 HTTP control seam) ─────────────────────

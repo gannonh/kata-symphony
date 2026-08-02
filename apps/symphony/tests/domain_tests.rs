@@ -453,6 +453,7 @@ fn test_orchestrator_snapshot_serializes() {
             poll_count: 0,
         },
         triage_sessions: vec![],
+        factory: FactorySnapshot::default(),
     };
     let json = serde_json::to_string(&snap).unwrap();
     // Valid JSON
@@ -473,6 +474,7 @@ fn test_orchestrator_snapshot_serializes() {
     assert!(val.get("shared_context").is_some());
     assert!(val.get("codex_totals").is_some());
     assert!(val.get("polling").is_some());
+    assert!(val.get("factory").is_some());
     // Retry queue has our entry
     let queue = val["retry_queue"].as_array().unwrap();
     assert_eq!(queue.len(), 1);
@@ -506,6 +508,52 @@ fn test_orchestrator_snapshot_serializes() {
         completed_json.contains("\"title\":\"Done issue Z\""),
         "completed should contain title field"
     );
+}
+
+#[test]
+fn factory_session_registry_tracks_running_and_completed_attempts() {
+    let started_at = Utc::now();
+    let mut registry = FactorySessionRegistry::default();
+    registry.begin(FactorySessionInfo {
+        stage: "implementation".into(),
+        issue_identifier: "#42".into(),
+        run_id: "run-42".into(),
+        stage_run_id: "stage-42".into(),
+        attempt: 1,
+        harness: "pi".into(),
+        model: Some("openai-codex/gpt-5.6-luna:max".into()),
+        started_at,
+        last_activity_at: Some(started_at),
+        last_event: Some("implementation_started".into()),
+        last_event_message: None,
+        session_id: None,
+        turn_count: 0,
+        total_tokens: 0,
+    });
+    registry.update_event(
+        "stage-42",
+        "implementation_validation",
+        Some("validation running".into()),
+    );
+
+    let running = registry.snapshot();
+    assert_eq!(running.running.len(), 1);
+    assert_eq!(running.running[0].issue_identifier, "#42");
+    assert_eq!(
+        running.running[0].last_event.as_deref(),
+        Some("implementation_validation")
+    );
+    assert_eq!(running.totals.attempts_started, 1);
+
+    registry.finish("stage-42", "completed", 10, 20, 30, None);
+    registry.finish("stage-42", "completed", 100, 100, 200, None);
+
+    let completed = registry.snapshot();
+    assert!(completed.running.is_empty());
+    assert_eq!(completed.completed.len(), 1);
+    assert_eq!(completed.completed[0].total_tokens, 30);
+    assert_eq!(completed.totals.attempts_completed, 1);
+    assert_eq!(completed.totals.total_tokens, 30);
 }
 
 #[test]

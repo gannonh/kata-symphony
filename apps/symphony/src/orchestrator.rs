@@ -1489,6 +1489,13 @@ impl SnapshotHandle {
         let mut guard = self.inner.write().expect("snapshot rwlock poisoned");
         guard.triage_sessions = sessions;
     }
+
+    /// Patch typed factory stage state while a coordinator is inside a long
+    /// running attempt and the orchestrator poll has not returned yet.
+    pub fn update_factory_snapshot(&self, factory: crate::domain::FactorySnapshot) {
+        let mut guard = self.inner.write().expect("snapshot rwlock poisoned");
+        guard.factory = factory;
+    }
 }
 
 // ── Refresh Control Channel (S07 control seam) ──────────────────────────
@@ -4557,9 +4564,22 @@ impl Orchestrator {
     pub fn attach_triage_runtime(&mut self, runtime: TriageRuntime) {
         if let Some(handle) = self.snapshot_handle.clone() {
             if let Ok(mut registry) = runtime.sessions().lock() {
+                let callback_handle = handle.clone();
                 registry.set_on_change(std::sync::Arc::new(move |sessions| {
-                    handle.update_triage_sessions(sessions);
+                    callback_handle.update_triage_sessions(sessions);
                 }));
+            }
+
+            let factory_sessions = runtime.factory_sessions();
+            let factory_snapshot = factory_sessions.lock().ok().map(|mut registry| {
+                let callback_handle = handle.clone();
+                registry.set_on_change(std::sync::Arc::new(move |factory| {
+                    callback_handle.update_factory_snapshot(factory);
+                }));
+                registry.snapshot()
+            });
+            if let Some(factory) = factory_snapshot {
+                handle.update_factory_snapshot(factory);
             }
         }
         self.dispatch_guard_store = Some(runtime.store());
@@ -4745,6 +4765,11 @@ impl Orchestrator {
                         .map(|registry| registry.list())
                         .unwrap_or_default()
                 })
+                .unwrap_or_default(),
+            factory: self
+                .triage_runtime
+                .as_ref()
+                .map(TriageRuntime::factory_snapshot)
                 .unwrap_or_default(),
         }
     }

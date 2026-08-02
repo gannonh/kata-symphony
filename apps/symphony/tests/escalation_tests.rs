@@ -68,6 +68,7 @@ fn empty_snapshot() -> OrchestratorSnapshot {
             poll_count: 0,
         },
         triage_sessions: vec![],
+        factory: symphony::domain::FactorySnapshot::default(),
     }
 }
 
