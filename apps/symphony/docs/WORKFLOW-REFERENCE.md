@@ -622,6 +622,32 @@ server:
 #   # completion_route:
 #   #   state: Agent Review
 
+# ─── Agent review stage (A4) ───────────────────────────────────────────────────
+# GitHub Projects v2 only. Requires an approved A2 specification and an owned
+# A3 draft PR. Preview mode publishes an issue comment. Automatic mode creates
+# one atomic pull-request review and routes the tracker item by severity.
+#
+# `permission_probe_pull_request` selects a known open PR for `symphony doctor`.
+# When omitted, doctor probes the first open PR in the configured repository.
+#
+# review:
+#   enabled: false
+#   mode: preview                 # preview or automatic
+#   prompt: prompts/agent-review.md
+#   # model: provider/model-name  # Pi only
+#   max_turns: 1
+#   invocation_timeout_ms: 1800000
+#   max_attempts: 3
+#   max_reprompts: 2
+#   max_findings: 50
+#   blocking_severity: blocking   # blocking, major, minor, or nit
+#   trigger_state: Agent Review
+#   # permission_probe_pull_request: 123
+#   # completion_route:
+#   #   state: Human Review
+#   # changes_requested_route:
+#   #   state: Implementation
+
 # ─── Prompts (per-state prompt injection) ─────────────────────────────────────
 # Optional. When configured, the orchestrator selects a prompt template based on
 # the issue's tracker state at dispatch time instead of using the markdown body

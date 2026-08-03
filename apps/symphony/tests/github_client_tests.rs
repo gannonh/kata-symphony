@@ -4,7 +4,7 @@ use chrono::Utc;
 use mockito::{Matcher, Server, ServerGuard};
 use serde_json::json;
 use symphony::error::SymphonyError;
-use symphony::github::client::GithubClient;
+use symphony::github::client::{GithubClient, GithubPullRequestReviewComment};
 
 fn test_client(server: &ServerGuard) -> GithubClient {
     GithubClient::with_base_url(
@@ -384,6 +384,195 @@ async fn test_list_pull_requests_filters_head_base_state() {
     assert!(prs[0].draft);
     assert_eq!(prs[0].head.ref_name, "symphony/42");
     assert_eq!(prs[0].head.sha, "abc123");
+}
+
+#[tokio::test]
+async fn test_list_pull_request_reviews_returns_author_marker_and_commit() {
+    let mut server = Server::new_async().await;
+    let client = test_client(&server);
+
+    let mock = server
+        .mock("GET", "/repos/kata-sh/kata-mono/pulls/11/reviews")
+        .match_query(Matcher::UrlEncoded("per_page".into(), "100".into()))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!([{
+                "id": 73,
+                "user": { "login": "symphony-bot" },
+                "body": "<!-- symphony:review:intent-7 -->\\nSummary",
+                "commit_id": "head-sha",
+                "state": "COMMENTED",
+                "html_url": "https://github.com/kata-sh/kata-mono/pull/11#pullrequestreview-73",
+                "submitted_at": "2026-07-30T10:00:00Z"
+            }])
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let reviews = client
+        .list_pull_request_reviews(11, 2)
+        .await
+        .expect("list_pull_request_reviews");
+    mock.assert_async().await;
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].id, 73);
+    assert_eq!(reviews[0].user.as_ref().unwrap().login, "symphony-bot");
+    assert!(reviews[0]
+        .body
+        .as_deref()
+        .unwrap()
+        .contains("<!-- symphony:review:intent-7 -->"));
+    assert_eq!(reviews[0].commit_id.as_deref(), Some("head-sha"));
+}
+
+#[tokio::test]
+async fn test_probe_pull_request_review_permission_accepts_unprocessable_entity() {
+    let mut server = Server::new_async().await;
+    let client = test_client(&server);
+
+    let mock = server
+        .mock("POST", "/repos/kata-sh/kata-mono/pulls/11/reviews")
+        .match_body(Matcher::PartialJson(json!({ "event": "INVALID" })))
+        .with_status(422)
+        .with_body("invalid review event")
+        .create_async()
+        .await;
+
+    client
+        .probe_pull_request_review_permission(11)
+        .await
+        .expect("HTTP 422 proves review endpoint authorization");
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_probe_pull_request_review_permission_rejects_forbidden() {
+    let mut server = Server::new_async().await;
+    let client = test_client(&server);
+
+    let mock = server
+        .mock("POST", "/repos/kata-sh/kata-mono/pulls/11/reviews")
+        .with_status(403)
+        .with_body("forbidden")
+        .create_async()
+        .await;
+
+    let error = client
+        .probe_pull_request_review_permission(11)
+        .await
+        .expect_err("HTTP 403 must fail the permission probe");
+    mock.assert_async().await;
+    assert!(matches!(
+        error,
+        SymphonyError::GithubApiStatus { status: 403, .. }
+    ));
+}
+
+#[tokio::test]
+async fn test_probe_pull_request_review_permission_rejects_unexpected_success() {
+    let mut server = Server::new_async().await;
+    let client = test_client(&server);
+
+    let mock = server
+        .mock("POST", "/repos/kata-sh/kata-mono/pulls/11/reviews")
+        .with_status(201)
+        .with_body("created")
+        .create_async()
+        .await;
+
+    let error = client
+        .probe_pull_request_review_permission(11)
+        .await
+        .expect_err("successful review creation must fail the invalid-event probe");
+    mock.assert_async().await;
+    assert!(matches!(
+        error,
+        SymphonyError::GithubApiStatus { status: 201, .. }
+    ));
+}
+
+#[tokio::test]
+async fn test_create_pull_request_review_serializes_multiline_anchors_and_omits_single_line_fields()
+{
+    let mut server = Server::new_async().await;
+    let client = test_client(&server);
+
+    let mock = server
+        .mock("POST", "/repos/kata-sh/kata-mono/pulls/11/reviews")
+        .match_header("content-type", Matcher::Regex("application/json".into()))
+        .match_body(Matcher::Json(json!({
+            "commit_id": "head-sha",
+            "body": "<!-- symphony:review:intent-7 -->\\nSummary",
+            "event": "COMMENT",
+            "comments": [
+                {
+                    "path": "src/lib.rs",
+                    "line": 27,
+                    "side": "RIGHT",
+                    "start_line": 24,
+                    "start_side": "RIGHT",
+                    "body": "Handle this error before publishing."
+                },
+                {
+                    "path": "src/main.rs",
+                    "line": 10,
+                    "side": "RIGHT",
+                    "body": "Handle this error before publishing."
+                }
+            ]
+        })))
+        .with_status(201)
+        .with_header("content-type", "application/json")
+        .with_body(
+            json!({
+                "id": 73,
+                "user": { "login": "symphony-bot" },
+                "body": "<!-- symphony:review:intent-7 -->\\nSummary",
+                "commit_id": "head-sha",
+                "state": "COMMENTED",
+                "html_url": "https://github.com/kata-sh/kata-mono/pull/11#pullrequestreview-73"
+            })
+            .to_string(),
+        )
+        .create_async()
+        .await;
+
+    let review = client
+        .create_pull_request_review(
+            11,
+            "head-sha",
+            "<!-- symphony:review:intent-7 -->\\nSummary",
+            &[
+                GithubPullRequestReviewComment {
+                    path: "src/lib.rs".to_string(),
+                    line: 27,
+                    side: "RIGHT".to_string(),
+                    start_line: Some(24),
+                    start_side: Some("RIGHT".to_string()),
+                    body: "Handle this error before publishing.".to_string(),
+                },
+                GithubPullRequestReviewComment {
+                    path: "src/main.rs".to_string(),
+                    line: 10,
+                    side: "RIGHT".to_string(),
+                    start_line: None,
+                    start_side: None,
+                    body: "Handle this error before publishing.".to_string(),
+                },
+            ],
+        )
+        .await
+        .expect("create_pull_request_review");
+    mock.assert_async().await;
+    assert_eq!(review.id, 73);
+    assert_eq!(review.commit_id.as_deref(), Some("head-sha"));
+    assert_eq!(review.user.as_ref().unwrap().login, "symphony-bot");
+    assert_eq!(
+        review.html_url.as_deref(),
+        Some("https://github.com/kata-sh/kata-mono/pull/11#pullrequestreview-73")
+    );
 }
 
 #[tokio::test]

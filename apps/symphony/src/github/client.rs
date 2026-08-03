@@ -145,6 +145,35 @@ pub struct GithubPullRequestFile {
     pub patch: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct GithubPullRequestReview {
+    pub id: u64,
+    #[serde(default)]
+    pub user: Option<GithubUser>,
+    #[serde(default)]
+    pub body: Option<String>,
+    #[serde(default)]
+    pub commit_id: Option<String>,
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub html_url: Option<String>,
+    #[serde(default)]
+    pub submitted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GithubPullRequestReviewComment {
+    pub path: String,
+    pub line: u32,
+    pub side: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_side: Option<String>,
+    pub body: String,
+}
+
 #[derive(Clone)]
 pub struct GithubClient {
     pub http_client: reqwest::Client,
@@ -518,6 +547,80 @@ impl GithubClient {
         url.query_pairs_mut().append_pair("per_page", "100");
         self.paginated_get_capped(url.as_ref(), max_pages, "pull files")
             .await
+    }
+
+    /// List reviews for a pull request, including author, body, and reviewed commit.
+    pub async fn list_pull_request_reviews(
+        &self,
+        number: u64,
+        max_pages: u32,
+    ) -> Result<Vec<GithubPullRequestReview>> {
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/repos/{}/{}/pulls/{number}/reviews",
+            self.base_url, self.repo_owner, self.repo_name
+        ))
+        .map_err(|err| {
+            SymphonyError::GithubApiRequest(format!("invalid pull reviews URL: {err}"))
+        })?;
+        url.query_pairs_mut().append_pair("per_page", "100");
+        self.paginated_get_capped(url.as_ref(), max_pages, "pull reviews")
+            .await
+    }
+
+    /// Probe pull request review write authorization without creating a review.
+    ///
+    /// GitHub rejects the intentionally invalid event with HTTP 422 after it
+    /// authorizes the endpoint. Any other status is surfaced to the caller.
+    pub async fn probe_pull_request_review_permission(&self, number: u64) -> Result<()> {
+        let path = format!(
+            "/repos/{}/{}/pulls/{number}/reviews",
+            self.repo_owner, self.repo_name
+        );
+        let url = format!("{}{}", self.base_url, path);
+        let payload = serde_json::json!({ "event": "INVALID" });
+
+        self.wait_for_rate_limit_if_needed().await;
+        let response = self
+            .http_client
+            .request(Method::POST, &url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|err| {
+                SymphonyError::GithubApiRequest(format!("request to {url} failed: {err}"))
+            })?;
+        self.update_rate_limit_state(response.headers()).await;
+
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        if status == 422 {
+            return Ok(());
+        }
+        Err(SymphonyError::GithubApiStatus {
+            status,
+            message: truncate_error_preview(&body),
+        })
+    }
+
+    /// Create one atomic review containing a summary and all inline comments.
+    pub async fn create_pull_request_review(
+        &self,
+        number: u64,
+        commit_id: &str,
+        body: &str,
+        comments: &[GithubPullRequestReviewComment],
+    ) -> Result<GithubPullRequestReview> {
+        let path = format!(
+            "/repos/{}/{}/pulls/{number}/reviews",
+            self.repo_owner, self.repo_name
+        );
+        let payload = serde_json::json!({
+            "commit_id": commit_id,
+            "body": body,
+            "event": "COMMENT",
+            "comments": comments,
+        });
+        self.request_json(Method::POST, &path, Some(&payload)).await
     }
 
     /// Create a pull request. Callers that need draft publication pass `draft: true`.

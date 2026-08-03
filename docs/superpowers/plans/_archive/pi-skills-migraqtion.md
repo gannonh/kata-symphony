@@ -1,7 +1,7 @@
 ---
 type: Plan
 title: Pi Skills Migraqtion
-description: Archived implementation plan: Pi Skills Migraqtion.
+description: "Archived implementation plan: Pi Skills Migraqtion."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---

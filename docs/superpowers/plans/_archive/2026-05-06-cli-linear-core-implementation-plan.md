@@ -1,7 +1,7 @@
 ---
 type: Plan
 title: Cli Linear Core Implementation Plan
-description: Archived implementation plan: Cli Linear Core Implementation Plan.
+description: "Archived implementation plan: Cli Linear Core Implementation Plan."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---

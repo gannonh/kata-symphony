@@ -13,8 +13,8 @@ use crate::event_stream::EventHub;
 use crate::github::client::GithubClient;
 use crate::github::projects_v2::ProjectsV2Client;
 use crate::http_server::{
-    attach_implementation_http_response, attach_review_http_response, attach_spec_http_response,
-    factory_run_http_response, factory_run_metrics_http_response,
+    attach_implementation_http_response, attach_review_http_response_with_attempts,
+    attach_spec_http_response, factory_run_http_response, factory_run_metrics_http_response,
     implementation_run_metrics_http_response, review_run_metrics_http_response,
     spec_run_metrics_http_response, FactoryArtifactHttpResponse, FactoryRunHttpResponse,
     FactoryRunMetricsHttpResponse, FactoryRunQuery, ImplementationRunMetricsHttpResponse,
@@ -502,6 +502,26 @@ impl SharedFactoryStore {
         self.with_store(|store| store.list_a4_eligible_review_runs(max_attempts))
     }
 
+    pub fn review_artifact_exists_for_head(&self, run_id: &str, head_sha: &str) -> Result<bool> {
+        self.with_store(|store| store.review_artifact_exists_for_head(run_id, head_sha))
+    }
+
+    pub fn count_review_attempt_failures_for_head(
+        &self,
+        run_id: &str,
+        head_sha: &str,
+    ) -> Result<u32> {
+        self.with_store(|store| store.count_review_attempt_failures_for_head(run_id, head_sha))
+    }
+
+    pub fn get_orphaned_review_artifact_for_head(
+        &self,
+        run_id: &str,
+        head_sha: &str,
+    ) -> Result<Option<crate::review::domain::ReviewFindingsArtifactRecord>> {
+        self.with_store(|store| store.get_orphaned_review_artifact_for_head(run_id, head_sha))
+    }
+
     pub fn store_review_attempt_inputs(
         &self,
         request: crate::triage::store::StoreReviewAttemptRequest,
@@ -511,6 +531,14 @@ impl SharedFactoryStore {
 
     pub fn update_review_attempt(&self, request: UpdateReviewAttemptRequest<'_>) -> Result<()> {
         self.with_store_mut(|store| store.update_review_attempt(request))
+    }
+
+    pub fn interrupt_review_attempt(
+        &self,
+        stage_run_id: &str,
+        owner_instance: &str,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| store.interrupt_attempt(stage_run_id, owner_instance))
     }
 
     pub fn store_review_artifact(
@@ -527,6 +555,13 @@ impl SharedFactoryStore {
         self.with_store(|store| store.get_review_artifact(artifact_id))
     }
 
+    pub fn list_review_finding_records_for_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Vec<crate::review::domain::ReviewFindingRecord>> {
+        self.with_store(|store| store.list_review_finding_records_for_artifact(artifact_id))
+    }
+
     pub fn create_review_publication_intent(
         &self,
         run_id: &str,
@@ -539,10 +574,33 @@ impl SharedFactoryStore {
         })
     }
 
+    pub fn claim_review_publication(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        lease_seconds: i64,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| store.claim_review_publication(intent_id, owner, lease_seconds))
+    }
+
     pub fn list_pending_review_publications(
         &self,
     ) -> Result<Vec<crate::review::domain::ReviewPublicationIntent>> {
         self.with_store(|store| store.list_pending_review_publications())
+    }
+
+    pub fn list_blocked_review_publications(
+        &self,
+    ) -> Result<Vec<crate::review::domain::ReviewPublicationIntent>> {
+        self.with_store(|store| store.list_blocked_review_publications())
+    }
+
+    pub fn reset_blocked_review_publication(
+        &self,
+        intent_id: &str,
+        operator: &str,
+    ) -> Result<crate::review::domain::ReviewPublicationIntent> {
+        self.with_store_mut(|store| store.reset_blocked_review_publication(intent_id, operator))
     }
 
     pub fn get_review_publication_intent(
@@ -552,10 +610,114 @@ impl SharedFactoryStore {
         self.with_store(|store| store.get_review_publication_intent(intent_id))
     }
 
+    pub fn list_review_publications_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::review::domain::ReviewPublicationIntent>> {
+        self.with_store(|store| store.list_review_publications_for_run(run_id))
+    }
+
+    #[cfg(test)]
     pub fn complete_review_publication(&self, intent_id: &str, step: &str) -> Result<()> {
         self.with_store_mut(|store| store.complete_review_publication(intent_id, step))
     }
 
+    pub fn complete_review_publication_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        step: &str,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| store.complete_review_publication_owned(intent_id, owner, step))
+    }
+
+    #[cfg(test)]
+    pub fn record_review_publication_step(
+        &self,
+        intent_id: &str,
+        step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.record_review_publication_step(intent_id, step, status, expected_projection)
+        })
+    }
+
+    pub fn record_review_publication_step_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.record_review_publication_step_owned(
+                intent_id,
+                owner,
+                step,
+                status,
+                expected_projection,
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub fn bind_review_publication_review(
+        &self,
+        intent_id: &str,
+        review_id: &str,
+        review_url: &str,
+        publisher_login: &str,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.bind_review_publication_review(intent_id, review_id, review_url, publisher_login)
+        })
+    }
+
+    pub fn bind_review_publication_review_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        review_id: &str,
+        review_url: &str,
+        publisher_login: &str,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.bind_review_publication_review_owned(
+                intent_id,
+                owner,
+                review_id,
+                review_url,
+                publisher_login,
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub fn set_review_publication_route_state(
+        &self,
+        intent_id: &str,
+        route_state: &str,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.set_review_publication_route_state(intent_id, route_state)
+        })
+    }
+
+    pub fn set_review_publication_route_state_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        route_state: &str,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.set_review_publication_route_state_owned(intent_id, owner, route_state)
+        })
+    }
+
+    #[cfg(test)]
     pub fn bind_review_publication_comment(
         &self,
         intent_id: &str,
@@ -567,10 +729,52 @@ impl SharedFactoryStore {
         })
     }
 
+    pub fn bind_review_publication_comment_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        comment_id: &str,
+        publisher_login: &str,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.bind_review_publication_comment_owned(
+                intent_id,
+                owner,
+                comment_id,
+                publisher_login,
+            )
+        })
+    }
+
+    #[cfg(test)]
     pub fn clear_review_publication_comment(&self, intent_id: &str) -> Result<()> {
         self.with_store_mut(|store| store.clear_review_publication_comment(intent_id))
     }
 
+    pub fn clear_review_publication_comment_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| store.clear_review_publication_comment_owned(intent_id, owner))
+    }
+
+    pub fn clear_review_publication_lease(&self, intent_id: &str, owner: &str) -> Result<()> {
+        self.with_store_mut(|store| store.clear_review_publication_lease(intent_id, owner))
+    }
+
+    pub fn renew_review_publication_lease(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        lease_seconds: i64,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.renew_review_publication_lease(intent_id, owner, lease_seconds)
+        })
+    }
+
+    #[cfg(test)]
     pub fn set_review_publication_error(
         &self,
         intent_id: &str,
@@ -578,6 +782,38 @@ impl SharedFactoryStore {
         error: FactoryError,
     ) -> Result<()> {
         self.with_store_mut(|store| store.set_review_publication_error(intent_id, status, error))
+    }
+
+    pub fn set_review_publication_error_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        status: PublicationStatus,
+        error: FactoryError,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.set_review_publication_error_owned(intent_id, owner, status, error)
+        })
+    }
+
+    pub fn supersede_review_publication_owned(
+        &self,
+        intent_id: &str,
+        owner: &str,
+        error: FactoryError,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| {
+            store.supersede_review_publication_owned(intent_id, owner, error)
+        })
+    }
+
+    #[cfg(test)]
+    pub fn supersede_review_publication(
+        &self,
+        intent_id: &str,
+        error: FactoryError,
+    ) -> Result<bool> {
+        self.with_store_mut(|store| store.supersede_review_publication(intent_id, error))
     }
 
     pub fn review_metrics(&self) -> Result<crate::review::domain::ReviewMetricsAggregate> {
@@ -673,10 +909,11 @@ impl SharedFactoryStore {
                 .list_review_publications_for_run(&run.run_id)?
                 .into_iter()
                 .next();
-            attach_review_http_response(
+            attach_review_http_response_with_attempts(
                 &mut response,
                 review_artifact,
                 review_publication.as_ref(),
+                &attempts,
             );
             Ok(Some(response))
         })
@@ -939,28 +1176,67 @@ impl FactoryRunQuery for SharedFactoryStore {
     fn blocked_publications(
         &self,
     ) -> std::result::Result<Vec<crate::http_server::BlockedPublicationHttpResponse>, String> {
-        self.list_blocked_implementation_publications()
+        let mut intents = self
+            .list_blocked_implementation_publications()
             .map(|intents| {
                 intents
                     .into_iter()
-                    .map(
-                        |intent| crate::http_server::BlockedPublicationHttpResponse {
-                            intent_id: intent.intent_id,
-                            run_id: intent.run_id,
-                            kind: intent.kind.as_str().to_string(),
-                            retry_count: intent.retry_count,
-                            last_step: intent.completed_steps.last().cloned(),
-                            error_code: intent.last_error.as_ref().map(|error| error.code.clone()),
-                            error_remediation: intent
-                                .last_error
-                                .as_ref()
-                                .map(|error| error.remediation.clone()),
-                            updated_at: intent.updated_at,
-                        },
-                    )
-                    .collect()
+                    .map(|intent| {
+                        (
+                            intent.created_at,
+                            crate::http_server::BlockedPublicationHttpResponse {
+                                intent_id: intent.intent_id,
+                                run_id: intent.run_id,
+                                kind: intent.kind.as_str().to_string(),
+                                retry_count: intent.retry_count,
+                                last_step: intent.completed_steps.last().cloned(),
+                                error_code: intent
+                                    .last_error
+                                    .as_ref()
+                                    .map(|error| error.code.clone()),
+                                error_remediation: intent
+                                    .last_error
+                                    .as_ref()
+                                    .map(|error| error.remediation.clone()),
+                                updated_at: intent.updated_at,
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>()
             })
-            .map_err(|err| err.to_string())
+            .map_err(|err| err.to_string())?;
+        let review_intents = self
+            .list_blocked_review_publications()
+            .map(|intents| {
+                intents
+                    .into_iter()
+                    .map(|intent| {
+                        (
+                            intent.created_at,
+                            crate::http_server::BlockedPublicationHttpResponse {
+                                intent_id: intent.intent_id,
+                                run_id: intent.run_id,
+                                kind: intent.kind,
+                                retry_count: intent.retry_count,
+                                last_step: intent.completed_steps.last().cloned(),
+                                error_code: intent
+                                    .last_error
+                                    .as_ref()
+                                    .map(|error| error.code.clone()),
+                                error_remediation: intent
+                                    .last_error
+                                    .as_ref()
+                                    .map(|error| error.remediation.clone()),
+                                updated_at: intent.updated_at,
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .map_err(|err| err.to_string())?;
+        intents.extend(review_intents);
+        intents.sort_by_key(|(created_at, _)| *created_at);
+        Ok(intents.into_iter().map(|(_, intent)| intent).collect())
     }
 
     fn reset_blocked_publication(
@@ -968,16 +1244,43 @@ impl FactoryRunQuery for SharedFactoryStore {
         intent_id: &str,
         operator: &str,
     ) -> std::result::Result<crate::http_server::BlockedPublicationResetHttpResponse, String> {
-        self.reset_blocked_implementation_publication(intent_id, operator)
-            .map(
-                |intent| crate::http_server::BlockedPublicationResetHttpResponse {
-                    intent_id: intent.intent_id,
-                    run_id: intent.run_id,
-                    status: intent.status.as_str().to_string(),
-                    completed_steps: intent.completed_steps,
-                },
-            )
-            .map_err(|err| err.to_string())
+        // Intent ids are globally unique, so locating the durable record selects
+        // the publication family without changing the HTTP contract.
+        if self
+            .get_implementation_publication_intent(intent_id)
+            .map_err(|err| err.to_string())?
+            .is_some()
+        {
+            return self
+                .reset_blocked_implementation_publication(intent_id, operator)
+                .map(
+                    |intent| crate::http_server::BlockedPublicationResetHttpResponse {
+                        intent_id: intent.intent_id,
+                        run_id: intent.run_id,
+                        status: intent.status.as_str().to_string(),
+                        completed_steps: intent.completed_steps,
+                    },
+                )
+                .map_err(|err| err.to_string());
+        }
+        if self
+            .get_review_publication_intent(intent_id)
+            .map_err(|err| err.to_string())?
+            .is_some()
+        {
+            return self
+                .reset_blocked_review_publication(intent_id, operator)
+                .map(
+                    |intent| crate::http_server::BlockedPublicationResetHttpResponse {
+                        intent_id: intent.intent_id,
+                        run_id: intent.run_id,
+                        status: intent.status.as_str().to_string(),
+                        completed_steps: intent.completed_steps,
+                    },
+                )
+                .map_err(|err| err.to_string());
+        }
+        Err(format!("publication intent {intent_id} not found"))
     }
 
     fn get_artifact(
@@ -1609,6 +1912,7 @@ impl TriageRuntime {
                             attempts_failed = summary.attempts_failed,
                             waiting = summary.waiting,
                             preview_published = summary.preview_published,
+                            automatic_published = summary.automatic_published,
                             blocked = summary.blocked,
                             "review poll completed"
                         );
@@ -1625,5 +1929,79 @@ impl TriageRuntime {
         }
         self.reconcile_factory_sessions();
         Ok(triage)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http_server::FactoryRunQuery;
+    use rusqlite::params;
+
+    #[test]
+    fn factory_query_lists_and_resets_review_blocked_publications() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("factory.db");
+        let store = SharedFactoryStore::open(&path, 5_000).unwrap();
+        let mut db = store.inner.lock().unwrap();
+        db.connection_for_test()
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let error = serde_json::json!({
+            "code": "review_publication_retry_exhausted",
+            "component": "review_publication",
+            "remediation": "restore forge access",
+            "retryable": false
+        })
+        .to_string();
+        db.connection_for_test()
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, last_error_json,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('review-blocked', 'run-review', 'artifact-review',
+                    'formal', 'blocked', '[\"review_created\"]', 3, ?1,
+                    '{}', '{}', '{}', ?2, ?2)",
+                params![error, now],
+            )
+            .unwrap();
+        db.connection_for_test()
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, last_error_json,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('review-conflict', 'run-review', 'artifact-conflict',
+                    'formal', 'conflict', '[\"review_created\"]', 2, ?1,
+                    '{}', '{}', '{}', ?2, ?2)",
+                params![error, now],
+            )
+            .unwrap();
+        drop(db);
+
+        let blocked = FactoryRunQuery::blocked_publications(&store).unwrap();
+        assert_eq!(blocked.len(), 2);
+        assert!(blocked
+            .iter()
+            .any(|intent| intent.intent_id == "review-blocked"));
+        assert!(blocked
+            .iter()
+            .any(|intent| intent.intent_id == "review-conflict"));
+
+        let reset =
+            FactoryRunQuery::reset_blocked_publication(&store, "review-blocked", "ada").unwrap();
+        assert_eq!(reset.status, "pending");
+        assert_eq!(reset.completed_steps, vec!["review_created"]);
+
+        let conflict_reset =
+            FactoryRunQuery::reset_blocked_publication(&store, "review-conflict", "ada").unwrap();
+        assert_eq!(conflict_reset.status, "pending");
+        assert!(FactoryRunQuery::blocked_publications(&store)
+            .unwrap()
+            .is_empty());
     }
 }

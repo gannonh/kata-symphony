@@ -1,7 +1,7 @@
 ---
 type: Plan
 title: Wave 3 Symphony Console Escalations
-description: Archived implementation plan: Wave 3 Symphony Console Escalations.
+description: "Archived implementation plan: Wave 3 Symphony Console Escalations."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---

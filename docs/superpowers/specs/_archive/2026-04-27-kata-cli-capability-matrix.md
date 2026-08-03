@@ -1,7 +1,7 @@
 ---
 type: Reference
 title: Kata Cli Capability Matrix
-description: Archived reference document: Kata Cli Capability Matrix.
+description: "Archived reference document: Kata Cli Capability Matrix."
 tags: [archive, cli]
 timestamp: 2026-07-15T20:00:00Z
 ---

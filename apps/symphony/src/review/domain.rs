@@ -3,6 +3,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::review::manifest::ReviewSeverity;
 use crate::triage::domain::{FactoryError, StageUsage};
 
 pub const REVIEW_STAGE_NAME: &str = "review";
@@ -47,11 +48,15 @@ pub struct ReviewConfig {
     pub max_attempts: u32,
     pub max_reprompts: u32,
     pub max_findings: usize,
+    #[serde(default)]
+    pub blocking_severity: ReviewSeverity,
     pub trigger_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_route: Option<ReviewRoute>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub changes_requested_route: Option<ReviewRoute>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_probe_pull_request: Option<u64>,
 }
 
 impl Default for ReviewConfig {
@@ -66,9 +71,11 @@ impl Default for ReviewConfig {
             max_attempts: 3,
             max_reprompts: REVIEW_MAX_REPROMPTS_DEFAULT,
             max_findings: REVIEW_MAX_FINDINGS_DEFAULT,
+            blocking_severity: ReviewSeverity::Blocking,
             trigger_state: "Agent Review".to_string(),
             completion_route: None,
             changes_requested_route: None,
+            permission_probe_pull_request: None,
         }
     }
 }
@@ -132,6 +139,12 @@ pub struct ReviewPublicationIntent {
     pub comment_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publisher_login: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_state: Option<String>,
     pub desired_effects: serde_json::Value,
     pub observed_baseline: serde_json::Value,
     pub expected_projection: serde_json::Value,
@@ -169,6 +182,7 @@ pub struct ReviewMetricsAggregate {
     pub failed_attempts: u64,
     pub blocked_publications: u64,
     pub preview_publications: u64,
+    pub automatic_publications: u64,
     pub findings: u64,
     pub no_findings: u64,
     pub base: crate::triage::domain::TriageMetricsAggregate,

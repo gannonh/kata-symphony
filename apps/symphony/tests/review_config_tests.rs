@@ -3,6 +3,7 @@
 use symphony::config::{from_workflow, validate};
 use symphony::domain::AgentBackend;
 use symphony::error::SymphonyError;
+use symphony::review::manifest::ReviewSeverity;
 
 const REVIEW_WORKFLOW: &str = r#"
 tracker:
@@ -58,8 +59,10 @@ fn review_defaults_validate_and_explicit_routes_parse() {
         serde_yaml::Value::String("Human Review".to_string());
     raw["review"]["changes_requested_route"]["state"] =
         serde_yaml::Value::String("Rework".to_string());
+    raw["review"]["permission_probe_pull_request"] = serde_yaml::Value::Number(17.into());
 
     let config = from_workflow(&raw).expect("explicit review settings should parse");
+    assert_eq!(config.review.permission_probe_pull_request, Some(17));
     assert!(config.review.enabled);
     assert_eq!(config.review.max_attempts, 4);
     assert_eq!(
@@ -71,6 +74,54 @@ fn review_defaults_validate_and_explicit_routes_parse() {
         Some("Human Review")
     );
     validate(&config).expect("complete automatic review configuration should validate");
+}
+
+#[test]
+fn review_blocking_severity_parses_all_supported_values() {
+    for (value, expected) in [
+        ("blocking", ReviewSeverity::Blocking),
+        ("major", ReviewSeverity::Major),
+        ("minor", ReviewSeverity::Minor),
+        ("nit", ReviewSeverity::Nit),
+    ] {
+        let mut raw = raw_review_workflow();
+        raw["review"]["blocking_severity"] = serde_yaml::Value::String(value.to_string());
+        let config = from_workflow(&raw).expect("blocking severity should parse");
+        assert_eq!(config.review.blocking_severity, expected);
+    }
+
+    let config = review_config();
+    assert_eq!(config.review.blocking_severity, ReviewSeverity::Blocking);
+}
+
+#[test]
+fn review_blocking_severity_rejects_invalid_values() {
+    let mut raw = raw_review_workflow();
+    raw["review"]["blocking_severity"] = serde_yaml::Value::String("critical".to_string());
+    let error = from_workflow(&raw).expect_err("invalid blocking severity should fail");
+    match error {
+        SymphonyError::InvalidWorkflowConfig(message) => {
+            assert!(message.contains(
+                "review.blocking_severity must be 'blocking', 'major', 'minor', or 'nit'"
+            ));
+            assert!(message.contains("got 'critical'"));
+        }
+        other => panic!("expected workflow config error, got {other}"),
+    }
+}
+
+#[test]
+fn review_config_deserialization_defaults_blocking_severity() {
+    let config = review_config();
+    let mut serialized =
+        serde_json::to_value(&config.review).expect("review config should serialize");
+    serialized
+        .as_object_mut()
+        .expect("serialized config should be an object")
+        .remove("blocking_severity");
+    let restored: symphony::review::domain::ReviewConfig =
+        serde_json::from_value(serialized).expect("old review config should deserialize");
+    assert_eq!(restored.blocking_severity, ReviewSeverity::Blocking);
 }
 
 #[test]
@@ -102,6 +153,15 @@ fn review_prompt_and_trigger_state_must_be_non_empty() {
     let mut trigger = review_config();
     trigger.review.trigger_state = "  ".to_string();
     assert!(review_error(trigger).contains("review.trigger_state must be non-empty"));
+}
+
+#[test]
+fn review_permission_probe_pull_request_rejects_zero() {
+    let mut raw = raw_review_workflow();
+    raw["review"]["permission_probe_pull_request"] = serde_yaml::Value::Number(0.into());
+    let config = from_workflow(&raw).expect("zero probe PR should parse before validation");
+    let message = review_error(config);
+    assert!(message.contains("review.permission_probe_pull_request must be greater than 0"));
 }
 
 #[test]

@@ -5,6 +5,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::domain::GithubProjectOwnerType;
 use crate::error::{Result, SymphonyError};
 use crate::github::client::GithubClient;
 
@@ -148,6 +149,26 @@ impl ProjectsV2Client {
         owner: &str,
         project_number: u64,
     ) -> Result<StatusFieldInfo> {
+        self.resolve_status_field_with_owner_type(owner, project_number, None)
+            .await
+    }
+
+    pub async fn resolve_status_field_for_owner_type(
+        &self,
+        owner: &str,
+        project_number: u64,
+        owner_type: GithubProjectOwnerType,
+    ) -> Result<StatusFieldInfo> {
+        self.resolve_status_field_with_owner_type(owner, project_number, Some(owner_type))
+            .await
+    }
+
+    async fn resolve_status_field_with_owner_type(
+        &self,
+        owner: &str,
+        project_number: u64,
+        owner_type: Option<GithubProjectOwnerType>,
+    ) -> Result<StatusFieldInfo> {
         let variables = json!({
             "owner": owner,
             "projectNumber": project_number as i64,
@@ -157,15 +178,19 @@ impl ProjectsV2Client {
             .graphql_request(QUERY_PROJECT_FIELDS, variables)
             .await?;
 
-        let project = data
-            .user
-            .and_then(|user| user.project_v2)
-            .or_else(|| data.organization.and_then(|org| org.project_v2))
-            .ok_or_else(|| {
-                SymphonyError::GithubProjectsV2Error(format!(
-                    "Project #{project_number} not found for owner '{owner}'"
-                ))
-            })?;
+        let project = match owner_type {
+            Some(GithubProjectOwnerType::User) => data.user.and_then(|user| user.project_v2),
+            Some(GithubProjectOwnerType::Org) => data.organization.and_then(|org| org.project_v2),
+            None => data
+                .user
+                .and_then(|user| user.project_v2)
+                .or_else(|| data.organization.and_then(|org| org.project_v2)),
+        }
+        .ok_or_else(|| {
+            SymphonyError::GithubProjectsV2Error(format!(
+                "Project #{project_number} not found for owner '{owner}'"
+            ))
+        })?;
 
         let Some(field) = project.field else {
             tracing::warn!(project_number, owner, "Projects v2 status field not found");

@@ -1,7 +1,7 @@
 ---
 type: Plan
 title: Github Projects V2 State Source Of Truth Implementation Plan
-description: Archived implementation plan: Github Projects V2 State Source Of Truth Implementation Plan.
+description: "Archived implementation plan: Github Projects V2 State Source Of Truth Implementation Plan."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---

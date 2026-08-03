@@ -8,9 +8,10 @@ use serde::{Deserialize, Serialize};
 pub const REVIEW_SCHEMA_VERSION: u32 = 1;
 pub const REVIEW_MANIFEST_MAX_BYTES: usize = 256 * 1024;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewSeverity {
+    #[default]
     Blocking,
     Major,
     Minor,

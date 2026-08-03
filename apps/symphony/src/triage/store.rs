@@ -8,9 +8,10 @@ use crate::implementation::domain::{
     ValidationCycleRecord, IMPLEMENTATION_STAGE_NAME,
 };
 use crate::review::domain::{
-    ReviewAttemptRecord, ReviewFindingsArtifactRecord, ReviewMetricsAggregate,
+    ReviewAttemptRecord, ReviewFindingRecord, ReviewFindingsArtifactRecord, ReviewMetricsAggregate,
     ReviewPublicationIntent, REVIEW_STAGE_NAME,
 };
+use crate::review::findings::finding_identity_key;
 use crate::review::manifest::ReviewFindingsManifest;
 use crate::spec::artifact::validate_spec;
 use crate::spec::domain::{
@@ -30,19 +31,22 @@ use crate::triage::storage_path::lock_path_for_storage;
 use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension};
+use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
 /// Embedded migrations, applied in order while the exclusive store lock is held.
-const MIGRATIONS: [&str; 6] = [
+const MIGRATIONS: [&str; 8] = [
     include_str!("migrations/001_init.sql"),
     include_str!("migrations/002_route_observations.sql"),
     include_str!("migrations/003_spec_stage.sql"),
     include_str!("migrations/004_implementation_stage.sql"),
     include_str!("migrations/005_implementation_draft_pr.sql"),
     include_str!("migrations/006_review_stage.sql"),
+    include_str!("migrations/007_review_publication.sql"),
+    include_str!("migrations/008_review_publication_lease.sql"),
 ];
 
 #[derive(Debug, Clone)]
@@ -474,6 +478,11 @@ pub struct SqliteFactoryStore {
 }
 
 impl SqliteFactoryStore {
+    #[cfg(test)]
+    pub(crate) fn connection_for_test(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
     pub fn acquire_lock_and_migrate(
         path: &Path,
         busy_timeout_ms: u64,
@@ -500,7 +509,7 @@ impl SqliteFactoryStore {
         conn.busy_timeout(StdDuration::from_millis(busy_timeout_ms))
             .map_err(storage_error)?;
         for migration in MIGRATIONS {
-            conn.execute_batch(migration).map_err(storage_error)?;
+            apply_migration(&conn, migration).map_err(storage_error)?;
         }
 
         Ok(Self {
@@ -3594,7 +3603,7 @@ impl SqliteFactoryStore {
     /// publication facts and applies the single-owner/head-cycle guards.
     pub fn list_a4_eligible_review_runs(
         &self,
-        max_attempts: u32,
+        _max_attempts: u32,
     ) -> Result<Vec<A4EligibleReviewRun>> {
         let mut stmt = self
             .conn
@@ -3612,26 +3621,17 @@ impl SqliteFactoryStore {
                  JOIN spec_run_state s ON s.run_id = r.run_id
                     AND s.approved_artifact_id IS NOT NULL
                  WHERE s.decision = 'approved'
-                   AND NOT EXISTS (
-                     SELECT 1 FROM review_findings_artifacts a
-                     WHERE a.run_id = r.run_id AND a.reviewed_head_sha = d.head_sha
-                   )
+                   AND d.draft = 1
                    AND NOT EXISTS (
                      SELECT 1 FROM stage_runs sr
                      WHERE sr.run_id = r.run_id AND sr.stage = ?1
                        AND sr.status IN ('pending', 'running')
                    )
-                   AND (
-                     SELECT COUNT(*) FROM review_attempts ra
-                     WHERE ra.run_id = r.run_id
-                       AND ra.reviewed_head_sha = d.head_sha
-                       AND ra.status IN ('failed', 'blocked', 'interrupted')
-                   ) < ?2
                  ORDER BY r.updated_at ASC, d.created_at ASC",
             )
             .map_err(storage_error)?;
         let rows = stmt
-            .query_map(params![REVIEW_STAGE_NAME, max_attempts.max(1)], |row| {
+            .query_map(params![REVIEW_STAGE_NAME], |row| {
                 let draft: i64 = row.get(10)?;
                 Ok(A4EligibleReviewRun {
                     run_id: row.get(0)?,
@@ -3652,6 +3652,25 @@ impl SqliteFactoryStore {
             })
             .map_err(storage_error)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    /// Count review attempts that consume the retry budget for one live PR
+    /// head. Interrupted attempts count as failed work so repeated crashes
+    /// cannot reclaim the same head indefinitely.
+    pub fn count_review_attempt_failures_for_head(
+        &self,
+        run_id: &str,
+        reviewed_head_sha: &str,
+    ) -> Result<u32> {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM review_attempts
+                 WHERE run_id = ?1 AND reviewed_head_sha = ?2
+                   AND status IN ('failed', 'blocked', 'interrupted')",
+                params![run_id, reviewed_head_sha],
+                |row| row.get(0),
+            )
             .map_err(storage_error)
     }
 
@@ -3783,6 +3802,25 @@ impl SqliteFactoryStore {
                 request.stage_run_id
             )));
         }
+        let prior_identity_keys = {
+            let mut stmt = tx
+                .prepare(
+                    "SELECT identity_key FROM review_finding_records
+                     WHERE run_id = ?1 AND lifecycle_state != 'resolved'",
+                )
+                .map_err(storage_error)?;
+            let rows = stmt
+                .query_map(params![stage.run_id], |row| row.get::<_, String>(0))
+                .map_err(storage_error)?;
+            rows.collect::<std::result::Result<HashSet<_>, _>>()
+                .map_err(storage_error)?
+        };
+        let current_identity_keys = request
+            .manifest
+            .findings
+            .iter()
+            .map(finding_identity_key)
+            .collect::<HashSet<_>>();
         let artifact_id = new_id();
         tx.execute(
             "INSERT INTO review_findings_artifacts (
@@ -3828,13 +3866,12 @@ impl SqliteFactoryStore {
                     "maintainability"
                 }
             };
-            let identity_key = format!(
-                "{}:{}:{}:{}",
-                finding.path,
-                finding.line,
-                finding.end_line.unwrap_or(finding.line),
-                finding.claim.trim()
-            );
+            let identity_key = finding_identity_key(finding);
+            let lifecycle_state = if prior_identity_keys.contains(&identity_key) {
+                "persisting"
+            } else {
+                "new"
+            };
             tx.execute(
                 "INSERT INTO review_finding_records (
                     finding_record_id, run_id, artifact_id, finding_id, identity_key,
@@ -3842,7 +3879,7 @@ impl SqliteFactoryStore {
                     claim, rationale, remediation, acceptance_criterion, confidence,
                     lifecycle_state, created_at, updated_at
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16, 'new', ?17, ?17)",
+                    ?13, ?14, ?15, ?16, ?17, ?18, ?18)",
                 params![
                     new_id(),
                     stage.run_id,
@@ -3860,10 +3897,37 @@ impl SqliteFactoryStore {
                     finding.remediation,
                     finding.acceptance_criterion,
                     finding.confidence,
+                    lifecycle_state,
                     now_s,
                 ],
             )
             .map_err(storage_error)?;
+        }
+        let mut prior_stmt = tx
+            .prepare(
+                "SELECT finding_record_id, identity_key FROM review_finding_records
+                 WHERE run_id = ?1 AND artifact_id != ?2
+                   AND lifecycle_state != 'resolved'",
+            )
+            .map_err(storage_error)?;
+        let prior_rows = prior_stmt
+            .query_map(params![stage.run_id, artifact_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(storage_error)?;
+        let prior_records = prior_rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)?;
+        drop(prior_stmt);
+        for (finding_record_id, identity_key) in prior_records {
+            if !current_identity_keys.contains(&identity_key) {
+                tx.execute(
+                    "UPDATE review_finding_records SET lifecycle_state = 'resolved',
+                        updated_at = ?1 WHERE finding_record_id = ?2",
+                    params![now_s, finding_record_id],
+                )
+                .map_err(storage_error)?;
+            }
         }
         let validation_result = bounded_json(&serde_json::json!({
             "accepted": true,
@@ -3921,6 +3985,46 @@ impl SqliteFactoryStore {
         Ok(record)
     }
 
+    pub fn review_artifact_exists_for_head(&self, run_id: &str, head_sha: &str) -> Result<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM review_findings_artifacts
+                    WHERE run_id = ?1 AND reviewed_head_sha = ?2
+                )",
+                params![run_id, head_sha],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)
+    }
+
+    /// Find a completed artifact whose publication intent was never persisted.
+    pub fn get_orphaned_review_artifact_for_head(
+        &self,
+        run_id: &str,
+        head_sha: &str,
+    ) -> Result<Option<ReviewFindingsArtifactRecord>> {
+        self.conn
+            .query_row(
+                "SELECT a.artifact_id, a.run_id, a.stage_run_id, a.attempt_id,
+                    a.draft_pr_artifact_id, a.implementation_artifact_id, a.spec_artifact_id,
+                    a.schema_version, a.reviewed_head_sha, a.base_sha, a.manifest_json,
+                    a.no_findings, a.finding_count, a.received_at, a.bytes_len
+                 FROM review_findings_artifacts a
+                 WHERE a.run_id = ?1 AND a.reviewed_head_sha = ?2
+                   AND NOT EXISTS (
+                       SELECT 1 FROM review_publication_intents i
+                       WHERE i.artifact_id = a.artifact_id
+                   )
+                 ORDER BY a.received_at DESC
+                 LIMIT 1",
+                params![run_id, head_sha],
+                review_artifact_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
     pub fn get_review_artifact(
         &self,
         artifact_id: &str,
@@ -3936,6 +4040,28 @@ impl SqliteFactoryStore {
                 review_artifact_from_row,
             )
             .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_review_finding_records_for_artifact(
+        &self,
+        artifact_id: &str,
+    ) -> Result<Vec<ReviewFindingRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT finding_record_id, run_id, artifact_id, finding_id, identity_key,
+                    reviewed_head_sha, severity, category, path, line, end_line,
+                    claim, rationale, remediation, acceptance_criterion, confidence,
+                    lifecycle_state, created_at, updated_at
+                 FROM review_finding_records
+                 WHERE artifact_id = ?1 ORDER BY created_at, finding_record_id",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![artifact_id], review_finding_record_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(storage_error)
     }
 
@@ -3965,6 +4091,19 @@ impl SqliteFactoryStore {
         kind: &str,
         desired_effects: &serde_json::Value,
     ) -> Result<ReviewPublicationIntent> {
+        if let Some(existing) = self
+            .list_review_publications_for_run(run_id)?
+            .into_iter()
+            .find(|intent| {
+                intent.artifact_id == artifact_id
+                    && !matches!(
+                        intent.status,
+                        PublicationStatus::Blocked | PublicationStatus::Conflict
+                    )
+            })
+        {
+            return Ok(existing);
+        }
         let intent_id = new_id();
         let now_s = ts(Self::now());
         self.conn
@@ -3993,6 +4132,68 @@ impl SqliteFactoryStore {
             })
     }
 
+    /// Claim a pending formal publication before any forge side effect.
+    ///
+    /// The conditional update is the cross-process compare-and-set. An
+    /// expired lease is reclaimable after a coordinator crash; an active lease
+    /// belongs exclusively to its current publisher.
+    pub fn claim_review_publication(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        lease_seconds: i64,
+    ) -> Result<bool> {
+        let now = Self::now();
+        let now_s = ts(now);
+        let expires_s = ts(now + Duration::seconds(lease_seconds.max(1)));
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET lease_owner = ?1, lease_expires_at = ?2, updated_at = ?3
+                 WHERE intent_id = ?4 AND status = 'pending'
+                   AND (lease_owner = ?1 OR lease_owner IS NULL OR lease_expires_at IS NULL
+                        OR lease_expires_at <= ?3)",
+                params![owner, expires_s, now_s, intent_id],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    pub fn clear_review_publication_lease(&mut self, intent_id: &str, owner: &str) -> Result<()> {
+        self.conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET lease_owner = NULL, lease_expires_at = NULL, updated_at = ?1
+                 WHERE intent_id = ?2 AND lease_owner = ?3",
+                params![ts(Self::now()), intent_id, owner],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn renew_review_publication_lease(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        lease_seconds: i64,
+    ) -> Result<bool> {
+        let now = Self::now();
+        let now_s = ts(now);
+        let expires_s = ts(now + Duration::seconds(lease_seconds.max(1)));
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET lease_expires_at = ?1, updated_at = ?2
+                 WHERE intent_id = ?3 AND status = 'pending'
+                   AND lease_owner = ?4 AND lease_expires_at > ?2",
+                params![expires_s, now_s, intent_id, owner],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
     pub fn get_review_publication_intent(
         &self,
         intent_id: &str,
@@ -4001,7 +4202,8 @@ impl SqliteFactoryStore {
             .query_row(
                 "SELECT intent_id, run_id, artifact_id, kind, status,
                     completed_steps_json, retry_count, last_error_json, comment_id,
-                    publisher_login, desired_effects_json, observed_baseline_json,
+                    publisher_login, review_id, review_url, route_state,
+                    desired_effects_json, observed_baseline_json,
                     expected_projection_json, created_at, updated_at
                  FROM review_publication_intents WHERE intent_id = ?1",
                 params![intent_id],
@@ -4017,7 +4219,8 @@ impl SqliteFactoryStore {
             .prepare(
                 "SELECT intent_id, run_id, artifact_id, kind, status,
                     completed_steps_json, retry_count, last_error_json, comment_id,
-                    publisher_login, desired_effects_json, observed_baseline_json,
+                    publisher_login, review_id, review_url, route_state,
+                    desired_effects_json, observed_baseline_json,
                     expected_projection_json, created_at, updated_at
                  FROM review_publication_intents WHERE status = 'pending'
                  ORDER BY created_at ASC",
@@ -4030,6 +4233,100 @@ impl SqliteFactoryStore {
             .map_err(storage_error)
     }
 
+    /// List review publication intents terminalized as `blocked` or `conflict`, oldest first.
+    pub fn list_blocked_review_publications(&self) -> Result<Vec<ReviewPublicationIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, last_error_json, comment_id,
+                    publisher_login, review_id, review_url, route_state,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 FROM review_publication_intents
+                 WHERE status IN ('blocked', 'conflict')
+                 ORDER BY created_at ASC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], review_publication_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    /// Return a blocked or conflict review publication intent to pending for
+    /// explicit operator recovery. This is the human-controlled recovery
+    /// command; completed steps and forge identities are preserved.
+    pub fn reset_blocked_review_publication(
+        &mut self,
+        intent_id: &str,
+        operator: &str,
+    ) -> Result<ReviewPublicationIntent> {
+        let Some(intent) = self.get_review_publication_intent(intent_id)? else {
+            return Err(SymphonyError::StorageError(format!(
+                "review publication intent {intent_id} not found"
+            )));
+        };
+        if !matches!(
+            intent.status,
+            PublicationStatus::Blocked | PublicationStatus::Conflict
+        ) {
+            return Err(SymphonyError::TriageError(format!(
+                "review publication intent {intent_id} is {}, not blocked; \
+                 only a blocked or conflict intent can be reset",
+                intent.status.as_str()
+            )));
+        }
+
+        let payload = bounded_json(&serde_json::json!({
+            "intent_id": intent.intent_id,
+            "operator": operator,
+            "cleared_error": intent.last_error,
+            "completed_steps": intent.completed_steps,
+        }))?;
+        let now = Self::now();
+        let tx = self.conn.transaction().map_err(storage_error)?;
+        let changed = tx
+            .execute(
+                "UPDATE review_publication_intents
+                 SET status = ?1, last_error_json = NULL, retry_count = 0,
+                     lease_owner = NULL, lease_expires_at = NULL, updated_at = ?2
+                 WHERE intent_id = ?3 AND status IN ('blocked', 'conflict')",
+                params![PublicationStatus::Pending.as_str(), ts(now), intent_id],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::TriageError(format!(
+                "review publication intent {intent_id} changed status concurrently; \
+                 re-run list-blocked and retry"
+            )));
+        }
+        tx.execute(
+            "INSERT INTO factory_events (
+                event_id, run_id, stage_run_id, event_type, timestamp, payload_json
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                new_id(),
+                Some(intent.run_id.as_str()),
+                None::<String>,
+                "review_publication_reset",
+                ts(now),
+                payload,
+            ],
+        )
+        .map_err(storage_error)?;
+        tx.commit().map_err(storage_error)?;
+
+        Ok(ReviewPublicationIntent {
+            status: PublicationStatus::Pending,
+            retry_count: 0,
+            last_error: None,
+            updated_at: now,
+            ..intent
+        })
+    }
+
     pub fn list_review_publications_for_run(
         &self,
         run_id: &str,
@@ -4039,7 +4336,8 @@ impl SqliteFactoryStore {
             .prepare(
                 "SELECT intent_id, run_id, artifact_id, kind, status,
                     completed_steps_json, retry_count, last_error_json, comment_id,
-                    publisher_login, desired_effects_json, observed_baseline_json,
+                    publisher_login, review_id, review_url, route_state,
+                    desired_effects_json, observed_baseline_json,
                     expected_projection_json, created_at, updated_at
                  FROM review_publication_intents WHERE run_id = ?1
                  ORDER BY created_at DESC",
@@ -4052,6 +4350,7 @@ impl SqliteFactoryStore {
             .map_err(storage_error)
     }
 
+    #[cfg(test)]
     pub fn bind_review_publication_comment(
         &mut self,
         intent_id: &str,
@@ -4061,46 +4360,351 @@ impl SqliteFactoryStore {
         self.conn
             .execute(
                 "UPDATE review_publication_intents SET comment_id = ?1,
-                    publisher_login = ?2, updated_at = ?3 WHERE intent_id = ?4",
+                    publisher_login = ?2, updated_at = ?3
+                 WHERE intent_id = ?4 AND status = 'pending' AND lease_owner IS NULL",
                 params![comment_id, publisher_login, ts(Self::now()), intent_id],
             )
             .map_err(storage_error)?;
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn clear_review_publication_comment(&mut self, intent_id: &str) -> Result<()> {
         self.conn
             .execute(
                 "UPDATE review_publication_intents
                  SET comment_id = NULL, publisher_login = NULL, updated_at = ?1
-                 WHERE intent_id = ?2",
+                 WHERE intent_id = ?2 AND status = 'pending' AND lease_owner IS NULL",
                 params![ts(Self::now()), intent_id],
             )
             .map_err(storage_error)?;
         Ok(())
     }
 
-    pub fn complete_review_publication(&mut self, intent_id: &str, step: &str) -> Result<()> {
-        let intent = self
-            .get_review_publication_intent(intent_id)?
-            .ok_or_else(|| {
-                SymphonyError::StorageError(format!("review intent {intent_id} not found"))
-            })?;
-        let mut steps = intent.completed_steps;
-        if !steps.iter().any(|existing| existing == step) {
-            steps.push(step.to_string());
+    pub fn bind_review_publication_comment_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        comment_id: &str,
+        publisher_login: &str,
+    ) -> Result<bool> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET comment_id = ?1,
+                    publisher_login = ?2, updated_at = ?3
+                 WHERE intent_id = ?4 AND status = 'pending' AND lease_owner = ?5
+                   AND lease_expires_at > ?3",
+                params![comment_id, publisher_login, now_s, intent_id, owner],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    pub fn clear_review_publication_comment_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+    ) -> Result<bool> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET comment_id = NULL, publisher_login = NULL, updated_at = ?1
+                 WHERE intent_id = ?2 AND status = 'pending' AND lease_owner = ?3
+                   AND lease_expires_at > ?1",
+                params![now_s, intent_id, owner],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    /// Test-only compatibility helper for constructing durable publication rows.
+    #[cfg(test)]
+    pub fn bind_review_publication_review(
+        &mut self,
+        intent_id: &str,
+        review_id: &str,
+        review_url: &str,
+        publisher_login: &str,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET review_id = ?1, review_url = ?2, publisher_login = ?3,
+                     updated_at = ?4
+                 WHERE intent_id = ?5 AND status = 'pending' AND lease_owner IS NULL",
+                params![
+                    review_id,
+                    review_url,
+                    publisher_login,
+                    ts(Self::now()),
+                    intent_id
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "review intent {intent_id} not found"
+            )));
         }
+        Ok(())
+    }
+
+    pub fn bind_review_publication_review_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        review_id: &str,
+        review_url: &str,
+        publisher_login: &str,
+    ) -> Result<bool> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET review_id = ?1, review_url = ?2, publisher_login = ?3,
+                     updated_at = ?4
+                 WHERE intent_id = ?5 AND status = 'pending' AND lease_owner = ?6
+                   AND lease_expires_at > ?7",
+                params![
+                    review_id,
+                    review_url,
+                    publisher_login,
+                    ts(Self::now()),
+                    intent_id,
+                    owner,
+                    ts(Self::now()),
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    #[cfg(test)]
+    pub fn set_review_publication_route_state(
+        &mut self,
+        intent_id: &str,
+        route_state: &str,
+    ) -> Result<()> {
         self.conn
             .execute(
-                "UPDATE review_publication_intents SET status = 'applied',
-                    completed_steps_json = ?1, last_error_json = NULL, updated_at = ?2
-                 WHERE intent_id = ?3",
-                params![bounded_json(&steps)?, ts(Self::now()), intent_id],
+                "UPDATE review_publication_intents
+                 SET route_state = ?1, updated_at = ?2
+                 WHERE intent_id = ?3 AND status = 'pending' AND lease_owner IS NULL",
+                params![route_state, ts(Self::now()), intent_id],
             )
             .map_err(storage_error)?;
         Ok(())
     }
 
+    pub fn set_review_publication_route_state_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        route_state: &str,
+    ) -> Result<bool> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents
+                 SET route_state = ?1, updated_at = ?2
+                 WHERE intent_id = ?3 AND status = 'pending' AND lease_owner = ?4
+                   AND lease_expires_at > ?5",
+                params![
+                    route_state,
+                    ts(Self::now()),
+                    intent_id,
+                    owner,
+                    ts(Self::now()),
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    /// Test-only compatibility helper for constructing durable publication rows.
+    #[cfg(test)]
+    pub fn record_review_publication_step(
+        &mut self,
+        intent_id: &str,
+        step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<()> {
+        self.record_review_publication_step_inner(
+            intent_id,
+            step,
+            status,
+            expected_projection,
+            None,
+        )
+        .map(|_| ())
+    }
+
+    pub fn record_review_publication_step_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+    ) -> Result<bool> {
+        self.record_review_publication_step_inner(
+            intent_id,
+            step,
+            status,
+            expected_projection,
+            Some(owner),
+        )
+    }
+
+    fn record_review_publication_step_inner(
+        &mut self,
+        intent_id: &str,
+        step: &str,
+        status: PublicationStatus,
+        expected_projection: &serde_json::Value,
+        owner: Option<&str>,
+    ) -> Result<bool> {
+        let intent = self
+            .get_review_publication_intent(intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!("review intent {intent_id} not found"))
+            })?;
+        if intent.status != PublicationStatus::Pending {
+            return Ok(false);
+        }
+        let mut steps = intent.completed_steps;
+        let trimmed = step.trim();
+        if !trimmed.is_empty() && !steps.iter().any(|existing| existing == trimmed) {
+            steps.push(trimmed.to_string());
+        }
+        let next_status = if trimmed == "comment_final" {
+            PublicationStatus::Applied
+        } else if status == PublicationStatus::Applied {
+            PublicationStatus::Pending
+        } else {
+            status
+        };
+        let steps_json = bounded_json(&steps)?;
+        let projection_json = bounded_json(expected_projection)?;
+        let now_s = ts(Self::now());
+        let changed = if let Some(owner) = owner {
+            self.conn
+                .execute(
+                    "UPDATE review_publication_intents
+                     SET completed_steps_json = ?1, status = ?2, last_error_json = NULL,
+                         expected_projection_json = ?3,
+                         lease_owner = CASE WHEN ?6 = 'applied' THEN NULL ELSE lease_owner END,
+                         lease_expires_at = CASE WHEN ?6 = 'applied' THEN NULL ELSE lease_expires_at END,
+                         updated_at = ?4
+                     WHERE intent_id = ?5 AND status = 'pending' AND lease_owner = ?7
+                       AND lease_expires_at > ?8",
+                    params![
+                        steps_json,
+                        next_status.as_str(),
+                        projection_json,
+                        now_s,
+                        intent_id,
+                        next_status.as_str(),
+                        owner,
+                        now_s,
+                    ],
+                )
+                .map_err(storage_error)?
+        } else {
+            self.conn
+                .execute(
+                    "UPDATE review_publication_intents
+                     SET completed_steps_json = ?1, status = ?2, last_error_json = NULL,
+                         expected_projection_json = ?3,
+                         lease_owner = CASE WHEN ?6 = 'applied' THEN NULL ELSE lease_owner END,
+                         lease_expires_at = CASE WHEN ?6 = 'applied' THEN NULL ELSE lease_expires_at END,
+                         updated_at = ?4
+                     WHERE intent_id = ?5 AND status = 'pending' AND lease_owner IS NULL",
+                    params![
+                        steps_json,
+                        next_status.as_str(),
+                        projection_json,
+                        now_s,
+                        intent_id,
+                        next_status.as_str(),
+                    ],
+                )
+                .map_err(storage_error)?
+        };
+        Ok(changed == 1)
+    }
+
+    #[cfg(test)]
+    pub fn complete_review_publication(&mut self, intent_id: &str, step: &str) -> Result<()> {
+        self.complete_review_publication_inner(intent_id, step, None)
+            .map(|_| ())
+    }
+
+    pub fn complete_review_publication_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        step: &str,
+    ) -> Result<bool> {
+        self.complete_review_publication_inner(intent_id, step, Some(owner))
+    }
+
+    fn complete_review_publication_inner(
+        &mut self,
+        intent_id: &str,
+        step: &str,
+        owner: Option<&str>,
+    ) -> Result<bool> {
+        let intent = self
+            .get_review_publication_intent(intent_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError(format!("review intent {intent_id} not found"))
+            })?;
+        if intent.kind != "preview" {
+            return Err(SymphonyError::TriageError(format!(
+                "review publication helper only supports preview intents, got kind={}",
+                intent.kind
+            )));
+        }
+        if intent.status != PublicationStatus::Pending {
+            return Ok(false);
+        }
+        let mut steps = intent.completed_steps;
+        if !steps.iter().any(|existing| existing == step) {
+            steps.push(step.to_string());
+        }
+        let now_s = ts(Self::now());
+        let changed = if let Some(owner) = owner {
+            self.conn
+                .execute(
+                    "UPDATE review_publication_intents SET status = 'applied',
+                        completed_steps_json = ?1, last_error_json = NULL,
+                        lease_owner = NULL, lease_expires_at = NULL, updated_at = ?2
+                     WHERE intent_id = ?3 AND status = 'pending' AND lease_owner = ?4
+                       AND lease_expires_at > ?5",
+                    params![bounded_json(&steps)?, now_s, intent_id, owner, now_s],
+                )
+                .map_err(storage_error)?
+        } else {
+            self.conn
+                .execute(
+                    "UPDATE review_publication_intents SET status = 'applied',
+                        completed_steps_json = ?1, last_error_json = NULL, updated_at = ?2
+                     WHERE intent_id = ?3 AND status = 'pending' AND lease_owner IS NULL",
+                    params![bounded_json(&steps)?, now_s, intent_id],
+                )
+                .map_err(storage_error)?
+        };
+        Ok(changed == 1)
+    }
+
+    #[cfg(test)]
     pub fn set_review_publication_error(
         &mut self,
         intent_id: &str,
@@ -4112,7 +4716,8 @@ impl SqliteFactoryStore {
             .execute(
                 "UPDATE review_publication_intents SET status = ?1,
                     last_error_json = ?2, retry_count = retry_count + 1,
-                    updated_at = ?3 WHERE intent_id = ?4",
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = ?3
+                    WHERE intent_id = ?4 AND status = 'pending' AND lease_owner IS NULL",
                 params![
                     status.as_str(),
                     bounded_json(&error)?,
@@ -4122,11 +4727,142 @@ impl SqliteFactoryStore {
             )
             .map_err(storage_error)?;
         if changed == 0 {
+            let exists: Option<String> = self
+                .conn
+                .query_row(
+                    "SELECT status FROM review_publication_intents WHERE intent_id = ?1",
+                    params![intent_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(storage_error)?;
+            if exists.is_none() {
+                return Err(SymphonyError::StorageError(format!(
+                    "review intent {intent_id} not found"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_review_publication_error_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        status: PublicationStatus,
+        error: FactoryError,
+    ) -> Result<bool> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET status = ?1,
+                    last_error_json = ?2, retry_count = retry_count + 1,
+                    lease_owner = NULL, lease_expires_at = NULL, updated_at = ?3
+                 WHERE intent_id = ?4 AND status = 'pending' AND lease_owner = ?5
+                   AND lease_expires_at > ?3",
+                params![
+                    status.as_str(),
+                    bounded_json(&error)?,
+                    now_s,
+                    intent_id,
+                    owner,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(changed == 1)
+    }
+
+    /// Terminalize a publication intent whose artifact head was superseded by
+    /// a newer review cycle without charging the publication retry budget.
+    pub fn supersede_review_publication_owned(
+        &mut self,
+        intent_id: &str,
+        owner: &str,
+        error: FactoryError,
+    ) -> Result<bool> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET status = ?1,
+                 last_error_json = ?2, lease_owner = NULL, lease_expires_at = NULL,
+                 updated_at = ?3
+                 WHERE intent_id = ?4 AND status = ?5 AND lease_owner = ?6
+                   AND lease_expires_at > ?3",
+                params![
+                    PublicationStatus::Conflict.as_str(),
+                    bounded_json(&error)?,
+                    now_s,
+                    intent_id,
+                    PublicationStatus::Pending.as_str(),
+                    owner,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed > 0 {
+            return Ok(true);
+        }
+        let exists: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT status FROM review_publication_intents WHERE intent_id = ?1",
+                params![intent_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        if exists.is_none() {
             return Err(SymphonyError::StorageError(format!(
                 "review intent {intent_id} not found"
             )));
         }
-        Ok(())
+        Ok(false)
+    }
+
+    #[cfg(test)]
+    pub fn supersede_review_publication(
+        &mut self,
+        intent_id: &str,
+        error: FactoryError,
+    ) -> Result<bool> {
+        let now = Self::now();
+        let now_s = ts(now);
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET status = ?1,
+                 last_error_json = ?2, lease_owner = NULL, lease_expires_at = NULL,
+                 updated_at = ?3
+                 WHERE intent_id = ?4 AND status = ?5
+                   AND (lease_owner IS NULL OR lease_expires_at IS NULL OR lease_expires_at <= ?3)",
+                params![
+                    PublicationStatus::Conflict.as_str(),
+                    bounded_json(&error)?,
+                    now_s,
+                    intent_id,
+                    PublicationStatus::Pending.as_str(),
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed > 0 {
+            return Ok(true);
+        }
+        let exists: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT status FROM review_publication_intents WHERE intent_id = ?1",
+                params![intent_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage_error)?;
+        if exists.is_none() {
+            return Err(SymphonyError::StorageError(format!(
+                "review intent {intent_id} not found"
+            )));
+        }
+        Ok(false)
     }
 
     pub fn review_metrics(&self) -> Result<ReviewMetricsAggregate> {
@@ -4161,6 +4897,15 @@ impl SqliteFactoryStore {
             .query_row(
                 "SELECT COUNT(*) FROM review_publication_intents
                  WHERE kind = 'preview' AND status = 'applied'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        metrics.automatic_publications = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM review_publication_intents
+                 WHERE kind = 'automatic' AND status = 'applied'",
                 [],
                 |row| row.get(0),
             )
@@ -4537,6 +5282,34 @@ fn review_attempt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewAt
     })
 }
 
+fn review_finding_record_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ReviewFindingRecord> {
+    let severity: String = row.get(6)?;
+    let category: String = row.get(7)?;
+    Ok(ReviewFindingRecord {
+        finding_record_id: row.get(0)?,
+        run_id: row.get(1)?,
+        artifact_id: row.get(2)?,
+        finding_id: row.get(3)?,
+        identity_key: row.get(4)?,
+        reviewed_head_sha: row.get(5)?,
+        severity: serde_json::from_value(serde_json::Value::String(severity)).map_err(row_error)?,
+        category: serde_json::from_value(serde_json::Value::String(category)).map_err(row_error)?,
+        path: row.get(8)?,
+        line: row.get(9)?,
+        end_line: row.get(10)?,
+        claim: row.get(11)?,
+        rationale: row.get(12)?,
+        remediation: row.get(13)?,
+        acceptance_criterion: row.get(14)?,
+        confidence: row.get(15)?,
+        lifecycle_state: row.get(16)?,
+        created_at: parse_ts_row(row.get::<_, String>(17)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(18)?)?,
+    })
+}
+
 fn review_artifact_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<ReviewFindingsArtifactRecord> {
@@ -4560,6 +5333,44 @@ fn review_artifact_from_row(
     })
 }
 
+fn apply_migration(conn: &Connection, migration: &str) -> rusqlite::Result<()> {
+    let statements = migration
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("--"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !statements.to_ascii_uppercase().contains("ALTER TABLE") {
+        return conn.execute_batch(migration);
+    }
+    for statement in statements
+        .split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let tokens: Vec<&str> = statement.split_whitespace().collect();
+        let is_add_column = tokens.len() >= 6
+            && tokens[0].eq_ignore_ascii_case("ALTER")
+            && tokens[1].eq_ignore_ascii_case("TABLE")
+            && tokens[3].eq_ignore_ascii_case("ADD")
+            && tokens[4].eq_ignore_ascii_case("COLUMN");
+        if !is_add_column {
+            conn.execute_batch(statement)?;
+            continue;
+        }
+        let table = tokens[2].trim_matches('`').trim_matches('"');
+        let column = tokens[5].trim_matches('`').trim_matches('"');
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+            params![table, column],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            conn.execute_batch(statement)?;
+        }
+    }
+    Ok(())
+}
+
 fn review_publication_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<ReviewPublicationIntent> {
@@ -4575,11 +5386,14 @@ fn review_publication_from_row(
         last_error: optional_from_json(row.get::<_, Option<String>>(7)?)?,
         comment_id: row.get(8)?,
         publisher_login: row.get(9)?,
-        desired_effects: serde_json::from_str(&row.get::<_, String>(10)?).map_err(row_error)?,
-        observed_baseline: serde_json::from_str(&row.get::<_, String>(11)?).map_err(row_error)?,
-        expected_projection: serde_json::from_str(&row.get::<_, String>(12)?).map_err(row_error)?,
-        created_at: parse_ts_row(row.get::<_, String>(13)?)?,
-        updated_at: parse_ts_row(row.get::<_, String>(14)?)?,
+        review_id: row.get(10)?,
+        review_url: row.get(11)?,
+        route_state: row.get(12)?,
+        desired_effects: serde_json::from_str(&row.get::<_, String>(13)?).map_err(row_error)?,
+        observed_baseline: serde_json::from_str(&row.get::<_, String>(14)?).map_err(row_error)?,
+        expected_projection: serde_json::from_str(&row.get::<_, String>(15)?).map_err(row_error)?,
+        created_at: parse_ts_row(row.get::<_, String>(16)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(17)?)?,
     })
 }
 
@@ -5168,6 +5982,9 @@ fn row_error<E: ToString>(err: E) -> rusqlite::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::review::manifest::{
+        ReviewFinding, ReviewFindingCategory, ReviewFindingsManifest, ReviewSeverity,
+    };
     use crate::triage::domain::{
         EvidenceKind, RiskClass, TriageEvidence, TriageRoute, TRIAGE_SCHEMA_VERSION,
     };
@@ -5211,6 +6028,449 @@ mod tests {
 
     fn store(path: &Path) -> SqliteFactoryStore {
         SqliteFactoryStore::acquire_lock_and_migrate(path, 5_000).unwrap()
+    }
+
+    fn review_finding(finding_id: &str, path: &str, line: u32, claim: &str) -> ReviewFinding {
+        ReviewFinding {
+            finding_id: finding_id.to_string(),
+            severity: ReviewSeverity::Major,
+            category: ReviewFindingCategory::Correctness,
+            path: path.to_string(),
+            line,
+            end_line: None,
+            claim: claim.to_string(),
+            rationale: "A rationale".to_string(),
+            remediation: "A remediation".to_string(),
+            acceptance_criterion: None,
+            confidence: 0.9,
+        }
+    }
+
+    fn review_manifest(head: &str, findings: Vec<ReviewFinding>) -> ReviewFindingsManifest {
+        ReviewFindingsManifest {
+            schema_version: 1,
+            reviewed_head_sha: head.to_string(),
+            base_sha: "base".to_string(),
+            spec_conformance_summary: "Conforms".to_string(),
+            no_findings: findings.is_empty(),
+            findings,
+        }
+    }
+
+    #[test]
+    fn review_metrics_count_applied_publication_kinds_separately() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+
+        let preview = store
+            .create_review_publication_intent(
+                "run-preview",
+                "artifact-preview",
+                "preview",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        store
+            .complete_review_publication(&preview.intent_id, "comment_final")
+            .unwrap();
+
+        let automatic = store
+            .create_review_publication_intent(
+                "run-automatic",
+                "artifact-automatic",
+                "automatic",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+        store
+            .record_review_publication_step(
+                &automatic.intent_id,
+                "comment_final",
+                PublicationStatus::Applied,
+                &serde_json::json!({}),
+            )
+            .unwrap();
+
+        let pending_automatic = store
+            .create_review_publication_intent(
+                "run-pending",
+                "artifact-pending",
+                "automatic",
+                &serde_json::json!({}),
+            )
+            .unwrap();
+
+        let metrics = store.review_metrics().unwrap();
+        assert_eq!(metrics.preview_publications, 1);
+        assert_eq!(metrics.automatic_publications, 1);
+        assert_eq!(
+            store
+                .get_review_publication_intent(&pending_automatic.intent_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            PublicationStatus::Pending
+        );
+    }
+
+    #[test]
+    fn classifies_re_review_findings_by_prior_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let first_stage = store
+            .claim_stage_attempt(REVIEW_STAGE_NAME, claim_request("rev-1", "cfg"))
+            .unwrap();
+        // This test isolates review lifecycle behavior; linked A2/A3 artifacts
+        // are represented by placeholder IDs because those stages are out of scope.
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        store
+            .store_review_attempt_inputs(StoreReviewAttemptRequest {
+                attempt_id: "attempt-1".to_string(),
+                stage_run_id: first_stage.stage_run_id.clone(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                pr_number: 42,
+                reviewed_head_sha: "head-1".to_string(),
+                base_sha: "base".to_string(),
+            })
+            .unwrap();
+        let first = store
+            .store_review_artifact(StoreReviewArtifactRequest {
+                stage_run_id: first_stage.stage_run_id,
+                attempt_id: "attempt-1".to_string(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                reviewed_head_sha: "head-1".to_string(),
+                base_sha: "base".to_string(),
+                manifest: review_manifest(
+                    "head-1",
+                    vec![
+                        review_finding("old-a", "src/a.rs", 10, "persist me"),
+                        review_finding("old-c", "src/c.rs", 30, "resolve me"),
+                    ],
+                ),
+                bytes_len: 1,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+        let second_stage = store
+            .claim_stage_attempt(REVIEW_STAGE_NAME, claim_request("rev-2", "cfg"))
+            .unwrap();
+        store
+            .store_review_attempt_inputs(StoreReviewAttemptRequest {
+                attempt_id: "attempt-2".to_string(),
+                stage_run_id: second_stage.stage_run_id.clone(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                pr_number: 42,
+                reviewed_head_sha: "head-2".to_string(),
+                base_sha: "base".to_string(),
+            })
+            .unwrap();
+        let second = store
+            .store_review_artifact(StoreReviewArtifactRequest {
+                stage_run_id: second_stage.stage_run_id,
+                attempt_id: "attempt-2".to_string(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                reviewed_head_sha: "head-2".to_string(),
+                base_sha: "base".to_string(),
+                manifest: review_manifest(
+                    "head-2",
+                    vec![
+                        review_finding("new-a", "src/a.rs", 99, "persist me"),
+                        review_finding("new-b", "src/b.rs", 20, "new finding"),
+                    ],
+                ),
+                bytes_len: 1,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+
+        let first_records_before_third = store
+            .list_review_finding_records_for_artifact(&first.artifact_id)
+            .unwrap();
+        let second_records_before_third = store
+            .list_review_finding_records_for_artifact(&second.artifact_id)
+            .unwrap();
+        assert_eq!(
+            first_records_before_third
+                .iter()
+                .find(|record| record.finding_id == "old-a")
+                .unwrap()
+                .lifecycle_state,
+            "new"
+        );
+        assert_eq!(
+            first_records_before_third
+                .iter()
+                .find(|record| record.finding_id == "old-c")
+                .unwrap()
+                .lifecycle_state,
+            "resolved"
+        );
+        assert_eq!(
+            second_records_before_third
+                .iter()
+                .find(|record| record.finding_id == "new-a")
+                .unwrap()
+                .lifecycle_state,
+            "persisting"
+        );
+        assert_eq!(
+            second_records_before_third
+                .iter()
+                .find(|record| record.finding_id == "new-b")
+                .unwrap()
+                .lifecycle_state,
+            "new"
+        );
+
+        let third_stage = store
+            .claim_stage_attempt(REVIEW_STAGE_NAME, claim_request("rev-3", "cfg"))
+            .unwrap();
+        store
+            .store_review_attempt_inputs(StoreReviewAttemptRequest {
+                attempt_id: "attempt-3".to_string(),
+                stage_run_id: third_stage.stage_run_id.clone(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                pr_number: 42,
+                reviewed_head_sha: "head-3".to_string(),
+                base_sha: "base".to_string(),
+            })
+            .unwrap();
+        let third = store
+            .store_review_artifact(StoreReviewArtifactRequest {
+                stage_run_id: third_stage.stage_run_id,
+                attempt_id: "attempt-3".to_string(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                reviewed_head_sha: "head-3".to_string(),
+                base_sha: "base".to_string(),
+                manifest: review_manifest(
+                    "head-3",
+                    vec![review_finding("new-c", "src/c.rs", 30, "resolve me")],
+                ),
+                bytes_len: 1,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+
+        let third_records = store
+            .list_review_finding_records_for_artifact(&third.artifact_id)
+            .unwrap();
+        assert_eq!(
+            third_records
+                .iter()
+                .find(|record| record.finding_id == "new-c")
+                .unwrap()
+                .lifecycle_state,
+            "new",
+            "a finding reappearing after resolution starts a new lifecycle",
+        );
+    }
+
+    #[test]
+    fn interrupted_review_attempt_does_not_consume_retry_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        for (attempt_id, stage_run_id, status) in [
+            ("attempt-interrupted", "stage-interrupted", "interrupted"),
+            ("attempt-failed", "stage-failed", "failed"),
+            ("attempt-blocked", "stage-blocked", "blocked"),
+        ] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO review_attempts (
+                        attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                        implementation_artifact_id, spec_artifact_id, pr_number,
+                        reviewed_head_sha, base_sha, status, created_at, updated_at
+                     ) VALUES (?1, 'run-review', ?2, 'draft', 'implementation', 'spec',
+                        42, 'head-1', 'base-1', ?3, ?4, ?4)",
+                    params![attempt_id, stage_run_id, status, now],
+                )
+                .unwrap();
+        }
+
+        // Interrupted attempts consume the retry ceiling as well, preventing
+        // repeated worker crashes from reclaiming the same head indefinitely.
+        let counted = store
+            .count_review_attempt_failures_for_head("run-review", "head-1")
+            .unwrap();
+        assert_eq!(counted, 3);
+    }
+
+    #[test]
+    fn changed_live_head_keeps_review_candidate_eligible_after_old_head_exhaustion() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute(
+                "INSERT INTO factory_runs (
+                    run_id, forge_host, repository, issue_id, issue_identifier,
+                    issue_revision, status, current_stage, created_at, updated_at
+                 ) VALUES ('run-review', 'github.com', 'owner/repo', '123', '#123',
+                    'issue-rev', 'running', 'review', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO spec_run_state (
+                    run_id, approved_artifact_id, approved_version, decision, updated_at
+                 ) VALUES ('run-review', 'spec-artifact', 1, 'approved', ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_artifacts (
+                    artifact_id, run_id, stage_run_id, approved_artifact_id,
+                    approved_version, issue_revision, configuration_revision,
+                    schema_version, manifest_json, base_commit, approved_spec_path,
+                    validation_cycles, execution_profile, received_at, bytes_len
+                 ) VALUES ('implementation-artifact', 'run-review', 'implementation-stage',
+                    'spec-artifact', 1, 'issue-rev', 'config-rev', 1, '{}', 'base',
+                    'spec.md', 1, 'default', ?1, 1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('implementation-intent', 'run-review',
+                    'implementation-artifact', 'draft_pr', 'applied', '[]', '{}', '{}',
+                    '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_draft_pr_artifacts (
+                    artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 ) VALUES ('draft-artifact', 'run-review', 'implementation-artifact',
+                    'implementation-intent', 42, 'https://github.com/owner/repo/pull/42',
+                    1, 'feature', 'main', 'old-head', 'marker', ?1)",
+                params![now],
+            )
+            .unwrap();
+        // A published non-draft PR artifact for the same run must not enter the
+        // A4 queue, which only reviews draft PRs.
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_artifacts (
+                    artifact_id, run_id, stage_run_id, approved_artifact_id,
+                    approved_version, issue_revision, configuration_revision,
+                    schema_version, manifest_json, base_commit, approved_spec_path,
+                    validation_cycles, execution_profile, received_at, bytes_len
+                 ) VALUES ('non-draft-implementation', 'run-review',
+                    'implementation-stage-non-draft', 'spec-artifact', 1, 'issue-rev',
+                    'config-rev-non-draft', 1, '{}', 'base', 'spec.md', 1, 'default', ?1, 1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('non-draft-implementation-intent', 'run-review',
+                    'non-draft-implementation', 'draft_pr', 'applied', '[]', '{}', '{}',
+                    '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_draft_pr_artifacts (
+                    artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 ) VALUES ('non-draft-artifact', 'run-review', 'non-draft-implementation',
+                    'non-draft-implementation-intent', 43,
+                    'https://github.com/owner/repo/pull/43', 0, 'feature', 'main',
+                    'new-head', 'marker-non-draft', ?1)",
+                params![now],
+            )
+            .unwrap();
+        for (attempt_id, stage_run_id, status) in [
+            ("failed-1", "stage-failed-1", "failed"),
+            ("blocked-1", "stage-blocked-1", "blocked"),
+        ] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO review_attempts (
+                        attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                        implementation_artifact_id, spec_artifact_id, pr_number,
+                        reviewed_head_sha, base_sha, status, created_at, updated_at
+                     ) VALUES (?1, 'run-review', ?2, 'draft-artifact',
+                        'implementation-artifact', 'spec-artifact', 42,
+                        'old-head', 'base', ?3, ?4, ?4)",
+                    params![attempt_id, stage_run_id, status, now],
+                )
+                .unwrap();
+        }
+
+        let candidates = store.list_a4_eligible_review_runs(2).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].draft_pr_artifact_id, "draft-artifact");
+        assert!(candidates[0].draft);
+        assert_eq!(candidates[0].head_sha, "old-head");
+        assert_eq!(
+            store
+                .count_review_attempt_failures_for_head("run-review", "old-head")
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            store
+                .count_review_attempt_failures_for_head("run-review", "new-head")
+                .unwrap(),
+            0,
+            "the live/new head starts with a fresh retry budget"
+        );
     }
 
     #[test]
@@ -6060,6 +7320,507 @@ mod tests {
     }
 
     #[test]
+    fn blocked_review_publication_can_be_listed_and_reset_atomically() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, last_error_json,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('review-blocked', 'run-review', 'artifact-review',
+                    'formal', 'blocked', '[\"review_created\"]', 4,
+                    ?1, '{}', '{}', '{}', ?2, ?2)",
+                params![
+                    serde_json::json!({
+                        "code": "review_publication_retry_exhausted",
+                        "component": "review_publication",
+                        "remediation": "retry after restoring forge access",
+                        "retryable": false
+                    })
+                    .to_string(),
+                    now,
+                ],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, last_error_json,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('review-conflict', 'run-review', 'artifact-conflict',
+                    'formal', 'conflict', '[\"review_created\"]', 2,
+                    ?1, '{}', '{}', '{}', ?2, ?2)",
+                params![
+                    serde_json::json!({
+                        "code": "review_publication_conflict",
+                        "component": "review_publication",
+                        "remediation": "reconcile the forge review",
+                        "retryable": false
+                    })
+                    .to_string(),
+                    now,
+                ],
+            )
+            .unwrap();
+
+        let blocked = store.list_blocked_review_publications().unwrap();
+        assert_eq!(blocked.len(), 2);
+        let blocked_intent = blocked
+            .iter()
+            .find(|intent| intent.intent_id == "review-blocked")
+            .unwrap();
+        assert_eq!(blocked_intent.completed_steps, ["review_created"]);
+        assert_eq!(blocked_intent.retry_count, 4);
+        assert!(blocked.iter().any(|intent| {
+            intent.intent_id == "review-conflict" && intent.status == PublicationStatus::Conflict
+        }));
+
+        let reset = store
+            .reset_blocked_review_publication("review-blocked", "operator")
+            .unwrap();
+        assert_eq!(reset.status, PublicationStatus::Pending);
+        assert_eq!(reset.retry_count, 0);
+        assert!(reset.last_error.is_none());
+        assert_eq!(reset.completed_steps, ["review_created"]);
+
+        let (event_type, payload): (String, String) = store
+            .conn
+            .query_row(
+                "SELECT event_type, payload_json FROM factory_events
+                 WHERE event_type = 'review_publication_reset'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(event_type, "review_publication_reset");
+        assert!(payload.contains("\"operator\":\"operator\""));
+        let remaining = store.list_blocked_review_publications().unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].intent_id, "review-conflict");
+
+        let conflict_reset = store
+            .reset_blocked_review_publication("review-conflict", "operator")
+            .unwrap();
+        assert_eq!(conflict_reset.status, PublicationStatus::Pending);
+        assert!(store.list_blocked_review_publications().unwrap().is_empty());
+
+        let err = store
+            .reset_blocked_review_publication("review-blocked", "operator")
+            .unwrap_err();
+        assert!(err.to_string().contains("not blocked"));
+    }
+
+    #[test]
+    fn superseding_review_publication_preserves_retry_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, desired_effects_json,
+                    observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 ) VALUES ('review-superseded', 'run-review', 'artifact-review',
+                    'automatic', 'pending', '[]', 4, '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+
+        assert!(store
+            .claim_review_publication("review-superseded", "owner-a", 900)
+            .unwrap());
+        assert!(!store
+            .supersede_review_publication(
+                "review-superseded",
+                FactoryError::new(
+                    "review_publication_superseded_active",
+                    "review_publisher",
+                    "an active publisher lease must win",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET lease_expires_at = ?1
+                 WHERE intent_id = 'review-superseded'",
+                params![ts(Utc::now() - Duration::seconds(1))],
+            )
+            .unwrap();
+
+        assert!(store
+            .supersede_review_publication(
+                "review-superseded",
+                FactoryError::new(
+                    "review_publication_superseded",
+                    "review_publisher",
+                    "new head opened a review cycle",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap());
+        assert!(!store
+            .supersede_review_publication(
+                "review-superseded",
+                FactoryError::new(
+                    "review_publication_superseded_again",
+                    "review_publisher",
+                    "a stale caller must not overwrite terminal state",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap());
+
+        let intent = store
+            .get_review_publication_intent("review-superseded")
+            .unwrap()
+            .unwrap();
+        assert_eq!(intent.status, PublicationStatus::Conflict);
+        assert_eq!(intent.retry_count, 4);
+        assert_eq!(
+            intent.last_error.unwrap().code,
+            "review_publication_superseded"
+        );
+        assert!(store.list_pending_review_publications().unwrap().is_empty());
+    }
+
+    #[test]
+    fn terminal_review_publications_ignore_stale_writers() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        for (intent_id, status, retry_count) in [
+            ("review-applied", "applied", 2),
+            ("review-conflict", "conflict", 3),
+            ("review-blocked", "blocked", 4),
+        ] {
+            store
+                .conn
+                .execute(
+                    &format!(
+                        "INSERT INTO review_publication_intents (
+                            intent_id, run_id, artifact_id, kind, status,
+                            completed_steps_json, retry_count, desired_effects_json,
+                            observed_baseline_json, expected_projection_json,
+                            created_at, updated_at
+                         ) VALUES ('{intent_id}', 'run-review', 'artifact-{intent_id}',
+                            'formal', '{status}', '[]', {retry_count}, '{{}}', '{{}}', '{{}}', ?1, ?1)"
+                    ),
+                    params![now],
+                )
+                .unwrap();
+        }
+
+        for intent_id in ["review-applied", "review-conflict", "review-blocked"] {
+            store
+                .record_review_publication_step(
+                    intent_id,
+                    "comment_final",
+                    PublicationStatus::Pending,
+                    &serde_json::json!({"stale": true}),
+                )
+                .unwrap();
+            store
+                .set_review_publication_route_state(intent_id, "Human Review")
+                .unwrap();
+            store
+                .set_review_publication_error(
+                    intent_id,
+                    PublicationStatus::Blocked,
+                    FactoryError::new(
+                        "stale_writer",
+                        "review_publisher",
+                        "must not overwrite terminal state",
+                        false,
+                        None,
+                    ),
+                )
+                .unwrap();
+        }
+
+        for (intent_id, status, retry_count) in [
+            ("review-applied", PublicationStatus::Applied, 2),
+            ("review-conflict", PublicationStatus::Conflict, 3),
+            ("review-blocked", PublicationStatus::Blocked, 4),
+        ] {
+            let intent = store
+                .get_review_publication_intent(intent_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(intent.status, status);
+            assert_eq!(intent.retry_count, retry_count);
+            assert!(intent.completed_steps.is_empty());
+            assert!(intent.route_state.is_none());
+        }
+    }
+
+    #[test]
+    fn owned_publication_mutations_require_an_active_lease() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, desired_effects_json,
+                    observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 ) VALUES ('review-owned', 'run-review', 'artifact-review',
+                    'formal', 'pending', '[]', 2, '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+
+        assert!(store
+            .claim_review_publication("review-owned", "owner-a", 900)
+            .unwrap());
+        store
+            .conn
+            .execute(
+                "UPDATE review_publication_intents SET lease_expires_at = ?1
+                 WHERE intent_id = 'review-owned'",
+                params![ts(Utc::now() - Duration::seconds(1))],
+            )
+            .unwrap();
+
+        assert!(
+            !store
+                .bind_review_publication_comment_owned(
+                    "review-owned",
+                    "owner-a",
+                    "701",
+                    "symphony-bot",
+                )
+                .unwrap()
+        );
+        assert!(!store
+            .clear_review_publication_comment_owned("review-owned", "owner-a")
+            .unwrap());
+        assert!(!store
+            .bind_review_publication_review_owned(
+                "review-owned",
+                "owner-a",
+                "review-1",
+                "https://example.test/review-1",
+                "symphony-bot",
+            )
+            .unwrap());
+        assert!(!store
+            .set_review_publication_route_state_owned("review-owned", "owner-a", "Human Review")
+            .unwrap());
+        assert!(!store
+            .record_review_publication_step_owned(
+                "review-owned",
+                "owner-a",
+                "review_created",
+                PublicationStatus::Pending,
+                &serde_json::json!({"stale": true}),
+            )
+            .unwrap());
+        assert!(!store
+            .set_review_publication_error_owned(
+                "review-owned",
+                "owner-a",
+                PublicationStatus::Blocked,
+                FactoryError::new(
+                    "stale_writer",
+                    "review_publisher",
+                    "expired lease must not write",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap());
+
+        assert!(store
+            .claim_review_publication("review-owned", "owner-b", 900)
+            .unwrap());
+        store
+            .set_review_publication_route_state("review-owned", "Human Review")
+            .unwrap();
+        store
+            .record_review_publication_step(
+                "review-owned",
+                "route_applied",
+                PublicationStatus::Pending,
+                &serde_json::json!({"stale": true}),
+            )
+            .unwrap();
+        store
+            .set_review_publication_error(
+                "review-owned",
+                PublicationStatus::Blocked,
+                FactoryError::new(
+                    "stale_writer",
+                    "review_publisher",
+                    "unowned writer must not bypass owner-b",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap();
+        let pending = store
+            .get_review_publication_intent("review-owned")
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.status, PublicationStatus::Pending);
+        assert!(pending.completed_steps.is_empty());
+        assert!(pending.route_state.is_none());
+        assert_eq!(pending.retry_count, 2);
+
+        assert!(store
+            .bind_review_publication_review_owned(
+                "review-owned",
+                "owner-b",
+                "review-1",
+                "https://example.test/review-1",
+                "symphony-bot",
+            )
+            .unwrap());
+        assert!(store
+            .record_review_publication_step_owned(
+                "review-owned",
+                "owner-b",
+                "review_created",
+                PublicationStatus::Pending,
+                &serde_json::json!({"review_id": "review-1"}),
+            )
+            .unwrap());
+        assert!(store
+            .record_review_publication_step_owned(
+                "review-owned",
+                "owner-b",
+                "comment_final",
+                PublicationStatus::Pending,
+                &serde_json::json!({"review_id": "review-1"}),
+            )
+            .unwrap());
+
+        let applied = store
+            .get_review_publication_intent("review-owned")
+            .unwrap()
+            .unwrap();
+        assert_eq!(applied.status, PublicationStatus::Applied);
+        assert_eq!(applied.retry_count, 2);
+        assert_eq!(applied.completed_steps, ["review_created", "comment_final"]);
+        assert_eq!(applied.route_state, None);
+    }
+
+    #[test]
+    fn review_publication_claim_is_single_owner_until_released_or_expired() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, desired_effects_json,
+                    observed_baseline_json, expected_projection_json,
+                    created_at, updated_at
+                 ) VALUES ('review-lease', 'run-review', 'artifact-review',
+                    'formal', 'pending', '[]', '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+
+        assert!(store
+            .claim_review_publication("review-lease", "owner-a", 900)
+            .unwrap());
+        assert!(!store
+            .supersede_review_publication(
+                "review-lease",
+                FactoryError::new(
+                    "review_publication_superseded",
+                    "review_publisher",
+                    "active lease must win",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap());
+        assert!(!store
+            .claim_review_publication("review-lease", "owner-b", 900)
+            .unwrap());
+        store
+            .clear_review_publication_lease("review-lease", "owner-a")
+            .unwrap();
+        assert!(store
+            .claim_review_publication("review-lease", "owner-b", 900)
+            .unwrap());
+        assert!(!store
+            .supersede_review_publication(
+                "review-lease",
+                FactoryError::new(
+                    "review_publication_superseded",
+                    "review_publisher",
+                    "active lease must still win",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap());
+        store
+            .clear_review_publication_lease("review-lease", "owner-b")
+            .unwrap();
+        assert!(store
+            .supersede_review_publication(
+                "review-lease",
+                FactoryError::new(
+                    "review_publication_superseded",
+                    "review_publisher",
+                    "released lease can be superseded",
+                    false,
+                    None,
+                ),
+            )
+            .unwrap());
+    }
+
+    #[test]
     fn migration_004_creates_implementation_tables() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state.db");
@@ -6074,6 +7835,30 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn reopening_store_reapplies_review_publication_migration_idempotently() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let first = store(&path);
+        drop(first);
+
+        let reopened = store(&path);
+        for column in ["review_id", "review_url", "route_state"] {
+            let exists: bool = reopened
+                .conn
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM pragma_table_info('review_publication_intents')
+                        WHERE name = ?1
+                    )",
+                    params![column],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(exists, "missing review publication column {column}");
+        }
     }
 
     #[test]
@@ -6194,6 +7979,24 @@ mod tests {
                 ],
             )
             .unwrap();
+
+        let orphan = store
+            .get_orphaned_review_artifact_for_head(&run_id, "head-sha")
+            .unwrap()
+            .expect("artifact without an intent is recoverable");
+        assert_eq!(orphan.artifact_id, "review-artifact");
+        store
+            .create_review_publication_intent(
+                &run_id,
+                &orphan.artifact_id,
+                "preview",
+                &serde_json::json!({"issue_number": 123}),
+            )
+            .unwrap();
+        assert!(store
+            .get_orphaned_review_artifact_for_head(&run_id, "head-sha")
+            .unwrap()
+            .is_none());
 
         let update = store.conn.execute(
             "UPDATE review_findings_artifacts SET manifest_json = '{}' WHERE artifact_id = 'review-artifact'",

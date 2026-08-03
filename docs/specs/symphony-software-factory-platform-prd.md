@@ -250,9 +250,11 @@ Implementation consumes the approved artifact version, runs repository validatio
 
 #### A4. Draft PR → structured, read-only agent review
 
-A review stage consumes the PR description, diff, repository context, and approved spec. It emits schema-validated findings. PR1 is implemented as a preview-only issue comment flow with typed TUI state; formal GitHub review publication and routing remain planned.
+A review stage consumes the PR description, diff, repository context, and approved spec. It emits schema-validated findings. PR1 is implemented as a preview-only issue comment flow with typed TUI state. PR2 adds deterministic formal GitHub review publication, active-lease fencing, changed-head recovery, and Projects v2 routing; it is verified with residual live worker credential-isolation and broader Docker evidence.
 
 **Demo:** Open or update a PR, receive a review summary and inline findings, push a correction, and see contextual re-review.
+
+**Progress (2026-08-02):** PR2 formal publication and routing are implemented on `feat/a4-review-publication` and verified through isolated live UAT against [PR #46](https://github.com/gannonh/uat-symphony/pull/46), including restart-boundary recovery and Project restoration. See the [A4 verify report](/specs/2026-08-02-a4-pr2-verify-report.md) and [ADR-0005](/adrs/0005-a4-review-publication-fencing.md).
 
 **Measure:** accepted finding rate, dismissed finding rate, review cycles, escaped sampled defects, and review cost.
 

@@ -22,6 +22,7 @@ use crate::linear::adapter::TrackerAdapter;
 use crate::linear::client::LinearClient;
 use crate::notifications;
 use crate::repo_url::repo_is_remote;
+use crate::review::domain::{ReviewConfig, ReviewMode};
 use crate::workflow;
 use crate::workspace;
 
@@ -250,6 +251,260 @@ pub fn check_config(workflow_path: &Path) -> Vec<DoctorCheckResult> {
     results
 }
 
+pub async fn check_review(config: &ServiceConfig) -> Vec<DoctorCheckResult> {
+    let review = &config.review;
+    if !review.enabled {
+        return vec![DoctorCheckResult::skipped(
+            "GitHub Review",
+            "Skipped because review.enabled is false",
+        )];
+    }
+    let automatic = review.mode == ReviewMode::Automatic;
+    let tracker = &config.tracker;
+    let Some(project_number) = tracker.github_project_number else {
+        return vec![DoctorCheckResult::error(
+            "GitHub Review",
+            "review.enabled requires tracker.github_project_number for GitHub Projects v2 trigger validation",
+        )];
+    };
+    let Some(token) = resolve_github_token(tracker).map(|resolved| resolved.token) else {
+        return vec![DoctorCheckResult::error(
+            "GitHub Review",
+            github_token_missing_message(),
+        )];
+    };
+    let Some(repo_owner) = tracker
+        .repo_owner
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return vec![DoctorCheckResult::error(
+            "GitHub Review",
+            "tracker.repo_owner is required for review checks",
+        )];
+    };
+    let Some(repo_name) = tracker
+        .repo_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return vec![DoctorCheckResult::error(
+            "GitHub Review",
+            "tracker.repo_name is required for review checks",
+        )];
+    };
+
+    let label_prefix = tracker
+        .label_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("symphony");
+    let endpoint = if tracker.endpoint.trim().is_empty() {
+        "https://api.github.com"
+    } else {
+        tracker.endpoint.trim()
+    };
+    let client = GithubClient::with_base_url(
+        token,
+        repo_owner.to_string(),
+        repo_name.to_string(),
+        label_prefix.to_string(),
+        endpoint,
+    );
+    let mut results = Vec::new();
+
+    match client.get_authenticated_user().await {
+        Ok(user) => results.push(DoctorCheckResult::pass(
+            "GitHub Review Auth",
+            format!("GitHub client authenticated as {}", user.login),
+        )),
+        Err(err) => {
+            results.push(DoctorCheckResult::error(
+                "GitHub Review Auth",
+                format!("GitHub client authentication failed: {err}"),
+            ));
+            return results;
+        }
+    }
+
+    let projects_client = ProjectsV2Client::new(client.clone());
+    let status_field = match projects_client
+        .resolve_status_field_for_owner_type(
+            repo_owner,
+            project_number,
+            tracker
+                .github_project_owner_type
+                .unwrap_or(crate::domain::GithubProjectOwnerType::User),
+        )
+        .await
+    {
+        Ok(status_field) => {
+            results.push(DoctorCheckResult::pass(
+                "GitHub Review Project",
+                format!(
+                    "Resolved Projects v2 Status field on project #{project_number} ({} options)",
+                    status_field.options.len()
+                ),
+            ));
+            status_field
+        }
+        Err(err) => {
+            results.push(DoctorCheckResult::error(
+                "GitHub Review Project",
+                format!(
+                    "Failed to resolve Projects v2 Status field on project #{project_number}: {err}"
+                ),
+            ));
+            return results;
+        }
+    };
+
+    let missing_routes = validate_review_route_options(review, &status_field.options, automatic);
+    if missing_routes.is_empty() {
+        results.push(DoctorCheckResult::pass(
+            "GitHub Review Routes",
+            "Configured review trigger and route states exist as Projects v2 Status options",
+        ));
+    } else {
+        for missing in missing_routes {
+            results.push(DoctorCheckResult::error(
+                "GitHub Review Routes",
+                format!("Configured review state is not a Projects v2 Status option: {missing}"),
+            ));
+        }
+    }
+
+    let probe_number = match review.permission_probe_pull_request {
+        Some(number) if number > 0 => Some(number),
+        Some(_) => {
+            results.push(DoctorCheckResult::error(
+                "GitHub Review API",
+                "review.permission_probe_pull_request must be greater than 0",
+            ));
+            None
+        }
+        None => match client.list_pull_requests("open", None, None, 1).await {
+            Ok(pull_requests) => pull_requests
+                .first()
+                .map(|pull_request| pull_request.number),
+            Err(err) => {
+                results.push(DoctorCheckResult::error(
+                    "GitHub Review API",
+                    format!("Could not find an open pull request for the review permission probe: {err}"),
+                ));
+                None
+            }
+        },
+    };
+
+    if let Some(number) = probe_number {
+        match client.probe_pull_request_review_permission(number).await {
+            Ok(()) => results.push(DoctorCheckResult::pass(
+                "GitHub Review API",
+                format!("Review endpoint authorization verified with pull request #{number}"),
+            )),
+            Err(err) => results.push(DoctorCheckResult::error(
+                "GitHub Review API",
+                format!(
+                    "Review endpoint authorization probe failed for pull request #{number}: {err}"
+                ),
+            )),
+        }
+    } else if review.permission_probe_pull_request.is_none()
+        && !results
+            .iter()
+            .any(|result| result.name == "GitHub Review API" && result.status == CheckStatus::Error)
+    {
+        results.push(DoctorCheckResult::error(
+            "GitHub Review API",
+            "No open pull request is available for the review permission probe",
+        ));
+    }
+
+    if !automatic {
+        return results;
+    }
+
+    let repo_path = format!("/repos/{repo_owner}/{repo_name}");
+    match client.request(Method::GET, &repo_path, None).await {
+        Ok(response) => match response.json::<JsonValue>().await {
+            Ok(payload) => match payload
+                .get("permissions")
+                .and_then(|permissions| permissions.get("push"))
+                .and_then(JsonValue::as_bool)
+            {
+                Some(true) => results.push(DoctorCheckResult::pass(
+                    "GitHub Review Metadata",
+                    "GitHub API reports repository push permission; formal review permission is determined by the review endpoint probe",
+                )),
+                Some(false) => results.push(DoctorCheckResult::warning(
+                    "GitHub Review Metadata",
+                    "GitHub API reports no repository push permission; formal review permission is determined by the review endpoint probe",
+                )),
+                None => results.push(DoctorCheckResult::warning(
+                    "GitHub Review Metadata",
+                    "GitHub API did not expose repository permission metadata; formal review permission is determined by the review endpoint probe",
+                )),
+            },
+            Err(err) => results.push(DoctorCheckResult::warning(
+                "GitHub Review Metadata",
+                format!("Could not decode repository permission metadata: {err}"),
+            )),
+        },
+        Err(err) => results.push(DoctorCheckResult::warning(
+            "GitHub Review Metadata",
+            format!("Could not check repository permission metadata: {err}"),
+        )),
+    }
+
+    results
+}
+
+fn validate_review_route_options(
+    review: &ReviewConfig,
+    options: &[crate::github::projects_v2::StatusOption],
+    automatic: bool,
+) -> Vec<String> {
+    let available: HashSet<String> = options
+        .iter()
+        .map(|option| option.name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
+        .collect();
+    let mut missing = Vec::new();
+    let mut routes = vec![("review.trigger_state", Some(review.trigger_state.as_str()))];
+    if automatic {
+        routes.extend([
+            (
+                "review.completion_route.state",
+                review
+                    .completion_route
+                    .as_ref()
+                    .map(|route| route.state.as_str()),
+            ),
+            (
+                "review.changes_requested_route.state",
+                review
+                    .changes_requested_route
+                    .as_ref()
+                    .map(|route| route.state.as_str()),
+            ),
+        ]);
+    }
+    for (field, state) in routes {
+        let Some(state) = state.map(str::trim).filter(|state| !state.is_empty()) else {
+            missing.push(format!("{field} is not configured"));
+            continue;
+        };
+        if !available.contains(&state.to_ascii_lowercase()) {
+            missing.push(format!("{field}='{state}'"));
+        }
+    }
+    missing
+}
+
 pub async fn check_github(config: &TrackerConfig) -> Vec<DoctorCheckResult> {
     let mut results = Vec::new();
 
@@ -412,7 +667,13 @@ pub async fn check_github(config: &TrackerConfig) -> Vec<DoctorCheckResult> {
         } else {
             let projects_client = ProjectsV2Client::new(client.clone());
             match projects_client
-                .resolve_status_field(repo_owner, project_number)
+                .resolve_status_field_for_owner_type(
+                    repo_owner,
+                    project_number,
+                    config
+                        .github_project_owner_type
+                        .unwrap_or(crate::domain::GithubProjectOwnerType::User),
+                )
                 .await
             {
                 Ok(status_field) => {
@@ -1649,7 +1910,14 @@ pub async fn check_triage_github(config: &ServiceConfig) -> Vec<DoctorCheckResul
 
     let projects_client = ProjectsV2Client::new(client);
     match projects_client
-        .resolve_status_field(repo_owner, project_number)
+        .resolve_status_field_for_owner_type(
+            repo_owner,
+            project_number,
+            config
+                .tracker
+                .github_project_owner_type
+                .unwrap_or(crate::domain::GithubProjectOwnerType::User),
+        )
         .await
     {
         Ok(status_field) => {
@@ -2087,6 +2355,53 @@ mod tests {
         ];
 
         assert!(!has_errors(&results));
+    }
+
+    #[test]
+    fn review_route_options_report_missing_states() {
+        let review = ReviewConfig {
+            enabled: true,
+            mode: ReviewMode::Automatic,
+            trigger_state: "Needs Review".to_string(),
+            completion_route: Some(crate::review::domain::ReviewRoute {
+                state: "Approved".to_string(),
+            }),
+            changes_requested_route: Some(crate::review::domain::ReviewRoute {
+                state: "Changes Requested".to_string(),
+            }),
+            ..ReviewConfig::default()
+        };
+        let options = vec![
+            crate::github::projects_v2::StatusOption {
+                id: "1".to_string(),
+                name: "needs review".to_string(),
+            },
+            crate::github::projects_v2::StatusOption {
+                id: "2".to_string(),
+                name: "Approved".to_string(),
+            },
+        ];
+
+        let missing = validate_review_route_options(&review, &options, true);
+        assert_eq!(
+            missing,
+            vec!["review.changes_requested_route.state='Changes Requested'"]
+        );
+    }
+
+    #[tokio::test]
+    async fn review_check_skips_when_disabled_and_validates_preview_configuration() {
+        let mut config = ServiceConfig::default();
+        let disabled = check_review(&config).await;
+        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled[0].status, CheckStatus::Skipped);
+
+        config.review.enabled = true;
+        config.review.mode = ReviewMode::Preview;
+        let preview = check_review(&config).await;
+        assert_eq!(preview.len(), 1);
+        assert_eq!(preview[0].status, CheckStatus::Error);
+        assert!(preview[0].message.contains("github_project_number"));
     }
 
     #[test]

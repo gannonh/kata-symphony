@@ -1,7 +1,7 @@
 ---
 type: Plan
 title: Slice 2 Worker Operations
-description: Archived implementation plan: Slice 2 Worker Operations.
+description: "Archived implementation plan: Slice 2 Worker Operations."
 tags: [archive]
 timestamp: 2026-07-15T20:00:00Z
 ---
