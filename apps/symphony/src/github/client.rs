@@ -152,7 +152,8 @@ pub struct GithubPullRequestReview {
     pub user: Option<GithubUser>,
     #[serde(default)]
     pub body: Option<String>,
-    pub commit_id: String,
+    #[serde(default)]
+    pub commit_id: Option<String>,
     #[serde(default)]
     pub state: String,
     #[serde(default)]

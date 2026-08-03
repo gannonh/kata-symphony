@@ -110,6 +110,12 @@ pub enum SymphonyError {
     #[error("triage error: {0}")]
     TriageError(String),
 
+    #[error("review cycle reopened: {0}")]
+    ReviewCycleReopened(String),
+
+    #[error("review publication conflict: {0}")]
+    ReviewPublicationConflict(String),
+
     #[error("storage error: {0}")]
     StorageError(String),
 

@@ -424,7 +424,7 @@ async fn test_list_pull_request_reviews_returns_author_marker_and_commit() {
         .as_deref()
         .unwrap()
         .contains("<!-- symphony:review:intent-7 -->"));
-    assert_eq!(reviews[0].commit_id, "head-sha");
+    assert_eq!(reviews[0].commit_id.as_deref(), Some("head-sha"));
 }
 
 #[tokio::test]
@@ -567,7 +567,7 @@ async fn test_create_pull_request_review_serializes_multiline_anchors_and_omits_
         .expect("create_pull_request_review");
     mock.assert_async().await;
     assert_eq!(review.id, 73);
-    assert_eq!(review.commit_id, "head-sha");
+    assert_eq!(review.commit_id.as_deref(), Some("head-sha"));
     assert_eq!(review.user.as_ref().unwrap().login, "symphony-bot");
     assert_eq!(
         review.html_url.as_deref(),

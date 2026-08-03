@@ -508,12 +508,8 @@ impl SqliteFactoryStore {
         let conn = Connection::open(path).map_err(storage_error)?;
         conn.busy_timeout(StdDuration::from_millis(busy_timeout_ms))
             .map_err(storage_error)?;
-        for (index, migration) in MIGRATIONS.iter().enumerate() {
-            if index >= 6 {
-                apply_review_publication_migration(&conn, migration).map_err(storage_error)?;
-            } else {
-                conn.execute_batch(migration).map_err(storage_error)?;
-            }
+        for migration in MIGRATIONS {
+            apply_migration(&conn, migration).map_err(storage_error)?;
         }
 
         Ok(Self {
@@ -3660,7 +3656,8 @@ impl SqliteFactoryStore {
     }
 
     /// Count review attempts that consume the retry budget for one live PR
-    /// head. Interrupted attempts remain recoverable work and do not count.
+    /// head. Interrupted attempts count as failed work so repeated crashes
+    /// cannot reclaim the same head indefinitely.
     pub fn count_review_attempt_failures_for_head(
         &self,
         run_id: &str,
@@ -3670,7 +3667,7 @@ impl SqliteFactoryStore {
             .query_row(
                 "SELECT COUNT(*) FROM review_attempts
                  WHERE run_id = ?1 AND reviewed_head_sha = ?2
-                   AND status IN ('failed', 'blocked')",
+                   AND status IN ('failed', 'blocked', 'interrupted')",
                 params![run_id, reviewed_head_sha],
                 |row| row.get(0),
             )
@@ -4094,6 +4091,19 @@ impl SqliteFactoryStore {
         kind: &str,
         desired_effects: &serde_json::Value,
     ) -> Result<ReviewPublicationIntent> {
+        if let Some(existing) = self
+            .list_review_publications_for_run(run_id)?
+            .into_iter()
+            .find(|intent| {
+                intent.artifact_id == artifact_id
+                    && !matches!(
+                        intent.status,
+                        PublicationStatus::Blocked | PublicationStatus::Conflict
+                    )
+            })
+        {
+            return Ok(existing);
+        }
         let intent_id = new_id();
         let now_s = ts(Self::now());
         self.conn
@@ -5323,26 +5333,35 @@ fn review_artifact_from_row(
     })
 }
 
-fn apply_review_publication_migration(conn: &Connection, migration: &str) -> rusqlite::Result<()> {
-    let migration = migration
+fn apply_migration(conn: &Connection, migration: &str) -> rusqlite::Result<()> {
+    let statements = migration
         .lines()
         .filter(|line| !line.trim_start().starts_with("--"))
         .collect::<Vec<_>>()
         .join("\n");
-    for statement in migration
+    if !statements.to_ascii_uppercase().contains("ALTER TABLE") {
+        return conn.execute_batch(migration);
+    }
+    for statement in statements
         .split(';')
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        let column = statement
-            .split_whitespace()
-            .nth(5)
-            .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
+        let tokens: Vec<&str> = statement.split_whitespace().collect();
+        let is_add_column = tokens.len() >= 6
+            && tokens[0].eq_ignore_ascii_case("ALTER")
+            && tokens[1].eq_ignore_ascii_case("TABLE")
+            && tokens[3].eq_ignore_ascii_case("ADD")
+            && tokens[4].eq_ignore_ascii_case("COLUMN");
+        if !is_add_column {
+            conn.execute_batch(statement)?;
+            continue;
+        }
+        let table = tokens[2].trim_matches('`').trim_matches('"');
+        let column = tokens[5].trim_matches('`').trim_matches('"');
         let exists: bool = conn.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info('review_publication_intents') WHERE name = ?1
-            )",
-            params![column],
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)",
+            params![table, column],
             |row| row.get(0),
         )?;
         if !exists {
@@ -6296,19 +6315,12 @@ mod tests {
                 .unwrap();
         }
 
-        // A worker-head reopen is waiting work for the same cycle. Only actual
-        // failed or blocked review attempts consume the retry ceiling.
-        let counted: u32 = store
-            .conn
-            .query_row(
-                "SELECT COUNT(*) FROM review_attempts
-                 WHERE run_id = 'run-review' AND reviewed_head_sha = 'head-1'
-                   AND status IN ('failed', 'blocked')",
-                [],
-                |row| row.get(0),
-            )
+        // Interrupted attempts consume the retry ceiling as well, preventing
+        // repeated worker crashes from reclaiming the same head indefinitely.
+        let counted = store
+            .count_review_attempt_failures_for_head("run-review", "head-1")
             .unwrap();
-        assert_eq!(counted, 2);
+        assert_eq!(counted, 3);
     }
 
     #[test]

@@ -204,7 +204,7 @@ pub fn render_formal_review_body_with_records(
     format!(
         "{marker}\n## Symphony A4 formal review\n\nIssue `#{issue_number}`.\n\nSpec artifact `{}` (version `{}`).\n\nFactory run `{run_id}` reviewed head `{}` against base `{}`.\n\n{}\n\n{}{}\n",
         artifact.spec_artifact_id,
-        approved_spec_version.unwrap_or(artifact.schema_version),
+        approved_spec_version.map_or_else(|| "unknown".to_string(), |version| version.to_string()),
         artifact.reviewed_head_sha,
         artifact.base_sha,
         artifact.manifest.spec_conformance_summary.trim(),

@@ -332,7 +332,13 @@ pub async fn check_review(config: &ServiceConfig) -> Vec<DoctorCheckResult> {
 
     let projects_client = ProjectsV2Client::new(client.clone());
     let status_field = match projects_client
-        .resolve_status_field(repo_owner, project_number)
+        .resolve_status_field_for_owner_type(
+            repo_owner,
+            project_number,
+            tracker
+                .github_project_owner_type
+                .unwrap_or(crate::domain::GithubProjectOwnerType::User),
+        )
         .await
     {
         Ok(status_field) => {
@@ -430,7 +436,7 @@ pub async fn check_review(config: &ServiceConfig) -> Vec<DoctorCheckResult> {
                 .and_then(|permissions| permissions.get("push"))
                 .and_then(JsonValue::as_bool)
             {
-                Some(true) => results.push(DoctorCheckResult::warning(
+                Some(true) => results.push(DoctorCheckResult::pass(
                     "GitHub Review Metadata",
                     "GitHub API reports repository push permission; formal review permission is determined by the review endpoint probe",
                 )),
@@ -661,7 +667,13 @@ pub async fn check_github(config: &TrackerConfig) -> Vec<DoctorCheckResult> {
         } else {
             let projects_client = ProjectsV2Client::new(client.clone());
             match projects_client
-                .resolve_status_field(repo_owner, project_number)
+                .resolve_status_field_for_owner_type(
+                    repo_owner,
+                    project_number,
+                    config
+                        .github_project_owner_type
+                        .unwrap_or(crate::domain::GithubProjectOwnerType::User),
+                )
                 .await
             {
                 Ok(status_field) => {
@@ -1898,7 +1910,14 @@ pub async fn check_triage_github(config: &ServiceConfig) -> Vec<DoctorCheckResul
 
     let projects_client = ProjectsV2Client::new(client);
     match projects_client
-        .resolve_status_field(repo_owner, project_number)
+        .resolve_status_field_for_owner_type(
+            repo_owner,
+            project_number,
+            config
+                .tracker
+                .github_project_owner_type
+                .unwrap_or(crate::domain::GithubProjectOwnerType::User),
+        )
         .await
     {
         Ok(status_field) => {

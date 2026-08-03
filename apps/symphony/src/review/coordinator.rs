@@ -185,12 +185,6 @@ where
         if !pull.state.eq_ignore_ascii_case("open") {
             return Ok(ProcessOutcome::Waiting);
         }
-        let failed_attempts = self
-            .store
-            .count_review_attempt_failures_for_head(&candidate.run_id, &pull.head.sha)?;
-        if failed_attempts >= service.review.max_attempts.max(1) {
-            return Ok(ProcessOutcome::Waiting);
-        }
         if self
             .store
             .review_artifact_exists_for_head(&candidate.run_id, &pull.head.sha)?
@@ -245,6 +239,12 @@ where
             }
             // An artifact with an intent is already complete or pending durable
             // publication. Reconciliation owns pending intents.
+            return Ok(ProcessOutcome::Waiting);
+        }
+        let failed_attempts = self
+            .store
+            .count_review_attempt_failures_for_head(&candidate.run_id, &pull.head.sha)?;
+        if failed_attempts >= service.review.max_attempts.max(1) {
             return Ok(ProcessOutcome::Waiting);
         }
         if pull.head.sha != candidate.head_sha {
@@ -567,38 +567,19 @@ where
             }),
         )?;
         let kind = service.review.mode.as_str();
-        let route_state = if artifact
-            .manifest
-            .findings
-            .iter()
-            .any(|finding| finding.severity <= service.review.blocking_severity)
-        {
-            service
-                .review
-                .changes_requested_route
-                .as_ref()
-                .map(|route| route.state.trim().to_string())
-        } else {
-            service
-                .review
-                .completion_route
-                .as_ref()
-                .map(|route| route.state.trim().to_string())
-        };
+        let route_state = review_route_state(&artifact, service);
         let intent = self.store.create_review_publication_intent(
             &candidate.run_id,
             &artifact.artifact_id,
             kind,
-            &serde_json::json!({
-                "issue_number": issue_number,
-                "repository": candidate.repository,
-                "pr_number": candidate.pr_number,
-                "reviewed_head_sha": pull.head.sha,
-                "base_sha": pull.base.sha,
-                "trigger_state": service.review.trigger_state,
-                "route_state": route_state,
-                "approved_spec_version": spec.version,
-            }),
+            &review_publication_effects(
+                issue_number,
+                candidate,
+                &pull,
+                service,
+                route_state,
+                spec.version,
+            ),
         )?;
         let publisher = ReviewPublisher::with_owner(
             self.comments.clone(),
@@ -725,7 +706,19 @@ where
                         intent.intent_id
                     ))
                 })?;
-            self.apply_automatic_route(service, &pending, issue_number).await?;
+            if let Err(error) = self
+                .apply_automatic_route(service, &pending, issue_number)
+                .await
+            {
+                let classified = classify_review_publication_error(&error);
+                self.record_publication_failure(
+                    &pending,
+                    classified,
+                    service.review.max_attempts,
+                    &self.config.owner_instance,
+                )?;
+                return Ok(ProcessOutcome::Waiting);
+            }
             let routed = self
                 .store
                 .get_review_publication_intent(&intent.intent_id)?
@@ -927,6 +920,55 @@ where
                 self.record_reconciliation_blocked(&intent, &error)?;
                 continue;
             };
+
+            if intent
+                .desired_effects
+                .get("repository")
+                .and_then(serde_json::Value::as_str)
+                .is_none_or(|repository| repository.trim().is_empty())
+            {
+                let error = FactoryError::new(
+                    "review_publication_missing_repository",
+                    "review_publisher",
+                    format!("review intent {} is missing repository", intent.intent_id),
+                    false,
+                    None,
+                );
+                self.record_publication_failure(
+                    &intent,
+                    error.clone(),
+                    service.review.max_attempts,
+                    &self.config.owner_instance,
+                )?;
+                self.record_reconciliation_blocked(&intent, &error)?;
+                continue;
+            }
+            if intent.kind == "automatic"
+                && intent
+                    .desired_effects
+                    .get("reviewed_head_sha")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none_or(|head| head.trim().is_empty())
+            {
+                let error = FactoryError::new(
+                    "review_publication_missing_reviewed_head_sha",
+                    "review_publisher",
+                    format!(
+                        "review intent {} is missing reviewed_head_sha",
+                        intent.intent_id
+                    ),
+                    false,
+                    None,
+                );
+                self.record_publication_failure(
+                    &intent,
+                    error.clone(),
+                    service.review.max_attempts,
+                    &self.config.owner_instance,
+                )?;
+                self.record_reconciliation_blocked(&intent, &error)?;
+                continue;
+            }
 
             let pr_number = if intent.kind == "automatic" {
                 let Some(pr_number) = review_publication_pr_number(&intent.desired_effects) else {
@@ -1464,26 +1506,12 @@ fn review_attempt_retry_exhausted(failed_attempts: u32, max_attempts: u32) -> bo
 }
 
 fn is_review_cycle_reopened_error(error: &SymphonyError) -> bool {
-    error
-        .to_string()
-        .to_ascii_lowercase()
-        .contains("review cycle reopened")
+    matches!(error, SymphonyError::ReviewCycleReopened(_))
 }
 
 fn classify_review_publication_error(error: &SymphonyError) -> FactoryError {
     let message = error.to_string();
-    let lower = message.to_ascii_lowercase();
-    let conflict = [
-        "marker",
-        "foreign",
-        "owned by another",
-        "head does not match",
-        "drift",
-        "conflict",
-    ]
-    .iter()
-    .any(|needle| lower.contains(needle));
-    if conflict {
+    if matches!(error, SymphonyError::ReviewPublicationConflict(_)) {
         FactoryError::new(
             "review_publication_conflict",
             "review_publisher",

@@ -212,8 +212,18 @@ where
             .and_then(|version| u32::try_from(version).ok());
         let finding_records =
             store.list_review_finding_records_for_artifact(&artifact.artifact_id)?;
+        let issue_number = intent
+            .desired_effects
+            .get("issue_number")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| {
+                SymphonyError::TriageError(format!(
+                    "formal review intent {} is missing issue_number",
+                    intent.intent_id
+                ))
+            })?;
         let body = render_formal_review_body_with_records(
-            pull_request_number,
+            issue_number,
             &intent.intent_id,
             &intent.run_id,
             artifact,
@@ -235,7 +245,7 @@ where
                 .as_deref()
                 .expect("bound publisher login");
             if !durable_publisher_login.eq_ignore_ascii_case(&publisher_login) {
-                return Err(SymphonyError::TriageError(format!(
+                return Err(SymphonyError::ReviewPublicationConflict(format!(
                     "formal review publisher identity conflict: durable login {durable_publisher_login} does not match authenticated login {publisher_login}"
                 )));
             }
@@ -260,18 +270,18 @@ where
                     .map(|user| user.login.as_str())
                     .unwrap_or_default();
                 if !author.eq_ignore_ascii_case(&publisher_login) {
-                    return Err(SymphonyError::TriageError(format!(
+                    return Err(SymphonyError::ReviewPublicationConflict(format!(
                         "formal review marker {marker} is owned by another GitHub login {author}"
                     )));
                 }
-                if candidate.commit_id != artifact.reviewed_head_sha {
-                    return Err(SymphonyError::TriageError(format!(
+                if candidate.commit_id.as_deref() != Some(artifact.reviewed_head_sha.as_str()) {
+                    return Err(SymphonyError::ReviewPublicationConflict(format!(
                         "formal review marker {marker} conflict: head {} does not match expected {}",
-                        candidate.commit_id, artifact.reviewed_head_sha
+                        candidate.commit_id.as_deref().unwrap_or("unknown"), artifact.reviewed_head_sha
                     )));
                 }
                 if owned.is_some() {
-                    return Err(SymphonyError::TriageError(format!(
+                    return Err(SymphonyError::ReviewPublicationConflict(format!(
                         "multiple formal reviews found for marker {marker}"
                     )));
                 }
@@ -284,7 +294,7 @@ where
                     .pull_request_head_sha(pull_request_number)
                     .await?;
                 if live_head != artifact.reviewed_head_sha {
-                    return Err(SymphonyError::TriageError(format!(
+                    return Err(SymphonyError::ReviewCycleReopened(format!(
                         "review cycle reopened before formal review creation: live head {} does not match expected {}",
                         live_head, artifact.reviewed_head_sha
                     )));
@@ -304,7 +314,7 @@ where
                             review_port.pull_request_head_sha(pull_request_number).await;
                         if let Ok(live_head) = live_head {
                             if live_head != artifact.reviewed_head_sha {
-                                return Err(SymphonyError::TriageError(format!(
+                                return Err(SymphonyError::ReviewCycleReopened(format!(
                                     "review cycle reopened during formal review creation: live head {} does not match expected {}",
                                     live_head, artifact.reviewed_head_sha
                                 )));
@@ -322,7 +332,7 @@ where
                 .pull_request_head_sha(pull_request_number)
                 .await?;
             if live_head != artifact.reviewed_head_sha {
-                return Err(SymphonyError::TriageError(format!(
+                return Err(SymphonyError::ReviewCycleReopened(format!(
                     "review cycle reopened while accepting formal review identity: live head {} does not match expected {}",
                     live_head, artifact.reviewed_head_sha
                 )));
@@ -805,7 +815,7 @@ mod tests {
                     login: self.login.clone(),
                 }),
                 body: Some(body.to_string()),
-                commit_id: commit_id.to_string(),
+                commit_id: Some(commit_id.to_string()),
                 state: "COMMENTED".to_string(),
                 html_url: Some("https://github.test/reviews/900".to_string()),
                 submitted_at: None,
@@ -1515,7 +1525,7 @@ mod tests {
                     login: "symphony-bot".to_string(),
                 }),
                 body: Some(marker),
-                commit_id: "stale-head".to_string(),
+                commit_id: Some("stale-head".to_string()),
                 state: "COMMENTED".to_string(),
                 html_url: Some("https://github.test/reviews/901".to_string()),
                 submitted_at: None,
@@ -1556,7 +1566,7 @@ mod tests {
                     login: "symphony-bot".to_string(),
                 }),
                 body: Some(marker),
-                commit_id: "head".to_string(),
+                commit_id: Some("head".to_string()),
                 state: "COMMENTED".to_string(),
                 html_url: Some("https://github.test/reviews/902".to_string()),
                 submitted_at: None,
@@ -1631,7 +1641,7 @@ mod tests {
                     login: "human".to_string(),
                 }),
                 body: Some(marker),
-                commit_id: "head".to_string(),
+                commit_id: Some("head".to_string()),
                 state: "COMMENTED".to_string(),
                 html_url: Some("https://github.test/reviews/901".to_string()),
                 submitted_at: None,

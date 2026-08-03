@@ -1280,9 +1280,7 @@ impl FactoryRunQuery for SharedFactoryStore {
                 )
                 .map_err(|err| err.to_string());
         }
-        Err(format!(
-            "implementation publication intent {intent_id} not found"
-        ))
+        Err(format!("publication intent {intent_id} not found"))
     }
 
     fn get_artifact(
