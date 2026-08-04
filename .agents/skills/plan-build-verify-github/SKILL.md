@@ -32,7 +32,7 @@ Before any mode, read `references/github-conventions.md` completely. It defines 
 | Build   | Approved spec issue number, or explicit user override      | Implemented tasks, commits, PR, review results, Build completion report comment                                                                                            | `status:approved` → `status:implemented`      |
 | Verify  | Implemented spec issue plus completed work or Build report | Acceptance evidence comment, checked acceptance criteria, signoff recommendation                                                                                           | `status:implemented` → `status:verified`      |
 | Triage  | Repo issue backlog                                         | Grooming report and applied label, decomposition, and closure actions                                                                                                      | corrective, per issue                         |
-| Migrate | Existing `docs/specs/*.md` bundle                          | Spec issues, archived local files, rewritten specs index                                                                                                                   | derived from each file's frontmatter `status` |
+| Migrate | Existing `docs/specs/*.md` bundle                          | Assessment report, spec issues, archived local files, rewritten cross-links, updated specs index                                                                           | derived from each file's declared status      |
 
 Build must not start from a `status:draft` issue unless the user explicitly overrides the approval gate. Verify must not claim signoff without evidence.
 
@@ -99,6 +99,8 @@ Examples that start with Migrate:
 - `/plan-build-verify-github migrate`
 - `/plan-build-verify-github "Move our docs/specs to GitHub Issues."`
 
+Migration is assess-first. Run `scripts/migrate_specs.sh --assess`, show the user the per-file status, source, and confidence, and settle every unclassified or conflicting file with them before any write.
+
 For tiny, clearly bounded edits such as a copy change or single config tweak, do not force the full Plan workflow and do not open an issue. State the assumption and ask whether the user wants the full Plan → Build → Verify process.
 
 If the mode remains ambiguous after applying these rules, ask one focused question that resolves it.
@@ -131,14 +133,18 @@ Scripts for user-acceptance evidence live under `scripts/user-acceptance/`.
 
 ## Helper scripts
 
-- `scripts/ensure_labels.sh`: idempotently creates this skill's label taxonomy in the target repo.
-- `scripts/migrate_specs.sh`: bulk-converts `docs/specs/*.md` into spec issues, archives the source files, and rewrites the specs index. Supports `--dry-run`.
+- `scripts/ensure_labels.sh`: idempotently creates this skill's label taxonomy in the target repo. `--dry-run` reports which labels exist and which would be created.
+- `scripts/migrate_specs.sh`: bulk-converts `docs/specs/*.md` into spec issues, archives the source files, rewrites cross-links, and updates the specs index. Run `--assess` first, then `--dry-run`, then apply.
+- `scripts/rewrite_spec_links.py`: repoints Markdown links after files move into the archive. Called by the migration script; requires `python3`.
+
+Resolve script paths against the skill directory the runtime actually loaded. If a configured skill path does not exist, stop and ask which installation to use. Never copy skill files into the project working tree to make a path resolve.
 
 ## Requirements
 
 - `gh` CLI, authenticated with issue write access for the target repo.
 - `gh sub-issue` extension (`yahsan2/gh-sub-issue`) for decomposed specs. If absent, install with `gh extension install yahsan2/gh-sub-issue` or fall back to the task-list mechanism described in `references/github-conventions.md`.
 - A git remote pointing at the GitHub repository that owns the roadmap.
+- `python3`, for link rewriting during migration only.
 
 Run the preflight in `references/github-conventions.md` before the first `gh` write of a session. If `gh` is unavailable or unauthenticated, stop and tell the user. Do not fall back to writing spec files locally.
 

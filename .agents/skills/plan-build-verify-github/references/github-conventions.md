@@ -243,7 +243,23 @@ This skill coexists with the `okf` skill. When the repo has an OKF bundle at `./
 - **`docs/adrs/` is unaffected.** Durable architecture decisions remain ADR files in the repo. A spec issue that depends on a decision links to the ADR path; the ADR links back to the issue URL.
 - **Other OKF sections are unaffected.** `architecture/`, `guides/`, `reference/`, `runbooks/`, and `domains/` keep working as before.
 - OKF validation still passes because `docs/specs/index.md` and `docs/specs/log.md` are reserved files that need no frontmatter, and no non-reserved Markdown remains in `docs/specs/` outside `archive/`.
-- Archived spec files under `docs/specs/archive/` keep their OKF frontmatter so `validate_okf.py` continues to pass. Add `status: Migrated` and `github_issue: <N>` keys to each.
+- Archived spec files under `docs/specs/archive/` keep their OKF frontmatter so `validate_okf.py` continues to pass.
+
+### Archived spec frontmatter
+
+Every archived file carries the same normalized shape, so the frontmatter and the pointer line in the body always agree:
+
+| Key             | Value                                                                     |
+| --------------- | ------------------------------------------------------------------------- |
+| `type`          | The original `type`, or `Spec` when the source file had none.             |
+| `title`         | The original `title`, first `# ` heading, or a title derived from the name. |
+| `status`        | `Migrated` when the spec became an issue. `Completed` when archived as finished work. |
+| `source_status` | The status the file declared before the migration.                        |
+| `github_issue`  | The issue number. Present only when `status: Migrated`.                    |
+| `migrated`      | `true` for issue-backed specs, `false` for completed ones.                 |
+| `archived_at`   | UTC timestamp of the archive operation.                                   |
+
+The pre-migration status is preserved in `source_status` rather than left in `status`. Two keys with two different answers to "is this done" is worse than either answer alone.
 
 Use this content for `docs/specs/index.md`:
 
@@ -280,6 +296,8 @@ Use the `plan-build-verify-github` skill. It publishes specs as issues, runs Bui
 
 Pre-migration spec files are preserved under [`archive/`](./archive/) with links to their issues. They are historical and are not maintained.
 ````
+
+The migration script appends the previous index content below this pointer under a "Roadmap context carried over from the previous index" heading rather than discarding it. Reconcile that section against the GitHub roadmap and delete it once the active and deferred items exist as issues. Pass `--replace-index` only when the previous index holds nothing worth keeping.
 
 Add this to `AGENTS.md` during migration:
 

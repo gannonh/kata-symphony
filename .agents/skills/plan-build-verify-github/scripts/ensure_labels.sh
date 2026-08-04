@@ -5,6 +5,10 @@
 # updates color and description on existing ones. Never deletes labels and never
 # touches labels outside the kind:, status:, phase:, and needs: namespaces.
 #
+# --dry-run queries the repo's current labels and reports, per label, whether it
+# already exists or would be created. Writing labels is a side effect worth
+# seeing before it happens.
+#
 # Usage:
 #   ensure_labels.sh [--repo owner/name] [--dry-run]
 
@@ -25,7 +29,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h|--help)
-      sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -69,8 +73,20 @@ LABELS=(
 echo "Repo: $REPO"
 [ "$DRY_RUN" -eq 1 ] && echo "Mode: dry run (no changes)"
 
+EXISTING=""
+EXISTING_KNOWN=0
+if [ "$DRY_RUN" -eq 1 ]; then
+  if EXISTING="$(gh label list --limit 500 --json name -q '.[].name' "${REPO_ARGS[@]+"${REPO_ARGS[@]}"}" 2>/dev/null)"; then
+    EXISTING_KNOWN=1
+  else
+    echo "  warning: could not read existing labels from $REPO. Reporting all as unknown." >&2
+  fi
+fi
+
 created=0
 failed=0
+would_create=0
+already=0
 
 for entry in "${LABELS[@]}"; do
   name="${entry%%|*}"
@@ -79,7 +95,15 @@ for entry in "${LABELS[@]}"; do
   desc="${rest#*|}"
 
   if [ "$DRY_RUN" -eq 1 ]; then
-    printf '  would ensure  %-28s #%s\n' "$name" "$color"
+    if [ "$EXISTING_KNOWN" -eq 0 ]; then
+      printf '  unknown       %-28s #%s\n' "$name" "$color"
+    elif printf '%s\n' "$EXISTING" | grep -qxF "$name"; then
+      printf '  exists        %-28s #%s  (color and description updated in place)\n' "$name" "$color"
+      already=$((already + 1))
+    else
+      printf '  would create  %-28s #%s\n' "$name" "$color"
+      would_create=$((would_create + 1))
+    fi
     continue
   fi
 
@@ -93,7 +117,11 @@ for entry in "${LABELS[@]}"; do
 done
 
 if [ "$DRY_RUN" -eq 1 ]; then
-  echo "Dry run complete. ${#LABELS[@]} labels would be ensured."
+  if [ "$EXISTING_KNOWN" -eq 1 ]; then
+    echo "Dry run: $would_create label(s) would be created, $already already exist."
+  else
+    echo "Dry run: ${#LABELS[@]} label(s) would be ensured. Current state unknown."
+  fi
   exit 0
 fi
 
