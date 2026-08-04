@@ -1,11 +1,16 @@
 ---
 type: Verify Report
 title: A2 Spec Stage UAT Verify Report
-status: Accepted
 description: Live GitHub UAT and post-UAT remediation results for the A2 spec stage against acceptance criteria 15–16 and criterion 11 metrics/token measures.
 tags: [symphony, spec-stage, a2, verify, uat]
 timestamp: 2026-07-26T21:18:00Z
+status: Completed
+source_status: completed
+migrated: false
+archived_at: 2026-08-04T19:34:07Z
 ---
+
+> **Completed before migration** (source status: completed). Retained as history. Not tracked in GitHub Issues.
 
 # A2 Spec Stage — UAT Verify Report
 

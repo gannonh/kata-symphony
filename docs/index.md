@@ -8,12 +8,12 @@ Open Knowledge Format (OKF) bundle for the Kata monorepo: Kata CLI (`apps/cli`) 
 
 # Roadmap
 
-* [Symphony Software Factory Platform PRD](specs/symphony-software-factory-platform-prd.md) - product direction and vertical-slice roadmap (Active; A1+A2+A3 completed; A4 PR1 active)
+* [Symphony Software Factory Platform PRD](specs/archive/symphony-software-factory-platform-prd.md) - product direction and vertical-slice roadmap (Active; A1+A2+A3 completed; A4 PR1 active)
 * [Specs roadmap](specs/) - active, planned, and completed work (links into historical Superpowers plans/specs)
-* [A3 Implementation Stage](specs/2026-07-26-a3-implementation-stage-design.md) - Complete; PR1+PR2 shipped ([#606](https://github.com/gannonh/kata-symphony/pull/606), [#607](https://github.com/gannonh/kata-symphony/pull/607)); direct draft-PR, Agent Review preview, and Ratatui TUI UAT verified on Project #16; restart/Docker residuals remain
-* [A4 Agent Review Stage](specs/2026-07-30-a4-agent-review-stage-design.md) - Active; PR1 preview and typed TUI state are implemented; PR2 formal publication, active-lease fencing, restart recovery, and live routing are verified with credential-isolation and Docker residuals
-* [A1 GitHub Issue Triage](specs/2026-07-16-a1-github-issue-triage-design.md) - completed GitHub path (PR1–PR3 shipped: [#587](https://github.com/gannonh/kata-symphony/pull/587), [#598](https://github.com/gannonh/kata-symphony/pull/598), [#599](https://github.com/gannonh/kata-symphony/pull/599)); Linear triage deferred
-* [A2 Spec Stage](specs/2026-07-18-a2-spec-stage-design.md) - completed; live UAT accepted ([verify](specs/2026-07-26-a2-uat-verify-report.md))
+* [A3 Implementation Stage](specs/archive/2026-07-26-a3-implementation-stage-design.md) - Complete; PR1+PR2 shipped ([#606](https://github.com/gannonh/kata-symphony/pull/606), [#607](https://github.com/gannonh/kata-symphony/pull/607)); direct draft-PR, Agent Review preview, and Ratatui TUI UAT verified on Project #16; restart/Docker residuals remain
+* [A4 Agent Review Stage](specs/archive/2026-07-30-a4-agent-review-stage-design.md) - Active; PR1 preview and typed TUI state are implemented; PR2 formal publication, active-lease fencing, restart recovery, and live routing are verified with credential-isolation and Docker residuals
+* [A1 GitHub Issue Triage](specs/archive/2026-07-16-a1-github-issue-triage-design.md) - completed GitHub path (PR1–PR3 shipped: [#587](https://github.com/gannonh/kata-symphony/pull/587), [#598](https://github.com/gannonh/kata-symphony/pull/598), [#599](https://github.com/gannonh/kata-symphony/pull/599)); Linear triage deferred
+* [A2 Spec Stage](specs/archive/2026-07-18-a2-spec-stage-design.md) - completed; live UAT accepted ([verify](specs/archive/2026-07-26-a2-uat-verify-report.md))
 * [ADRs](adrs/) - architecture decision records ([ADR-0001](adrs/0001-a1-triage-durability-and-isolation.md), [ADR-0002](adrs/0002-triage-process-recovery-identity.md), [ADR-0003](adrs/0003-a2-spec-stage-artifacts-and-gates.md), [ADR-0004](adrs/0004-a3-implementation-durability-and-bundles.md), [ADR-0005](adrs/0005-a4-review-publication-fencing.md))
 
 # Guides

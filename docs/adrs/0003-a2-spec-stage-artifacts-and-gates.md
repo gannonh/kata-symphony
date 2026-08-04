@@ -15,7 +15,7 @@ Accepted with the A2 implementation.
 
 ## Context
 
-A2 turns a spec-routed GitHub issue into reviewed product and technical behavior that a human can revise or approve. It must coexist with A1 on one factory run, preserve each model turn across restarts, prevent reviewer context leakage, and hand implementation an exact approved artifact. See [A2 Spec Stage](/specs/2026-07-18-a2-spec-stage-design.md).
+A2 turns a spec-routed GitHub issue into reviewed product and technical behavior that a human can revise or approve. It must coexist with A1 on one factory run, preserve each model turn across restarts, prevent reviewer context leakage, and hand implementation an exact approved artifact. See [A2 Spec Stage](/specs/archive/2026-07-18-a2-spec-stage-design.md).
 
 ## Decision
 
@@ -36,8 +36,8 @@ A2 turns a spec-routed GitHub issue into reviewed product and technical behavior
 
 ## Links
 
-- Spec: [A2 Spec Stage](/specs/2026-07-18-a2-spec-stage-design.md)
-- Verify: [A2 UAT Verify Report](/specs/2026-07-26-a2-uat-verify-report.md)
-- PRD: [Symphony Software Factory Platform](/specs/symphony-software-factory-platform-prd.md)
+- Spec: [A2 Spec Stage](/specs/archive/2026-07-18-a2-spec-stage-design.md)
+- Verify: [A2 UAT Verify Report](/specs/archive/2026-07-26-a2-uat-verify-report.md)
+- PRD: [Symphony Software Factory Platform](/specs/archive/symphony-software-factory-platform-prd.md)
 - Foundation: [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md)
 - Implementation: `apps/symphony/src/spec/`, `apps/symphony/src/triage/migrations/003_spec_stage.sql`

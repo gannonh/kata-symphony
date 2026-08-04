@@ -1,11 +1,16 @@
 ---
 type: Verify Report
 title: A1 PR3 Recovery and Agreement Measurement Re-verify Report
-status: Accepted
 description: Maintainer closeout for A1 PR3 after remediation and merge of PR #599; historical rejected Verify preserved.
 tags: [symphony, triage, a1, pr3, verify, uat, github, security]
 timestamp: 2026-07-27T16:31:26Z
+status: Completed
+source_status: completed
+migrated: false
+archived_at: 2026-08-04T19:34:07Z
 ---
+
+> **Completed before migration** (source status: completed). Retained as history. Not tracked in GitHub Issues.
 
 # A1 PR3 Recovery and Agreement Measurement — Re-verify Report
 

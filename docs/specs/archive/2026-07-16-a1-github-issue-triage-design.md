@@ -1,17 +1,22 @@
 ---
 type: Spec
 title: A1 GitHub Issue Triage
-status: Completed
 description: Design for a durable, repository-backed GitHub triage stage that routes issues into Symphony's software factory.
 tags: [symphony, software-factory, triage, github]
 timestamp: 2026-07-27T16:31:26Z
+status: Completed
+source_status: completed
+migrated: false
+archived_at: 2026-08-04T19:34:07Z
 ---
+
+> **Completed before migration** (source status: completed). Retained as history. Not tracked in GitHub Issues.
 
 # A1 GitHub Issue Triage
 
 ## Status
 
-Completed — GitHub path shipped: **PR1** [#587](https://github.com/gannonh/kata-symphony/pull/587) (`80b3c215`), **PR2** [#598](https://github.com/gannonh/kata-symphony/pull/598) (`6a454fe9`), **PR3** [#599](https://github.com/gannonh/kata-symphony/pull/599) (`c52d23dc`) ([PR2 build](/specs/2026-07-24-a1-pr2-build-report.md), [PR2 verify](/specs/2026-07-24-a1-pr2-verify-report.md), [PR3 build](/specs/2026-07-25-a1-pr3-build-report.md), [PR3 re-verify](/specs/2026-07-25-a1-pr3-reverify-report.md)). Linear triage remains deferred.
+Completed — GitHub path shipped: **PR1** [#587](https://github.com/gannonh/kata-symphony/pull/587) (`80b3c215`), **PR2** [#598](https://github.com/gannonh/kata-symphony/pull/598) (`6a454fe9`), **PR3** [#599](https://github.com/gannonh/kata-symphony/pull/599) (`c52d23dc`) ([PR2 build](/specs/archive/2026-07-24-a1-pr2-build-report.md), [PR2 verify](/specs/archive/2026-07-24-a1-pr2-verify-report.md), [PR3 build](/specs/archive/2026-07-25-a1-pr3-build-report.md), [PR3 re-verify](/specs/archive/2026-07-25-a1-pr3-reverify-report.md)). Linear triage remains deferred.
 
 Related decisions: [ADR-0001 A1 triage durability and isolation](/adrs/0001-a1-triage-durability-and-isolation.md) and [ADR-0002 triage process recovery identity](/adrs/0002-triage-process-recovery-identity.md).
 
@@ -21,13 +26,13 @@ Deliver the first software factory stage as a complete user-facing workflow:
 
 `GitHub issue labeled needs-triage → repository-backed triage → durable decision → visible route → optional implementation handoff`
 
-A1 introduces the minimum durable factory-run model required by the [Symphony Software Factory Platform PRD](/specs/symphony-software-factory-platform-prd.md). It gives maintainers a reviewable triage decision, applies the configured route through a deterministic GitHub publisher, and makes implementation-ready issues eligible for Symphony's existing dispatcher.
+A1 introduces the minimum durable factory-run model required by the [Symphony Software Factory Platform PRD](/specs/archive/symphony-software-factory-platform-prd.md). It gives maintainers a reviewable triage decision, applies the configured route through a deterministic GitHub publisher, and makes implementation-ready issues eligible for Symphony's existing dispatcher.
 
 A1 ships through independently usable preview, automatic-routing, and recovery increments. Every pull request includes a trigger, tracker-visible result, durable evidence, focused tests, documentation, and a demo path.
 
 ## Source of truth
 
-- [Symphony Software Factory Platform PRD, A1](/specs/symphony-software-factory-platform-prd.md)
+- [Symphony Software Factory Platform PRD, A1](/specs/archive/symphony-software-factory-platform-prd.md)
 - [Triage label vocabulary](/agents/triage-labels.md)
 - [Issue tracker conventions](/agents/issue-tracker.md)
 - [Warp automatic triage article](https://www.warp.dev/blog/how-to-build-a-cloud-software-factory-the-automatic-triage-skill)

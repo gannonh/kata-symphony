@@ -1,11 +1,16 @@
 ---
 type: Build Report
 title: A3 PR1 Implementation and Validation Preview Build Report
-status: Implemented
 description: Build completion report for A3 PR1 — eligibility, credential-isolated local runner, validation/repair, durable bundles, preview publication, HTTP/metrics/docs.
 tags: [symphony, implementation-stage, a3, pr1, build]
 timestamp: 2026-07-29T16:05:00Z
+status: Completed
+source_status: completed
+migrated: false
+archived_at: 2026-08-04T19:34:07Z
 ---
+
+> **Completed before migration** (source status: completed). Retained as history. Not tracked in GitHub Issues.
 
 # A3 PR1 Implementation and Validation Preview — Build Report
 

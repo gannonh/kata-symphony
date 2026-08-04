@@ -1,11 +1,16 @@
 ---
 type: Spec
 title: A3 Implementation Stage
-status: Complete
 description: Design for turning a pinned A2 approved specification into a validated change bundle and linked draft GitHub pull request.
 tags: [symphony, software-factory, implementation-stage, github, docker]
 timestamp: 2026-07-27T16:30:13Z
+status: Completed
+source_status: completed
+migrated: false
+archived_at: 2026-08-04T19:34:07Z
 ---
+
+> **Completed before migration** (source status: completed). Retained as history. Not tracked in GitHub Issues.
 
 # A3 Implementation Stage
 
@@ -25,11 +30,11 @@ A3 replaces prompt convention with a typed stage only for spec-driven work. Dire
 
 ## Source of truth
 
-- [Symphony Software Factory Platform PRD, A3](/specs/symphony-software-factory-platform-prd.md)
-- [A2 Spec Stage](/specs/2026-07-18-a2-spec-stage-design.md)
+- [Symphony Software Factory Platform PRD, A3](/specs/archive/symphony-software-factory-platform-prd.md)
+- [A2 Spec Stage](/specs/archive/2026-07-18-a2-spec-stage-design.md)
 - [ADR-0003 A2 spec-stage artifacts and human gates](/adrs/0003-a2-spec-stage-artifacts-and-gates.md)
-- [A2 UAT Verify Report](/specs/2026-07-26-a2-uat-verify-report.md)
-- [A1 GitHub Issue Triage](/specs/2026-07-16-a1-github-issue-triage-design.md)
+- [A2 UAT Verify Report](/specs/archive/2026-07-26-a2-uat-verify-report.md)
+- [A1 GitHub Issue Triage](/specs/archive/2026-07-16-a1-github-issue-triage-design.md)
 - [ADR-0001 A1 triage durability and isolation](/adrs/0001-a1-triage-durability-and-isolation.md)
 - [ADR-0002 Triage process recovery identity](/adrs/0002-triage-process-recovery-identity.md)
 - [Warp spec-driven development article](https://www.warp.dev/blog/how-to-build-a-cloud-software-factory-add-spec-driven-development-skills)
@@ -90,7 +95,7 @@ Symphony currently:
 - has no durable storage contract for code-sized artifacts;
 - does not join an implementation commit or PR to a pinned approved specification.
 
-A2 is implemented and live UAT accepted in commit `8129983` ([verify report](/specs/2026-07-26-a2-uat-verify-report.md); [ADR-0003](/adrs/0003-a2-spec-stage-artifacts-and-gates.md)). A3 consumes its landed `spec_run_state.approved_version`, `approved_artifact_id`, terminal `spec_publication_intents`, stage-scoped attempts, and immutable `spec_artifacts` rather than introducing a second approval mechanism.
+A2 is implemented and live UAT accepted in commit `8129983` ([verify report](/specs/archive/2026-07-26-a2-uat-verify-report.md); [ADR-0003](/adrs/0003-a2-spec-stage-artifacts-and-gates.md)). A3 consumes its landed `spec_run_state.approved_version`, `approved_artifact_id`, terminal `spec_publication_intents`, stage-scoped attempts, and immutable `spec_artifacts` rather than introducing a second approval mechanism.
 
 A3 must add:
 

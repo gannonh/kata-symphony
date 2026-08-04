@@ -15,7 +15,7 @@ Accepted (2026-07-18) with A1 PR1 preview ([#587](https://github.com/gannonh/kat
 
 ## Context
 
-A1 introduces a factory stage before implementation. Maintainers need restart-safe triage decisions, visible preview comments, and a runner that cannot mutate the operator's GitHub credentials or host home while still authenticating Pi/Codex. The full design lives in [A1 GitHub Issue Triage](/specs/2026-07-16-a1-github-issue-triage-design.md); this ADR records the durable constraints shipped in preview.
+A1 introduces a factory stage before implementation. Maintainers need restart-safe triage decisions, visible preview comments, and a runner that cannot mutate the operator's GitHub credentials or host home while still authenticating Pi/Codex. The full design lives in [A1 GitHub Issue Triage](/specs/archive/2026-07-16-a1-github-issue-triage-design.md); this ADR records the durable constraints shipped in preview.
 
 ## Decision
 
@@ -42,7 +42,7 @@ A1 introduces a factory stage before implementation. Maintainers need restart-sa
 
 ## Links
 
-- Spec: [A1 GitHub Issue Triage](/specs/2026-07-16-a1-github-issue-triage-design.md)
-- PRD: [Symphony Software Factory Platform](/specs/symphony-software-factory-platform-prd.md)
+- Spec: [A1 GitHub Issue Triage](/specs/archive/2026-07-16-a1-github-issue-triage-design.md)
+- PRD: [Symphony Software Factory Platform](/specs/archive/symphony-software-factory-platform-prd.md)
 - Labels: [Triage labels](/agents/triage-labels.md)
 - Implementation: `apps/symphony/src/triage/`, `apps/symphony/src/doctor.rs`, `apps/symphony/docs/WORKFLOW-REFERENCE.md`

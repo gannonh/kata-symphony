@@ -1,11 +1,16 @@
 ---
 type: Verify Report
 title: A1 PR3 Recovery and Agreement Measurement Verify Report
-status: Rejected
 description: Live GitHub Verify results for A1 PR3 restart recovery, retry evidence, route correction, and agreement metrics.
 tags: [symphony, triage, a1, pr3, verify, uat, github]
 timestamp: 2026-07-25T17:14:00Z
+status: Completed
+source_status: completed
+migrated: false
+archived_at: 2026-08-04T19:34:07Z
 ---
+
+> **Completed before migration** (source status: completed). Retained as history. Not tracked in GitHub Issues.
 
 # A1 PR3 Recovery and Agreement Measurement — Verify Report
 

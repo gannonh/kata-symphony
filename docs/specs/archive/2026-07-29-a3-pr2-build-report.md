@@ -1,11 +1,16 @@
 ---
 type: Build Report
 title: A3 PR2 Deterministic Draft-PR Publication Build Report
-status: Implemented
 description: Build completion report for A3 PR2 — expected-projection branch push, owned draft PR, Agent Review handoff, HTTP pull_request, progressive publication durability.
 tags: [symphony, implementation-stage, a3, pr2, build]
 timestamp: 2026-07-29T18:00:00Z
+status: Completed
+source_status: completed
+migrated: false
+archived_at: 2026-08-04T19:34:07Z
 ---
+
+> **Completed before migration** (source status: completed). Retained as history. Not tracked in GitHub Issues.
 
 # A3 PR2 Deterministic Draft-PR Publication — Build Report
 

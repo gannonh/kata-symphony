@@ -40,5 +40,5 @@ Formal review publication spans GitHub review creation, durable identity and fin
 
 ## Links
 
-- [A4 Agent Review Stage](../specs/2026-07-30-a4-agent-review-stage-design.md)
-- [A4 PR2 verify report](../specs/2026-08-02-a4-pr2-verify-report.md)
+- [A4 Agent Review Stage](../specs/archive/2026-07-30-a4-agent-review-stage-design.md)
+- [A4 PR2 verify report](../specs/archive/2026-08-02-a4-pr2-verify-report.md)

@@ -1,17 +1,23 @@
 ---
 type: Spec
 title: A4 Agent Review Stage
-status: Active
 description: Design for turning an owned draft pull request into a structured, read-only agent review that emits schema-validated findings and publishes them deterministically.
 tags: [symphony, software-factory, review-stage, github]
 timestamp: 2026-07-30T14:45:39Z
+status: Migrated
+source_status: approved
+github_issue: 615
+migrated: true
+archived_at: 2026-08-04T19:34:07Z
 ---
+
+> **Migrated to #615.** The GitHub Issue is the canonical spec. This file is history and is not maintained.
 
 # A4 Agent Review Stage
 
 ## Status
 
-Active — PR1 review findings preview and typed TUI state are implemented in the current mainline after [#610](https://github.com/gannonh/kata-symphony/pull/610) (`233caf88`). PR2 formal review publication and routing are implemented on `feat/a4-review-publication`; automated gates, active-lease fencing, doctor permission probing, automatic formal-review UAT, and restart-matrix evidence pass. Credential-isolation proof for a live worker and broader Docker evidence remain residuals. See the [PR2 verify report](2026-08-02-a4-pr2-verify-report.md) and [ADR-0005](../adrs/0005-a4-review-publication-fencing.md).
+Active — PR1 review findings preview and typed TUI state are implemented in the current mainline after [#610](https://github.com/gannonh/kata-symphony/pull/610) (`233caf88`). PR2 formal review publication and routing are implemented on `feat/a4-review-publication`; automated gates, active-lease fencing, doctor permission probing, automatic formal-review UAT, and restart-matrix evidence pass. Credential-isolation proof for a live worker and broader Docker evidence remain residuals. See the [PR2 verify report](2026-08-02-a4-pr2-verify-report.md) and [ADR-0005](../../adrs/0005-a4-review-publication-fencing.md).
 
 ## Goal
 
@@ -19,13 +25,13 @@ Deliver the fourth software factory stage as a complete user-facing workflow:
 
 `owned draft PR in Agent Review → read-only review worker → schema-validated findings → deterministic PR review publication → routing decision`
 
-A4 implements the PRD's [A4 slice](/specs/symphony-software-factory-platform-prd.md). It consumes the exact draft-PR artifact A3 published, gives a review worker the diff, PR description, approved specification, and repository context but no write credentials, and publishes findings as a single atomic GitHub review that links the issue, specification, factory run, and reviewed head commit.
+A4 implements the PRD's [A4 slice](/specs/archive/symphony-software-factory-platform-prd.md). It consumes the exact draft-PR artifact A3 published, gives a review worker the diff, PR description, approved specification, and repository context but no write credentials, and publishes findings as a single atomic GitHub review that links the issue, specification, factory run, and reviewed head commit.
 
 A4 is **read-only with respect to the change under review**. It never edits code, never pushes, never approves or merges. It produces findings and one routing decision.
 
 ## Source of truth
 
-- [Symphony Software Factory Platform PRD, A4](/specs/symphony-software-factory-platform-prd.md)
+- [Symphony Software Factory Platform PRD, A4](/specs/archive/symphony-software-factory-platform-prd.md)
 - [A3 Implementation Stage](2026-07-26-a3-implementation-stage-design.md)
 - [ADR-0004 A3 implementation durability and bundles](/adrs/0004-a3-implementation-durability-and-bundles.md)
 - [ADR-0005 A4 durable review publication fencing](/adrs/0005-a4-review-publication-fencing.md)

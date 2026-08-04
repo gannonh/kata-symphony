@@ -71,7 +71,7 @@ before the child's initial `exec`.
 
 ## Links
 
-- Spec: [A1 GitHub Issue Triage](/specs/2026-07-16-a1-github-issue-triage-design.md)
-- Rejected Verify: [A1 PR3 Verify report](/specs/2026-07-25-a1-pr3-verify-report.md)
-- Re-verify and review closeout: [A1 PR3 re-verify report](/specs/2026-07-25-a1-pr3-reverify-report.md)
+- Spec: [A1 GitHub Issue Triage](/specs/archive/2026-07-16-a1-github-issue-triage-design.md)
+- Rejected Verify: [A1 PR3 Verify report](/specs/archive/2026-07-25-a1-pr3-verify-report.md)
+- Re-verify and review closeout: [A1 PR3 re-verify report](/specs/archive/2026-07-25-a1-pr3-reverify-report.md)
 - Implementation: `apps/symphony/src/triage/process_identity.rs`

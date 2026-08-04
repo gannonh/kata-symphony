@@ -1,11 +1,16 @@
 ---
 type: Verify Report
 title: A3 PR2 Deterministic Draft-PR Publication Verify Report
-status: Verified with residuals
 description: Verify report for A3 PR2 — automated gates and direct GitHub draft-PR, Agent Review preview, and Ratatui TUI UAT passed; restart-during-publication, cleanup, and Docker evidence remain residuals.
 tags: [symphony, implementation-stage, a3, pr2, verify]
 timestamp: 2026-08-02T01:00:00Z
+status: Completed
+source_status: completed
+migrated: false
+archived_at: 2026-08-04T19:34:07Z
 ---
+
+> **Completed before migration** (source status: completed). Retained as history. Not tracked in GitHub Issues.
 
 # A3 PR2 Deterministic Draft-PR Publication — Verify Report
 

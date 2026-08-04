@@ -24,7 +24,7 @@ Edit the right-hand column to match whatever vocabulary you actually use.
 
 ## Symphony A1 route labels
 
-The [A1 GitHub Issue Triage design](/specs/2026-07-16-a1-github-issue-triage-design.md) uses `needs-triage` as its intake label and maps each completed triage artifact to one route label:
+The [A1 GitHub Issue Triage design](/specs/archive/2026-07-16-a1-github-issue-triage-design.md) uses `needs-triage` as its intake label and maps each completed triage artifact to one route label:
 
 | Canonical route | Default GitHub label | Meaning |
 | --- | --- | --- |

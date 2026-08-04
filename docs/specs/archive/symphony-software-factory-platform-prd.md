@@ -1,18 +1,24 @@
 ---
 type: PRD
 title: Symphony Software Factory Platform
-status: Active
 description: Product requirements and vertical-slice roadmap for evolving Symphony into a full software factory platform.
 tags: [symphony, software-factory, roadmap, orchestration]
 timestamp: 2026-07-25T22:35:00Z
+status: Migrated
+source_status: approved
+github_issue: 616
+migrated: true
+archived_at: 2026-08-04T19:34:07Z
 ---
+
+> **Migrated to #616.** The GitHub Issue is the canonical spec. This file is history and is not maintained.
 
 # Symphony Software Factory Platform PRD
 
 Status: Active
 Date: 2026-07-16 (updated 2026-07-18)
 
-Related: [A1 GitHub Issue Triage](/specs/2026-07-16-a1-github-issue-triage-design.md), [ADR-0001 A1 triage durability and isolation](/adrs/0001-a1-triage-durability-and-isolation.md), [Pi Symphony Extension Design](/superpowers/specs/2026-05-14-pi-symphony-extension-design.md), [Wave 4 Shared Context and Diagnostics Plan](/superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md), [Specs roadmap](/specs/index.md)
+Related: [A1 GitHub Issue Triage](/specs/archive/2026-07-16-a1-github-issue-triage-design.md), [ADR-0001 A1 triage durability and isolation](/adrs/0001-a1-triage-durability-and-isolation.md), [Pi Symphony Extension Design](/superpowers/specs/2026-05-14-pi-symphony-extension-design.md), [Wave 4 Shared Context and Diagnostics Plan](/superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md), [Specs roadmap](/specs/index.md)
 
 ## Executive summary
 
@@ -125,7 +131,7 @@ Symphony will orchestrate model providers and agent harnesses. Model hosting and
 
 ## Product model
 
-The roadmap uses this vocabulary. Storage and API contracts for A1 triage preview are recorded in [A1](/specs/2026-07-16-a1-github-issue-triage-design.md) and [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md); later stages still need follow-up design and ADRs.
+The roadmap uses this vocabulary. Storage and API contracts for A1 triage preview are recorded in [A1](/specs/archive/2026-07-16-a1-github-issue-triage-design.md) and [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md); later stages still need follow-up design and ADRs.
 
 ### Work item
 
@@ -210,13 +216,13 @@ The roadmap horizons describe outcome clusters. They are not release trains or p
 
 A new GitHub or Linear issue triggers a triage stage. Symphony creates the minimum durable factory run, triage stage run, and triage artifact for that issue. The issue receives one route: implement, spec, needs information, park, or human-owned. The tracker shows the rationale, evidence, risk class, and next action.
 
-**Progress (2026-07-27):** GitHub path complete — preview [#587](https://github.com/gannonh/kata-symphony/pull/587), automatic route publication [#598](https://github.com/gannonh/kata-symphony/pull/598), recovery and agreement [#599](https://github.com/gannonh/kata-symphony/pull/599). Design: [A1 GitHub Issue Triage](/specs/2026-07-16-a1-github-issue-triage-design.md). Decisions: [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md), [ADR-0002](/adrs/0002-triage-process-recovery-identity.md).
+**Progress (2026-07-27):** GitHub path complete — preview [#587](https://github.com/gannonh/kata-symphony/pull/587), automatic route publication [#598](https://github.com/gannonh/kata-symphony/pull/598), recovery and agreement [#599](https://github.com/gannonh/kata-symphony/pull/599). Design: [A1 GitHub Issue Triage](/specs/archive/2026-07-16-a1-github-issue-triage-design.md). Decisions: [ADR-0001](/adrs/0001-a1-triage-durability-and-isolation.md), [ADR-0002](/adrs/0002-triage-process-recovery-identity.md).
 
 | Slice | Status | Notes |
 | --- | --- | --- |
 | PR1 preview | **Shipped** | Intake label + Projects v2 membership, local Pi/Codex triage, immutable artifact, durable preview comment, factory-run HTTP read API, doctor/starter assets |
-| PR2 automatic route publication | **Shipped** | [#598](https://github.com/gannonh/kata-symphony/pull/598); apply route labels/states, remove intake label, implement handoff ([build](/specs/2026-07-24-a1-pr2-build-report.md), [verify](/specs/2026-07-24-a1-pr2-verify-report.md)) |
-| PR3 recovery and agreement | **Shipped** | [#599](https://github.com/gannonh/kata-symphony/pull/599); post-`exec` recovery, process-group isolation, retained unresolved recovery state, cleanup authorization, correction measurement ([build](/specs/2026-07-25-a1-pr3-build-report.md), [re-verify](/specs/2026-07-25-a1-pr3-reverify-report.md); historical [rejected verify](/specs/2026-07-25-a1-pr3-verify-report.md)) |
+| PR2 automatic route publication | **Shipped** | [#598](https://github.com/gannonh/kata-symphony/pull/598); apply route labels/states, remove intake label, implement handoff ([build](/specs/archive/2026-07-24-a1-pr2-build-report.md), [verify](/specs/archive/2026-07-24-a1-pr2-verify-report.md)) |
+| PR3 recovery and agreement | **Shipped** | [#599](https://github.com/gannonh/kata-symphony/pull/599); post-`exec` recovery, process-group isolation, retained unresolved recovery state, cleanup authorization, correction measurement ([build](/specs/archive/2026-07-25-a1-pr3-build-report.md), [re-verify](/specs/archive/2026-07-25-a1-pr3-reverify-report.md); historical [rejected verify](/specs/archive/2026-07-25-a1-pr3-verify-report.md)) |
 | Linear triage | Deferred | Separate vertical slice after GitHub path is complete |
 
 **Demo (PR1):** Label a project-member issue `needs-triage`. Symphony records a factory run, posts a marked preview comment with route/rationale/evidence, and exposes the run over `GET /api/v1/factory-runs`. Off-project intake gets a diagnostic comment without an agent attempt.
@@ -227,7 +233,7 @@ A new GitHub or Linear issue triggers a triage stage. Symphony creates the minim
 
 A spec-routed issue produces versioned product behavior, technical approach, acceptance criteria, and open decisions. A human can approve or request revision from the tracker or Pi.
 
-**Progress:** Completed for the narrowed GitHub tracker workflow in [A2 Spec Stage](/specs/2026-07-18-a2-spec-stage-design.md) ([UAT verify](/specs/2026-07-26-a2-uat-verify-report.md); [ADR-0003](/adrs/0003-a2-spec-stage-artifacts-and-gates.md)): isolated draft/review/revise turns, durable immutable versions, GitHub feedback/decision labels, approved-version pinning, implement label/state handoff, HTTP artifacts/metrics (including review-cycle, convergence, revision-request, and approval-latency aggregates), Pi token capture, events, doctor checks, and starter assets. Tracker approval is delivered; Pi approval and separate product/technical artifacts remain deferred as documented A2 narrowings.
+**Progress:** Completed for the narrowed GitHub tracker workflow in [A2 Spec Stage](/specs/archive/2026-07-18-a2-spec-stage-design.md) ([UAT verify](/specs/archive/2026-07-26-a2-uat-verify-report.md); [ADR-0003](/adrs/0003-a2-spec-stage-artifacts-and-gates.md)): isolated draft/review/revise turns, durable immutable versions, GitHub feedback/decision labels, approved-version pinning, implement label/state handoff, HTTP artifacts/metrics (including review-cycle, convergence, revision-request, and approval-latency aggregates), Pi token capture, events, doctor checks, and starter assets. Tracker approval is delivered; Pi approval and separate product/technical artifacts remain deferred as documented A2 narrowings.
 
 **Demo:** Apply or receive the spec route, review both artifacts, request one change, approve the revision, and see the run become implementation-ready.
 
@@ -237,7 +243,7 @@ A spec-routed issue produces versioned product behavior, technical approach, acc
 
 Implementation consumes the approved artifact version, runs repository validation, and opens a draft PR that links the issue, spec version, factory run, and validation summary.
 
-**Progress (2026-08-02):** **PR1 implemented** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](/specs/2026-07-29-a3-pr1-build-report.md), [verify](/specs/2026-07-29-a3-pr1-verify-report.md), [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md)). **PR2 shipped** in [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`) ([build](/specs/2026-07-29-a3-pr2-build-report.md), [verify](/specs/2026-07-29-a3-pr2-verify-report.md) Verified with residuals). Direct GitHub draft-PR, Agent Review preview, and Ratatui TUI UAT passed on Project #16 with issue [#45](https://github.com/gannonh/uat-symphony/issues/45) and draft PR [#46](https://github.com/gannonh/uat-symphony/pull/46). Restart-during-publication, full cleanup, and Docker evidence remain residuals. Design: [A3 Implementation Stage](/specs/2026-07-26-a3-implementation-stage-design.md).
+**Progress (2026-08-02):** **PR1 implemented** in [#606](https://github.com/gannonh/kata-symphony/pull/606) ([build](/specs/archive/2026-07-29-a3-pr1-build-report.md), [verify](/specs/archive/2026-07-29-a3-pr1-verify-report.md), [ADR-0004](/adrs/0004-a3-implementation-durability-and-bundles.md)). **PR2 shipped** in [#607](https://github.com/gannonh/kata-symphony/pull/607) (`d456c051`) ([build](/specs/archive/2026-07-29-a3-pr2-build-report.md), [verify](/specs/archive/2026-07-29-a3-pr2-verify-report.md) Verified with residuals). Direct GitHub draft-PR, Agent Review preview, and Ratatui TUI UAT passed on Project #16 with issue [#45](https://github.com/gannonh/uat-symphony/issues/45) and draft PR [#46](https://github.com/gannonh/uat-symphony/pull/46). Restart-during-publication, full cleanup, and Docker evidence remain residuals. Design: [A3 Implementation Stage](/specs/archive/2026-07-26-a3-implementation-stage-design.md).
 
 | Slice | Status | Notes |
 | --- | --- | --- |
@@ -254,7 +260,7 @@ A review stage consumes the PR description, diff, repository context, and approv
 
 **Demo:** Open or update a PR, receive a review summary and inline findings, push a correction, and see contextual re-review.
 
-**Progress (2026-08-02):** PR2 formal publication and routing are implemented on `feat/a4-review-publication` and verified through isolated live UAT against [PR #46](https://github.com/gannonh/uat-symphony/pull/46), including restart-boundary recovery and Project restoration. See the [A4 verify report](/specs/2026-08-02-a4-pr2-verify-report.md) and [ADR-0005](/adrs/0005-a4-review-publication-fencing.md).
+**Progress (2026-08-02):** PR2 formal publication and routing are implemented on `feat/a4-review-publication` and verified through isolated live UAT against [PR #46](https://github.com/gannonh/uat-symphony/pull/46), including restart-boundary recovery and Project restoration. See the [A4 verify report](/specs/archive/2026-08-02-a4-pr2-verify-report.md) and [ADR-0005](/adrs/0005-a4-review-publication-fencing.md).
 
 **Measure:** accepted finding rate, dismissed finding rate, review cycles, escaped sampled defects, and review cost.
 

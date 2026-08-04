@@ -1,11 +1,16 @@
 ---
 type: Verify Report
 title: A3 PR1 Implementation and Validation Preview Verify Report
-status: Incomplete
 description: Automated verification for A3 PR1 preview slice; live GitHub and Docker UAT remain residual in this environment.
 tags: [symphony, implementation-stage, a3, pr1, verify]
 timestamp: 2026-07-29T16:10:00Z
+status: Completed
+source_status: completed
+migrated: false
+archived_at: 2026-08-04T19:34:07Z
 ---
+
+> **Completed before migration** (source status: completed). Retained as history. Not tracked in GitHub Issues.
 
 # A3 PR1 Implementation and Validation Preview — Verify Report
 
@@ -16,7 +21,7 @@ timestamp: 2026-07-29T16:10:00Z
 ## Spec / Implementation
 
 - Spec: [`2026-07-26-a3-implementation-stage-design.md`](2026-07-26-a3-implementation-stage-design.md)
-- ADR: [ADR-0004](../adrs/0004-a3-implementation-durability-and-bundles.md)
+- ADR: [ADR-0004](../../adrs/0004-a3-implementation-durability-and-bundles.md)
 - Build: [A3 PR1 build report](2026-07-29-a3-pr1-build-report.md)
 - Branch: `cursor/a3-implementation-pr1-4eda`
 - Pull request: [#606](https://github.com/gannonh/kata-symphony/pull/606)

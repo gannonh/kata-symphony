@@ -1,11 +1,16 @@
 ---
 type: Verify Report
 title: A1 PR2 Automatic Route Publication Verify Report
-status: Accepted
 description: Verify results for A1 PR2 automatic route publication against acceptance criteria 9–13 and related auto/handoff criteria.
 tags: [symphony, triage, a1, pr2, verify, uat]
 timestamp: 2026-07-24T17:16:00-07:00
+status: Completed
+source_status: completed
+migrated: false
+archived_at: 2026-08-04T19:34:07Z
 ---
+
+> **Completed before migration** (source status: completed). Retained as history. Not tracked in GitHub Issues.
 
 # A1 PR2 Automatic Route Publication — Verify Report
 
