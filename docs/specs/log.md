@@ -2,7 +2,9 @@
 
 ## 2026-08-04
 
-**A4 residual verification captured for #615.** Formal worker credential isolation and live HTTP foreign-review recovery passed; Docker evidence is bounded to runtime/image coverage; the changed-head lifecycle run exercised remote publication with a deterministic worker fixture but remains blocked for real-worker acceptance. The full Symphony suite has five implementation-branch git-bundle failures. Evidence: `uat-evidence/mixed-20260804-202303/` and the [Verify report comment](https://github.com/gannonh/kata-symphony/issues/615#issuecomment-5184552900).
+**A4 residual verification completed for #615; signoff pending.** Formal worker credential isolation, bounded Docker execution, a fixture-controlled real Pi worker changed-head re-review, and live HTTP foreign-review recovery passed. The full Symphony suite has five implementation-branch git-bundle failures. Evidence: `uat-evidence/mixed-20260804-202303/` and the [updated Verify report](https://github.com/gannonh/kata-symphony/issues/615#issuecomment-5184771982).
+
+**A4 residual verification first pass for #615.** Formal worker credential isolation and live HTTP foreign-review recovery passed; Docker evidence was bounded to runtime/image coverage; an initial deterministic fixture run left real-worker acceptance open. The full Symphony suite had five implementation-branch git-bundle failures. Superseded by the final evidence capture below.
 
 **Triaged the spec backlog to finish A4.** Reconciled #615 with reality: both A4 slices are merged to `main` (PR #610 `233caf88`; PR #611 `311ce330`, merged 2026-08-03), so the label moved `status:approved` to `status:implemented`, the twenty acceptance criteria became checkboxes, a Build completion report was posted, and the four residual verification items from the archived PR2 verify report were added to the body as a checklist. #615 is now a sub-issue of #616 and carries `kind:sub-spec`. #616 gained outcome-level acceptance criteria for the Horizon A loop, a sub-issue map, and a corrected A4 progress entry; `needs:acceptance-criteria` cleared. A5, A6, and A7 remain unspecced.
 
