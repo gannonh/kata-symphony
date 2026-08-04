@@ -18,7 +18,7 @@ archived_at: 2026-08-04T19:34:07Z
 Status: Active
 Date: 2026-07-16 (updated 2026-07-18)
 
-Related: [A1 GitHub Issue Triage](/specs/archive/2026-07-16-a1-github-issue-triage-design.md), [ADR-0001 A1 triage durability and isolation](/adrs/0001-a1-triage-durability-and-isolation.md), [Pi Symphony Extension Design](/superpowers/specs/2026-05-14-pi-symphony-extension-design.md), [Wave 4 Shared Context and Diagnostics Plan](/superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md), [Specs roadmap](/specs/index.md)
+Related: [A1 GitHub Issue Triage](/specs/archive/2026-07-16-a1-github-issue-triage-design.md), [ADR-0001 A1 triage durability and isolation](/adrs/0001-a1-triage-durability-and-isolation.md), [Pi Symphony Extension Design](/superpowers/specs/_archive/2026-05-14-pi-symphony-extension-design.md), [Wave 4 Shared Context and Diagnostics Plan](/superpowers/plans/_archive/2026-05-17-wave-4-symphony-shared-context-diagnostics.md), [Specs roadmap](/specs/index.md)
 
 ## Executive summary
 

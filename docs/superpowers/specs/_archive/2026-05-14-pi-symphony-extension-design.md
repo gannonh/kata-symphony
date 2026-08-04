@@ -12,7 +12,7 @@ Date: 2026-05-14
 Package: `@kata-sh/pi-symphony-extension`
 Source: `apps/symphony/pi-extension`
 
-Related: [Wave 4 Shared Context and Diagnostics Plan](/superpowers/plans/2026-05-17-wave-4-symphony-shared-context-diagnostics.md). Roadmap: [specs/index.md](/specs/index.md).
+Related: [Wave 4 Shared Context and Diagnostics Plan](/superpowers/plans/_archive/2026-05-17-wave-4-symphony-shared-context-diagnostics.md). Roadmap: [specs/index.md](/specs/index.md).
 
 ## Goal
 

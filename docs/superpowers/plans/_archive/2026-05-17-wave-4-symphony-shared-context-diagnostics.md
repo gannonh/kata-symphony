@@ -16,7 +16,7 @@ timestamp: 2026-07-15T20:00:00Z
 
 **Tech Stack:** TypeScript, Vitest, Node HTTP mock server, Pi extension APIs, `ws` for Symphony event streams.
 
-Related: [Pi Symphony Extension Design](/superpowers/specs/2026-05-14-pi-symphony-extension-design.md). Roadmap: [specs/index.md](/specs/index.md).
+Related: [Pi Symphony Extension Design](/superpowers/specs/_archive/2026-05-14-pi-symphony-extension-design.md). Roadmap: [specs/index.md](/specs/index.md).
 
 ---
 
@@ -67,7 +67,7 @@ These share the same HTTP client, runtime attachment, event stream, and console 
   - Adds `mock:wave4` script.
 - Modify: `apps/symphony/pi-extension/README.md`
   - Documents Wave 4 console keys and manual verification.
-- Modify: `docs/superpowers/specs/2026-05-14-pi-symphony-extension-design.md`
+- Modify: `docs/superpowers/specs/_archive/2026-05-14-pi-symphony-extension-design.md`
   - Marks Wave 4 complete after implementation and verification.
 
 ## Assumptions
@@ -2179,7 +2179,7 @@ git commit -m "test(pi-symphony): add wave 4 mock server"
 
 **Files:**
 - Modify: `apps/symphony/pi-extension/README.md`
-- Modify: `docs/superpowers/specs/2026-05-14-pi-symphony-extension-design.md`
+- Modify: `docs/superpowers/specs/_archive/2026-05-14-pi-symphony-extension-design.md`
 
 - [ ] **Step 1: Update README Wave 4 usage**
 
@@ -2225,7 +2225,7 @@ Diagnostics shown in the console:
 
 - [ ] **Step 2: Mark Wave 4 complete in the spec**
 
-In `docs/superpowers/specs/2026-05-14-pi-symphony-extension-design.md`, change this heading:
+In `docs/superpowers/specs/_archive/2026-05-14-pi-symphony-extension-design.md`, change this heading:
 
 ```md
 ### Wave 4: S05-S06 - shared context and diagnostics
@@ -2280,7 +2280,7 @@ Expected: PASS.
 - [ ] **Step 7: Commit docs and verification updates**
 
 ```bash
-git add apps/symphony/pi-extension/README.md docs/superpowers/specs/2026-05-14-pi-symphony-extension-design.md
+git add apps/symphony/pi-extension/README.md docs/superpowers/specs/_archive/2026-05-14-pi-symphony-extension-design.md
 git commit -m "docs(pi-symphony): document wave 4 console parity"
 ```
 

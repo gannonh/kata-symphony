@@ -4,7 +4,7 @@ Design specs. Prefer the OKF roadmap at [specs/index.md](../../specs/index.md).
 
 # Active
 
-* [Pi Symphony Extension Design](2026-05-14-pi-symphony-extension-design.md) - Pi extension for Symphony control and dashboard
+_(none)_ - active work is tracked in GitHub Issues; see [specs/index.md](../../specs/index.md).
 
 # Archive
 

@@ -4,7 +4,7 @@ Implementation plans. Prefer the OKF roadmap at [specs/index.md](../../specs/ind
 
 # Active
 
-* [Wave 4 Shared Context and Diagnostics](2026-05-17-wave-4-symphony-shared-context-diagnostics.md) - dashboard parity slices 5–6
+_(none)_ - active work is tracked in GitHub Issues; see [specs/index.md](../../specs/index.md).
 
 # Archive
 
