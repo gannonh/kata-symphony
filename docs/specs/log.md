@@ -2,7 +2,7 @@
 
 ## 2026-08-04
 
-**A4 residual verification completed for #615; signoff pending.** Formal worker credential isolation, bounded Docker execution, a fixture-controlled real Pi worker changed-head re-review, and live HTTP foreign-review recovery passed. The full Symphony suite has five implementation-branch git-bundle failures. Evidence: `uat-evidence/mixed-20260804-202303/` and the [updated Verify report](https://github.com/gannonh/kata-symphony/issues/615#issuecomment-5184771982).
+**A4 residual verification accepted for #615.** Formal worker credential isolation, bounded Docker execution, a fixture-controlled real Pi worker changed-head re-review, and live HTTP foreign-review recovery passed. #615 is verified and closed. The full Symphony suite has five implementation-branch git-bundle failures. Evidence: `uat-evidence/mixed-20260804-202303/` and the [final Verify report](https://github.com/gannonh/kata-symphony/issues/615#issuecomment-5184771982).
 
 **A4 residual verification first pass for #615.** Formal worker credential isolation and live HTTP foreign-review recovery passed; Docker evidence was bounded to runtime/image coverage; an initial deterministic fixture run left real-worker acceptance open. The full Symphony suite had five implementation-branch git-bundle failures. Superseded by the final evidence capture below.
 
