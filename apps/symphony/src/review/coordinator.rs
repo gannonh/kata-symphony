@@ -187,11 +187,11 @@ where
         }
         if self
             .store
-            .review_artifact_exists_for_head(&candidate.run_id, &pull.head.sha)?
+            .review_artifact_exists(&candidate.run_id, &pull.head.sha, &pull.base.sha)?
         {
             if let Some(artifact) = self
                 .store
-                .get_orphaned_review_artifact_for_head(&candidate.run_id, &pull.head.sha)?
+                .get_orphaned_review_artifact(&candidate.run_id, &pull.head.sha, &pull.base.sha)?
             {
                 let spec = self
                     .store
@@ -241,9 +241,11 @@ where
             // publication. Reconciliation owns pending intents.
             return Ok(ProcessOutcome::Waiting);
         }
-        let failed_attempts = self
-            .store
-            .count_review_attempt_failures_for_head(&candidate.run_id, &pull.head.sha)?;
+        let failed_attempts = self.store.count_review_attempt_failures_for_head(
+            &candidate.run_id,
+            &pull.head.sha,
+            &pull.base.sha,
+        )?;
         if failed_attempts >= service.review.max_attempts.max(1) {
             return Ok(ProcessOutcome::Waiting);
         }
@@ -772,10 +774,11 @@ where
             let error_message = error.to_string();
             let cycle_reopened =
                 error_message.contains("review cycle reopened while worker was running");
-            let retry_exhausted = match self
-                .store
-                .count_review_attempt_failures_for_head(&candidate.run_id, &pull.head.sha)
-            {
+            let retry_exhausted = match self.store.count_review_attempt_failures_for_head(
+                &candidate.run_id,
+                &pull.head.sha,
+                &pull.base.sha,
+            ) {
                 Ok(failed_attempts) => {
                     review_attempt_retry_exhausted(failed_attempts, service.review.max_attempts)
                 }
@@ -784,6 +787,7 @@ where
                         event = "review_attempt_retry_count_failed",
                         run_id = %candidate.run_id,
                         reviewed_head_sha = %pull.head.sha,
+                        base_sha = %pull.base.sha,
                         error = %count_error,
                         "could not determine review attempt retry ceiling"
                     );

@@ -160,6 +160,7 @@ pub struct ReviewFindingRecord {
     pub finding_id: String,
     pub identity_key: String,
     pub reviewed_head_sha: String,
+    pub base_sha: String,
     pub severity: crate::review::manifest::ReviewSeverity,
     pub category: crate::review::manifest::ReviewFindingCategory,
     pub path: String,

@@ -502,24 +502,33 @@ impl SharedFactoryStore {
         self.with_store(|store| store.list_a4_eligible_review_runs(max_attempts))
     }
 
-    pub fn review_artifact_exists_for_head(&self, run_id: &str, head_sha: &str) -> Result<bool> {
-        self.with_store(|store| store.review_artifact_exists_for_head(run_id, head_sha))
+    pub fn review_artifact_exists(
+        &self,
+        run_id: &str,
+        head_sha: &str,
+        base_sha: &str,
+    ) -> Result<bool> {
+        self.with_store(|store| store.review_artifact_exists(run_id, head_sha, base_sha))
     }
 
     pub fn count_review_attempt_failures_for_head(
         &self,
         run_id: &str,
-        head_sha: &str,
+        reviewed_head_sha: &str,
+        base_sha: &str,
     ) -> Result<u32> {
-        self.with_store(|store| store.count_review_attempt_failures_for_head(run_id, head_sha))
+        self.with_store(|store| {
+            store.count_review_attempt_failures_for_head(run_id, reviewed_head_sha, base_sha)
+        })
     }
 
-    pub fn get_orphaned_review_artifact_for_head(
+    pub fn get_orphaned_review_artifact(
         &self,
         run_id: &str,
         head_sha: &str,
+        base_sha: &str,
     ) -> Result<Option<crate::review::domain::ReviewFindingsArtifactRecord>> {
-        self.with_store(|store| store.get_orphaned_review_artifact_for_head(run_id, head_sha))
+        self.with_store(|store| store.get_orphaned_review_artifact(run_id, head_sha, base_sha))
     }
 
     pub fn store_review_attempt_inputs(
