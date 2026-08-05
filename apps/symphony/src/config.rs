@@ -30,6 +30,10 @@ use crate::repo_url::repo_is_remote;
 use crate::review::domain::{ReviewConfig, ReviewMode, ReviewRoute};
 use crate::review::manifest::ReviewSeverity;
 use crate::spec::domain::{SpecApprovalRoute, SpecConfig, SpecDecisionLabels, SpecPromptsConfig};
+use crate::verification::domain::{
+    VerificationCommandConfig, VerificationCommandKind, VerificationConfig,
+    VERIFICATION_MAX_COMMANDS, VERIFICATION_NAME_MAX_BYTES, VERIFICATION_COMMAND_MAX_BYTES,
+};
 use crate::triage::domain::{
     RouteMapping, StorageConfig, TriageConfig, TriageMode, TriageRoutesConfig,
 };
@@ -489,6 +493,32 @@ struct RawReviewConfig {
     permission_probe_pull_request: Option<u64>,
 }
 
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawVerificationCommand {
+    name: Option<String>,
+    kind: Option<String>,
+    command: Option<String>,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawVerificationConfig {
+    enabled: Option<bool>,
+    mode: Option<String>,
+    prompt: Option<String>,
+    model: Option<String>,
+    max_turns: Option<u32>,
+    invocation_timeout_ms: Option<u64>,
+    max_attempts: Option<u32>,
+    max_reprompts: Option<u32>,
+    max_evidence_files: Option<usize>,
+    max_evidence_bytes: Option<u64>,
+    trigger_state: Option<String>,
+    commands: Option<Vec<RawVerificationCommand>>,
+}
+
 // ── Section extraction helper ─────────────────────────────────────────────────
 
 fn extract_section<T>(normalized: &Value, section: &str) -> Result<T>
@@ -749,6 +779,8 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
     let raw_implementation: RawImplementationConfig =
         extract_section(&normalized, "implementation")?;
     let raw_review: RawReviewConfig = extract_section(&normalized, "review")?;
+    let raw_verification: RawVerificationConfig =
+        extract_section(&normalized, "verification")?;
 
     let defaults = ServiceConfig::default();
     let has_kata_agent_section = normalized.get("kata_agent").is_some();
@@ -1640,6 +1672,79 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
             .or(review_defaults.permission_probe_pull_request),
     };
 
+    let verification_mode = raw_verification
+        .mode
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("preview");
+    if verification_mode != "preview" {
+        return Err(SymphonyError::InvalidWorkflowConfig(format!(
+            "verification.mode must be 'preview', got '{verification_mode}'"
+        )));
+    }
+    let verification_defaults = VerificationConfig::default();
+    let verification_commands = raw_verification
+        .commands
+        .unwrap_or_default()
+        .into_iter()
+        .map(|raw| {
+            let kind = match raw.kind.as_deref().map(str::trim) {
+                Some("test") => VerificationCommandKind::Test,
+                Some("acceptance") => VerificationCommandKind::Acceptance,
+                Some(other) => {
+                    return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                        "verification.commands[].kind must be 'test' or 'acceptance', got '{other}'"
+                    )));
+                }
+                None => {
+                    return Err(SymphonyError::InvalidWorkflowConfig(
+                        "verification.commands[].kind is required".to_string(),
+                    ));
+                }
+            };
+            Ok(VerificationCommandConfig {
+                name: config_string(raw.name, ""),
+                kind,
+                command: config_string(raw.command, ""),
+                timeout_ms: raw.timeout_ms.unwrap_or(0),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let verification = VerificationConfig {
+        enabled: raw_verification
+            .enabled
+            .unwrap_or(verification_defaults.enabled),
+        mode: verification_mode.to_string(),
+        prompt: config_string(raw_verification.prompt, &verification_defaults.prompt),
+        model: config_model(raw_verification.model),
+        max_turns: raw_verification
+            .max_turns
+            .unwrap_or(verification_defaults.max_turns),
+        invocation_timeout_ms: raw_verification
+            .invocation_timeout_ms
+            .unwrap_or(verification_defaults.invocation_timeout_ms),
+        max_attempts: raw_verification
+            .max_attempts
+            .unwrap_or(verification_defaults.max_attempts),
+        max_reprompts: raw_verification
+            .max_reprompts
+            .unwrap_or(verification_defaults.max_reprompts),
+        max_evidence_files: raw_verification
+            .max_evidence_files
+            .unwrap_or(verification_defaults.max_evidence_files),
+        max_evidence_bytes: raw_verification
+            .max_evidence_bytes
+            .unwrap_or(verification_defaults.max_evidence_bytes),
+        trigger_state: raw_verification
+            .trigger_state
+            .map(|value| resolve_env(&value))
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or(verification_defaults.trigger_state),
+        commands: verification_commands,
+    };
+
     Ok(ServiceConfig {
         tracker,
         polling,
@@ -1660,6 +1765,7 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
         spec,
         implementation,
         review,
+        verification,
     })
 }
 
@@ -2272,7 +2378,154 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
         }
     }
 
+    if config.verification.enabled {
+        if tracker_kind != "github" {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "verification.enabled requires tracker.kind to be 'github' (GitHub Projects v2 is the only supported state backend)"
+                    .to_string(),
+            ));
+        }
+        if !config.spec.enabled || !config.implementation.enabled || !config.review.enabled {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "verification.enabled requires spec.enabled, implementation.enabled, and review.enabled so an approved A2 spec, A3 draft PR, and A4 review exist"
+                    .to_string(),
+            ));
+        }
+        if config.review.mode != ReviewMode::Automatic {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "verification.enabled requires review.mode 'automatic' so A4 automatic publication can route clean reviews into verification.trigger_state"
+                    .to_string(),
+            ));
+        }
+        if config
+            .review
+            .completion_route
+            .as_ref()
+            .map(|route| route.state.trim() != config.verification.trigger_state.trim())
+            .unwrap_or(true)
+        {
+            return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                "review.completion_route.state must equal verification.trigger_state ('{}') so a clean A4 review routes deterministically into the verification stage",
+                config.verification.trigger_state
+            )));
+        }
+        if config
+            .review
+            .changes_requested_route
+            .as_ref()
+            .map(|route| route.state.trim() == config.verification.trigger_state.trim())
+            .unwrap_or(false)
+        {
+            return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                "review.changes_requested_route.state must differ from verification.trigger_state ('{}') so non-clean reviews never start A5",
+                config.verification.trigger_state
+            )));
+        }
+        if config.verification.prompt.trim().is_empty() {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "verification.prompt must be non-empty when verification is enabled".to_string(),
+            ));
+        }
+        for (field, value) in [
+            ("verification.max_turns", config.verification.max_turns as u64),
+            (
+                "verification.invocation_timeout_ms",
+                config.verification.invocation_timeout_ms,
+            ),
+            ("verification.max_attempts", config.verification.max_attempts as u64),
+            ("verification.max_reprompts", config.verification.max_reprompts as u64),
+            ("verification.max_evidence_files", config.verification.max_evidence_files as u64),
+            ("verification.max_evidence_bytes", config.verification.max_evidence_bytes),
+        ] {
+            if value == 0 {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "{field} must be greater than 0"
+                )));
+            }
+        }
+        if config.agent_backend == AgentBackend::Codex && config.verification.model.is_some() {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "verification.model is not supported when agent.name is 'codex'".to_string(),
+            ));
+        }
+        validate_verification_commands(&config.verification.commands)?;
+        // Artifact-directory access: the store path must be usable for the
+        // content-addressed evidence blobs beside the factory database.
+        if let Some(storage_path) = config.storage.path.as_deref() {
+            let artifacts_dir =
+                crate::implementation::bundle::artifacts_dir(std::path::Path::new(storage_path));
+            if let Some(parent) = artifacts_dir.parent() {
+                if !parent.exists() {
+                    return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                        "verification requires an existing artifact-directory parent {}; create it or fix storage.path",
+                        parent.display()
+                    )));
+                }
+            }
+        }
+    }
+
     Ok(ValidatedServiceConfig(config.clone()))
+}
+
+fn validate_verification_commands(
+    commands: &[VerificationCommandConfig],
+) -> Result<()> {
+    if commands.is_empty() {
+        return Err(SymphonyError::InvalidWorkflowConfig(
+            "verification.commands must declare 1-20 blocking commands".to_string(),
+        ));
+    }
+    if commands.len() > VERIFICATION_MAX_COMMANDS {
+        return Err(SymphonyError::InvalidWorkflowConfig(format!(
+            "verification.commands declares {} commands; at most {VERIFICATION_MAX_COMMANDS} are allowed",
+            commands.len()
+        )));
+    }
+    let mut names = std::collections::HashSet::new();
+    let mut acceptance_count = 0usize;
+    for command in commands {
+        let name = command.name.trim();
+        if name.is_empty() {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "verification.commands[].name must be non-empty".to_string(),
+            ));
+        }
+        if name.len() > VERIFICATION_NAME_MAX_BYTES {
+            return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                "verification.commands[].name exceeds {VERIFICATION_NAME_MAX_BYTES} bytes: '{name}'"
+            )));
+        }
+        if !names.insert(name.to_string()) {
+            return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                "verification.commands names must be unique; '{name}' appears more than once"
+            )));
+        }
+        if command.command.trim().is_empty() {
+            return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                "verification.commands[{name}].command must be non-empty"
+            )));
+        }
+        if command.command.len() > VERIFICATION_COMMAND_MAX_BYTES {
+            return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                "verification.commands[{name}].command exceeds {VERIFICATION_COMMAND_MAX_BYTES} bytes"
+            )));
+        }
+        if command.timeout_ms == 0 {
+            return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                "verification.commands[{name}].timeout_ms must be greater than 0"
+            )));
+        }
+        if command.kind == VerificationCommandKind::Acceptance {
+            acceptance_count += 1;
+        }
+    }
+    if acceptance_count != 1 {
+        return Err(SymphonyError::InvalidWorkflowConfig(format!(
+            "verification.commands must declare exactly one command with kind 'acceptance'; found {acceptance_count}"
+        )));
+    }
+    Ok(())
 }
 // ── Unit tests ────────────────────────────────────────────────────────────────
 
@@ -2613,5 +2866,224 @@ implementation:
         let config = from_workflow(&value).unwrap();
         let err = validate(&config).unwrap_err().to_string();
         assert!(err.contains("unique"));
+    }
+
+    fn verification_yaml(command_overrides: &str) -> String {
+        let mut yaml = github_base_yaml();
+        yaml.push_str(
+            r#"
+spec:
+  enabled: true
+implementation:
+  enabled: true
+  validation:
+    - name: unit
+      command: cargo test
+      timeout_ms: 60000
+review:
+  enabled: true
+  mode: automatic
+  completion_route:
+    state: Verification
+  changes_requested_route:
+    state: Implementation
+verification:
+  enabled: true
+  mode: preview
+  prompt: prompts/verification.md
+  max_evidence_files: 50
+  max_evidence_bytes: 10485760
+  trigger_state: Verification
+  commands:
+"#,
+        );
+        yaml.push_str(command_overrides);
+        yaml
+    }
+
+    fn valid_verification_commands() -> &'static str {
+        r#"    - name: affected-validation
+      kind: test
+      command: pnpm run validate:affected
+      timeout_ms: 1800000
+    - name: product-acceptance
+      kind: acceptance
+      command: ./scripts/verify-product.sh
+      timeout_ms: 1800000
+"#
+    }
+
+    #[test]
+    fn verification_parses_and_validates_full_config() {
+        let yaml = verification_yaml(valid_verification_commands());
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        assert!(config.verification.enabled);
+        assert_eq!(config.verification.commands.len(), 2);
+        assert_eq!(config.verification.trigger_state, "Verification");
+        assert_eq!(
+            config.verification.commands[1].kind,
+            VerificationCommandKind::Acceptance
+        );
+        validate(&config).unwrap();
+    }
+
+    #[test]
+    fn verification_requires_automatic_a4_with_clean_route_into_trigger_state() {
+        // A4 preview publication must never feed A5: review mode must be
+        // automatic and the clean completion route must equal the trigger.
+        let mut yaml = verification_yaml(valid_verification_commands());
+        yaml = yaml.replace("  mode: automatic", "  mode: preview");
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("review.mode 'automatic'"));
+
+        let yaml = verification_yaml(valid_verification_commands()).replace(
+            "    state: Verification",
+            "    state: Human Review",
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("completion_route.state must equal verification.trigger_state"));
+
+        // A non-clean route may not equal the trigger state either.
+        let yaml = verification_yaml(valid_verification_commands()).replace(
+            "    state: Implementation",
+            "    state: Verification",
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("changes_requested_route.state must differ"));
+    }
+
+    #[test]
+    fn verification_requires_dependencies_enabled() {
+        let mut yaml = github_base_yaml();
+        yaml.push_str(
+            r#"
+verification:
+  enabled: true
+  commands:
+    - name: product-acceptance
+      kind: acceptance
+      command: ./scripts/verify-product.sh
+      timeout_ms: 1800000
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("spec.enabled, implementation.enabled, and review.enabled"));
+    }
+
+    #[test]
+    fn verification_requires_exactly_one_acceptance_command() {
+        let yaml = verification_yaml(
+            r#"    - name: unit
+      kind: test
+      command: cargo test
+      timeout_ms: 60000
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("exactly one command with kind 'acceptance'; found 0"));
+
+        let yaml = verification_yaml(
+            r#"    - name: unit
+      kind: test
+      command: cargo test
+      timeout_ms: 60000
+    - name: first-acceptance
+      kind: acceptance
+      command: ./a.sh
+      timeout_ms: 60000
+    - name: second-acceptance
+      kind: acceptance
+      command: ./b.sh
+      timeout_ms: 60000
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("found 2"));
+    }
+
+    #[test]
+    fn verification_rejects_duplicate_names_empty_commands_and_zero_timeouts() {
+        let yaml = verification_yaml(
+            r#"    - name: dup
+      kind: test
+      command: cargo test
+      timeout_ms: 60000
+    - name: dup
+      kind: acceptance
+      command: ./a.sh
+      timeout_ms: 60000
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("names must be unique"));
+
+        let yaml = verification_yaml(
+            r#"    - name: empty-command
+      kind: acceptance
+      command: "  "
+      timeout_ms: 60000
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("must be non-empty"));
+
+        let yaml = verification_yaml(
+            r#"    - name: no-timeout
+      kind: acceptance
+      command: ./a.sh
+      timeout_ms: 0
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("timeout_ms must be greater than 0"));
+    }
+
+    #[test]
+    fn verification_rejects_more_than_twenty_commands() {
+        let mut commands = String::new();
+        for index in 0..21 {
+            let kind = if index == 20 { "acceptance" } else { "test" };
+            commands.push_str(&format!(
+                "    - name: cmd-{index}\n      kind: {kind}\n      command: echo {index}\n      timeout_ms: 60000\n"
+            ));
+        }
+        let yaml = verification_yaml(&commands);
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let config = from_workflow(&value).unwrap();
+        let err = validate(&config).unwrap_err().to_string();
+        assert!(err.contains("at most 20 are allowed"));
+    }
+
+    #[test]
+    fn verification_rejects_unknown_command_kind() {
+        let yaml = verification_yaml(
+            r#"    - name: odd
+      kind: smoke
+      command: ./a.sh
+      timeout_ms: 60000
+"#,
+        );
+        let value: Value = serde_yaml::from_str(&yaml).unwrap();
+        let err = from_workflow(&value).unwrap_err().to_string();
+        assert!(err.contains("kind must be 'test' or 'acceptance'"));
     }
 }

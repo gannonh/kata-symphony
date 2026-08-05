@@ -293,7 +293,7 @@ fn looks_like_shell_script(first: &str) -> bool {
         || first.contains("$(")
 }
 
-fn bounded_redacted_tail(bytes: &[u8]) -> String {
+pub(crate) fn bounded_redacted_tail(bytes: &[u8]) -> String {
     let lossy = String::from_utf8_lossy(bytes);
     let redacted = redact_url_credentials(&lossy);
     tail_str(&redacted, OUTPUT_TAIL_BYTES)
@@ -312,7 +312,7 @@ fn tail_str(value: &str, max_bytes: usize) -> String {
     value[idx..].to_string()
 }
 
-fn output_digest(stdout: &str, stderr: &str) -> String {
+pub(crate) fn output_digest(stdout: &str, stderr: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(stdout.as_bytes());
     hasher.update(b"\0");

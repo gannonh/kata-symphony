@@ -585,6 +585,7 @@ pub struct ServiceConfig {
     pub spec: crate::spec::domain::SpecConfig,
     pub implementation: crate::implementation::domain::ImplementationConfig,
     pub review: crate::review::domain::ReviewConfig,
+    pub verification: crate::verification::domain::VerificationConfig,
 }
 
 /// Tracker configuration (spec §5.3.1).

@@ -13,6 +13,11 @@ use crate::review::domain::{
 };
 use crate::review::findings::finding_identity_key;
 use crate::review::manifest::ReviewFindingsManifest;
+use crate::verification::domain::{
+    VerificationAttemptRecord, VerificationCommandKind, VerificationCommandRunRecord,
+    VerificationEvidenceRecord, VerificationGateRecord, VerificationMetricsAggregate,
+    VerificationPublicationIntent, VERIFICATION_STAGE_NAME,
+};
 use crate::spec::artifact::validate_spec;
 use crate::spec::domain::{
     ReviewFinding, SpecArtifact, SpecArtifactRecord, SpecDecision, SpecPublicationIntent,
@@ -31,6 +36,7 @@ use crate::triage::storage_path::lock_path_for_storage;
 use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::path::Path;
@@ -40,7 +46,7 @@ use uuid::Uuid;
 /// Embedded migrations, applied in order while the exclusive store lock is
 /// held. `009_*` is applied separately behind a Rust-side idempotency guard
 /// because it rebuilds tables (see [`acquire_lock_and_migrate`]).
-const MIGRATIONS: [&str; 8] = [
+const MIGRATIONS: [&str; 9] = [
     include_str!("migrations/001_init.sql"),
     include_str!("migrations/002_route_observations.sql"),
     include_str!("migrations/003_spec_stage.sql"),
@@ -49,6 +55,7 @@ const MIGRATIONS: [&str; 8] = [
     include_str!("migrations/006_review_stage.sql"),
     include_str!("migrations/007_review_publication.sql"),
     include_str!("migrations/008_review_publication_lease.sql"),
+    include_str!("migrations/010_verification_stage.sql"),
 ];
 
 /// The A4 head/base identity rebuild (#617). Not in [`MIGRATIONS`]: it is
@@ -5234,6 +5241,684 @@ impl SqliteFactoryStore {
     }
 }
 
+// ── A5 verification stage ────────────────────────────────────────────────────
+
+/// A factory run whose durable A4 review cycle produced an applied automatic
+/// publication. The coordinator additionally requires the live pull head/base
+/// to equal the reviewed revision, the publication route to equal
+/// `verification.trigger_state`, and the tracker item to be in that state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A5EligibleVerificationRun {
+    pub run_id: String,
+    pub forge_host: String,
+    pub repository: String,
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub pr_number: u64,
+    pub pr_url: String,
+    pub head: String,
+    pub base: String,
+    pub head_sha: String,
+    pub review_artifact_id: String,
+    pub reviewed_head_sha: String,
+    pub reviewed_base_sha: String,
+    pub spec_artifact_id: String,
+    pub implementation_artifact_id: String,
+    pub route_state: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreVerificationAttemptRequest {
+    pub attempt_id: String,
+    pub stage_run_id: String,
+    pub pr_number: u64,
+    pub reviewed_head_sha: String,
+    pub base_sha: String,
+    pub spec_artifact_id: String,
+    pub implementation_artifact_id: String,
+    pub review_artifact_id: String,
+    pub configuration_revision: String,
+    pub execution_profile: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UpdateVerificationAttemptRequest<'a> {
+    pub attempt_id: &'a str,
+    pub status: Option<&'a str>,
+    pub workspace_path: Option<&'a str>,
+    pub evidence_dir: Option<&'a str>,
+    pub error: Option<&'a FactoryError>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompleteVerificationCommandRequest<'a> {
+    pub command_run_id: &'a str,
+    pub status: &'a str,
+    pub exit_code: Option<i32>,
+    pub termination_reason: Option<&'a str>,
+    pub passed: Option<bool>,
+    pub output_tail: Option<&'a str>,
+    pub output_sha256: Option<&'a str>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: DateTime<Utc>,
+    pub duration_ms: u64,
+}
+
+impl SqliteFactoryStore {
+    pub fn store_verification_attempt_inputs(
+        &mut self,
+        request: StoreVerificationAttemptRequest,
+    ) -> Result<VerificationAttemptRecord> {
+        let stage = select_stage_run(&self.conn, &request.stage_run_id)?;
+        if stage.stage != VERIFICATION_STAGE_NAME || stage.status != StageStatus::Running {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is not a running verification attempt",
+                request.stage_run_id
+            )));
+        }
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO verification_attempts (
+                    attempt_id, run_id, stage_run_id, pr_number,
+                    reviewed_head_sha, base_sha, spec_artifact_id,
+                    implementation_artifact_id, review_artifact_id,
+                    configuration_revision, execution_profile, status,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', ?12, ?12)",
+                params![
+                    request.attempt_id,
+                    stage.run_id,
+                    request.stage_run_id,
+                    request.pr_number as i64,
+                    request.reviewed_head_sha,
+                    request.base_sha,
+                    request.spec_artifact_id,
+                    request.implementation_artifact_id,
+                    request.review_artifact_id,
+                    request.configuration_revision,
+                    request.execution_profile,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        self.get_verification_attempt(&request.attempt_id)?.ok_or_else(|| {
+            SymphonyError::StorageError("created verification attempt is missing".to_string())
+        })
+    }
+
+    pub fn get_verification_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<VerificationAttemptRecord>> {
+        self.conn
+            .query_row(
+                "SELECT attempt_id, run_id, stage_run_id, pr_number,
+                    reviewed_head_sha, base_sha, spec_artifact_id,
+                    implementation_artifact_id, review_artifact_id,
+                    configuration_revision, execution_profile, status,
+                    workspace_path, evidence_dir, error_json, created_at, updated_at
+                 FROM verification_attempts WHERE attempt_id = ?1",
+                params![attempt_id],
+                verification_attempt_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_verification_attempts(&self, run_id: &str) -> Result<Vec<VerificationAttemptRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT attempt_id, run_id, stage_run_id, pr_number,
+                    reviewed_head_sha, base_sha, spec_artifact_id,
+                    implementation_artifact_id, review_artifact_id,
+                    configuration_revision, execution_profile, status,
+                    workspace_path, evidence_dir, error_json, created_at, updated_at
+                 FROM verification_attempts WHERE run_id = ?1 ORDER BY created_at DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], verification_attempt_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn update_verification_attempt(
+        &mut self,
+        request: UpdateVerificationAttemptRequest<'_>,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_attempts SET
+                    status = COALESCE(?1, status),
+                    workspace_path = COALESCE(?2, workspace_path),
+                    evidence_dir = COALESCE(?3, evidence_dir),
+                    error_json = ?4,
+                    updated_at = ?5
+                 WHERE attempt_id = ?6",
+                params![
+                    request.status,
+                    request.workspace_path,
+                    request.evidence_dir,
+                    request.error.map(bounded_json).transpose()?,
+                    ts(Self::now()),
+                    request.attempt_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification attempt {} not found",
+                request.attempt_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Candidates for A5: a durable A4 findings artifact whose automatic
+    /// publication was applied. Route equality with `verification.trigger_state`
+    /// and live head/base equality are checked by the coordinator.
+    pub fn list_a5_eligible_verification_runs(
+        &self,
+    ) -> Result<Vec<A5EligibleVerificationRun>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT r.run_id, r.forge_host, r.repository, r.issue_id,
+                    r.issue_identifier, d.number, d.url, d.head, d.base, d.head_sha,
+                    a.artifact_id, a.reviewed_head_sha, a.base_sha,
+                    a.spec_artifact_id, a.implementation_artifact_id,
+                    p.route_state
+                 FROM factory_runs r
+                 JOIN review_findings_artifacts a ON a.run_id = r.run_id
+                 JOIN review_publication_intents p
+                    ON p.artifact_id = a.artifact_id
+                    AND p.kind = 'automatic'
+                    AND p.status = 'applied'
+                 JOIN implementation_draft_pr_artifacts d ON d.run_id = r.run_id
+                    AND d.draft = 1
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM stage_runs sr
+                     WHERE sr.run_id = r.run_id AND sr.stage = ?1
+                       AND sr.status IN ('pending', 'running')
+                 )
+                 ORDER BY r.updated_at ASC, a.received_at DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![VERIFICATION_STAGE_NAME], |row| {
+                Ok(A5EligibleVerificationRun {
+                    run_id: row.get(0)?,
+                    forge_host: row.get(1)?,
+                    repository: row.get(2)?,
+                    issue_id: row.get(3)?,
+                    issue_identifier: row.get(4)?,
+                    pr_number: row.get::<_, i64>(5)? as u64,
+                    pr_url: row.get(6)?,
+                    head: row.get(7)?,
+                    base: row.get(8)?,
+                    head_sha: row.get(9)?,
+                    review_artifact_id: row.get(10)?,
+                    reviewed_head_sha: row.get(11)?,
+                    reviewed_base_sha: row.get(12)?,
+                    spec_artifact_id: row.get(13)?,
+                    implementation_artifact_id: row.get(14)?,
+                    route_state: row.get(15)?,
+                })
+            })
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    /// Persist the `launching` record and nonce before any spawn. The returned
+    /// command_run_id is the CAS target for the identity record.
+    pub fn record_verification_command_launch(
+        &mut self,
+        run_id: &str,
+        attempt_id: &str,
+        ordinal: u32,
+        name: &str,
+        kind: VerificationCommandKind,
+        configuration_revision: &str,
+        command_sha256: &str,
+        execution_profile: &str,
+        launch_nonce: &str,
+    ) -> Result<String> {
+        let command_run_id = new_id();
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO verification_command_runs (
+                    command_run_id, run_id, attempt_id, ordinal, name, kind,
+                    configuration_revision, command_sha256, status, launch_nonce,
+                    execution_profile, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'launching', ?9, ?10, ?11, ?11)",
+                params![
+                    command_run_id,
+                    run_id,
+                    attempt_id,
+                    ordinal as i64,
+                    name,
+                    kind.as_str(),
+                    configuration_revision,
+                    command_sha256,
+                    launch_nonce,
+                    execution_profile,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(command_run_id)
+    }
+
+    /// CAS-transition a launching command to running with its captured local
+    /// process identity. Fails when the record is not still `launching` with
+    /// the same nonce — a stale or foreign writer cannot claim the launch.
+    pub fn cas_verification_launch_identity(
+        &mut self,
+        command_run_id: &str,
+        launch_nonce: &str,
+        identity: &crate::triage::process_identity::ProcessIdentity,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_command_runs SET
+                    status = 'running',
+                    pid = ?1,
+                    process_group_id = ?2,
+                    process_start_token = ?3,
+                    executable_identity = ?4,
+                    started_at = ?5,
+                    updated_at = ?5
+                 WHERE command_run_id = ?6 AND launch_nonce = ?7 AND status = 'launching'",
+                params![
+                    identity.pid,
+                    identity.process_group_id,
+                    identity.start_token,
+                    identity.executable,
+                    ts(Self::now()),
+                    command_run_id,
+                    launch_nonce,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "launch CAS failed for command run {command_run_id}: not launching or nonce mismatch"
+            )));
+        }
+        Ok(())
+    }
+
+    /// CAS-record the container ID before `docker start` releases the payload.
+    pub fn cas_verification_container(
+        &mut self,
+        command_run_id: &str,
+        launch_nonce: &str,
+        container_id: &str,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_command_runs SET
+                    status = 'running',
+                    container_id = ?1,
+                    started_at = ?2,
+                    updated_at = ?2
+                 WHERE command_run_id = ?3 AND launch_nonce = ?4 AND status = 'launching'",
+                params![container_id, ts(Self::now()), command_run_id, launch_nonce],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "container CAS failed for command run {command_run_id}: not launching or nonce mismatch"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn complete_verification_command(
+        &mut self,
+        request: CompleteVerificationCommandRequest<'_>,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_command_runs SET
+                    status = ?1,
+                    exit_code = ?2,
+                    termination_reason = ?3,
+                    passed = ?4,
+                    output_tail = ?5,
+                    output_sha256 = ?6,
+                    completed_at = ?7,
+                    duration_ms = ?8,
+                    updated_at = ?7
+                 WHERE command_run_id = ?9",
+                params![
+                    request.status,
+                    request.exit_code,
+                    request.termination_reason,
+                    request.passed.map(|value| if value { 1 } else { 0 }),
+                    request.output_tail,
+                    request.output_sha256,
+                    ts(request.completed_at),
+                    request.duration_ms as i64,
+                    request.command_run_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification command run {} not found",
+                request.command_run_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// A required command that was never invoked because an earlier command
+    /// failed. The gate treats it as an unexecuted required command.
+    pub fn mark_verification_command_not_run(&mut self, command_run_id: &str) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_command_runs SET status = 'not_run',
+                    updated_at = ?1 WHERE command_run_id = ?2",
+                params![ts(Self::now()), command_run_id],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification command run {command_run_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn list_verification_command_runs(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<VerificationCommandRunRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT command_run_id, run_id, attempt_id, ordinal, name, kind,
+                    configuration_revision, command_sha256, status, launch_nonce,
+                    pid, process_group_id, process_start_token, executable_identity,
+                    container_id, started_at, completed_at, duration_ms, exit_code,
+                    termination_reason, passed, output_tail, output_sha256,
+                    execution_profile, created_at, updated_at
+                 FROM verification_command_runs WHERE attempt_id = ?1 ORDER BY ordinal",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![attempt_id], verification_command_run_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn store_verification_evidence(
+        &mut self,
+        records: &[VerificationEvidenceRecord],
+    ) -> Result<()> {
+        let now_s = ts(Self::now());
+        for record in records {
+            self.conn
+                .execute(
+                    "INSERT INTO verification_evidence (
+                        evidence_id, run_id, attempt_id, relative_path,
+                        sha256, bytes_len, collected_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(attempt_id, relative_path) DO UPDATE SET
+                        sha256 = excluded.sha256,
+                        bytes_len = excluded.bytes_len,
+                        collected_at = excluded.collected_at",
+                    params![
+                        record.evidence_id,
+                        record.run_id,
+                        record.attempt_id,
+                        record.relative_path,
+                        record.sha256,
+                        record.bytes_len as i64,
+                        now_s,
+                    ],
+                )
+                .map_err(storage_error)?;
+        }
+        Ok(())
+    }
+
+    pub fn list_verification_evidence(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<VerificationEvidenceRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT evidence_id, run_id, attempt_id, relative_path,
+                    sha256, bytes_len, collected_at
+                 FROM verification_evidence WHERE attempt_id = ?1 ORDER BY collected_at",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![attempt_id], verification_evidence_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn store_verification_gate(&mut self, record: &VerificationGateRecord) -> Result<()> {
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO verification_gates (
+                    gate_id, run_id, attempt_id, status,
+                    verifier_manifest_json, command_summary_json, computed_at,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                 ON CONFLICT(attempt_id) DO UPDATE SET
+                    status = excluded.status,
+                    verifier_manifest_json = excluded.verifier_manifest_json,
+                    command_summary_json = excluded.command_summary_json,
+                    computed_at = excluded.computed_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    record.gate_id,
+                    record.run_id,
+                    record.attempt_id,
+                    record.status,
+                    record
+                        .verifier_manifest
+                        .as_ref()
+                        .map(bounded_json)
+                        .transpose()?,
+                    record.command_summary.as_ref().map(bounded_json).transpose()?,
+                    record.computed_at.map(ts),
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn get_verification_gate(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<VerificationGateRecord>> {
+        self.conn
+            .query_row(
+                "SELECT gate_id, run_id, attempt_id, status,
+                    verifier_manifest_json, command_summary_json, computed_at,
+                    created_at, updated_at
+                 FROM verification_gates WHERE attempt_id = ?1",
+                params![attempt_id],
+                verification_gate_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn create_verification_publication_intent(
+        &mut self,
+        run_id: &str,
+        attempt_id: &str,
+        kind: &str,
+    ) -> Result<VerificationPublicationIntent> {
+        let intent_id = new_id();
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO verification_publication_intents (
+                    intent_id, run_id, attempt_id, kind, status,
+                    completed_steps_json, retry_count, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'pending', '[]', 0, ?5, ?5)",
+                params![intent_id, run_id, attempt_id, kind, now_s],
+            )
+            .map_err(storage_error)?;
+        self.list_verification_publications_for_run(run_id)?
+            .into_iter()
+            .find(|intent| intent.intent_id == intent_id)
+            .ok_or_else(|| {
+                SymphonyError::StorageError("created verification intent is missing".to_string())
+            })
+    }
+
+    pub fn list_verification_publications_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<VerificationPublicationIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT intent_id, run_id, attempt_id, kind, status,
+                    completed_steps_json, retry_count, last_error_json, comment_id,
+                    created_at, updated_at
+                 FROM verification_publication_intents WHERE run_id = ?1 ORDER BY created_at",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], verification_publication_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn mark_verification_publication_applied(
+        &mut self,
+        intent_id: &str,
+        comment_id: &str,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_publication_intents SET status = 'applied',
+                    comment_id = ?1, updated_at = ?2 WHERE intent_id = ?3",
+                params![comment_id, ts(Self::now()), intent_id],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification intent {intent_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn verification_metrics(&self) -> Result<VerificationMetricsAggregate> {
+        let (total, completed, failed, interrupted, superseded): (u64, u64, u64, u64, u64) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*),
+                    COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'interrupted' THEN 1 ELSE 0 END), 0),
+                    COALESCE(SUM(CASE WHEN status = 'superseded' THEN 1 ELSE 0 END), 0)
+                 FROM verification_attempts",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .map_err(storage_error)?;
+        let commands_run = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_command_runs WHERE status != 'not_run'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let commands_passed = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_command_runs WHERE passed = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let commands_failed = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_command_runs WHERE passed = 0",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let gates_passed = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_gates WHERE status = 'passed'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let gates_failed = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_gates WHERE status = 'failed'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let evidence_files = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_evidence",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let preview_publications = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_publication_intents WHERE kind = 'preview' AND status = 'applied'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        Ok(VerificationMetricsAggregate {
+            total_attempts: total,
+            completed_attempts: completed,
+            failed_attempts: failed,
+            interrupted_attempts: interrupted,
+            superseded_attempts: superseded,
+            commands_run,
+            commands_passed,
+            commands_failed,
+            gates_passed,
+            gates_failed,
+            evidence_files,
+            preview_publications,
+            base: crate::triage::domain::TriageMetricsAggregate::default(),
+        })
+    }
+}
+
 const SPEC_ARTIFACT_SELECT: &str =
     "SELECT artifact_id, run_id, stage_run_id, issue_revision, configuration_revision,
         version, artifact_json, review_cycles, unresolved_findings_json, received_at, bytes_len
@@ -5355,6 +6040,111 @@ fn review_artifact_from_row(
         finding_count: row.get(12)?,
         received_at: parse_ts_row(row.get::<_, String>(13)?)?,
         bytes_len: row.get(14)?,
+    })
+}
+
+fn verification_attempt_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<VerificationAttemptRecord> {
+    Ok(VerificationAttemptRecord {
+        attempt_id: row.get(0)?,
+        run_id: row.get(1)?,
+        stage_run_id: row.get(2)?,
+        pr_number: row.get::<_, i64>(3)? as u64,
+        reviewed_head_sha: row.get(4)?,
+        base_sha: row.get(5)?,
+        spec_artifact_id: row.get(6)?,
+        implementation_artifact_id: row.get(7)?,
+        review_artifact_id: row.get(8)?,
+        configuration_revision: row.get(9)?,
+        execution_profile: row.get(10)?,
+        status: row.get(11)?,
+        workspace_path: row.get(12)?,
+        evidence_dir: row.get(13)?,
+        error: optional_from_json(row.get::<_, Option<String>>(14)?)?,
+        created_at: parse_ts_row(row.get::<_, String>(15)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(16)?)?,
+    })
+}
+
+fn verification_command_run_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<VerificationCommandRunRecord> {
+    let kind: String = row.get(5)?;
+    let passed: Option<i64> = row.get(20)?;
+    Ok(VerificationCommandRunRecord {
+        command_run_id: row.get(0)?,
+        run_id: row.get(1)?,
+        attempt_id: row.get(2)?,
+        ordinal: row.get::<_, i64>(3)? as u32,
+        name: row.get(4)?,
+        kind: serde_json::from_value(serde_json::Value::String(kind)).map_err(row_error)?,
+        configuration_revision: row.get(6)?,
+        command_sha256: row.get(7)?,
+        status: row.get(8)?,
+        launch_nonce: row.get(9)?,
+        pid: row.get(10)?,
+        process_group_id: row.get(11)?,
+        process_start_token: row.get(12)?,
+        executable_identity: row.get(13)?,
+        container_id: row.get(14)?,
+        started_at: parse_optional_ts_row(row.get::<_, Option<String>>(15)?)?,
+        completed_at: parse_optional_ts_row(row.get::<_, Option<String>>(16)?)?,
+        duration_ms: row.get(17)?,
+        exit_code: row.get(18)?,
+        termination_reason: row.get(19)?,
+        passed: passed.map(|value| value != 0),
+        output_tail: row.get(21)?,
+        output_sha256: row.get(22)?,
+        execution_profile: row.get(23)?,
+        created_at: parse_ts_row(row.get::<_, String>(24)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(25)?)?,
+    })
+}
+
+fn verification_evidence_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<VerificationEvidenceRecord> {
+    Ok(VerificationEvidenceRecord {
+        evidence_id: row.get(0)?,
+        run_id: row.get(1)?,
+        attempt_id: row.get(2)?,
+        relative_path: row.get(3)?,
+        sha256: row.get(4)?,
+        bytes_len: row.get::<_, i64>(5)? as u64,
+        collected_at: parse_ts_row(row.get::<_, String>(6)?)?,
+    })
+}
+
+fn verification_gate_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VerificationGateRecord> {
+    Ok(VerificationGateRecord {
+        gate_id: row.get(0)?,
+        run_id: row.get(1)?,
+        attempt_id: row.get(2)?,
+        status: row.get(3)?,
+        verifier_manifest: optional_from_json(row.get::<_, Option<String>>(4)?)?,
+        command_summary: optional_from_json(row.get::<_, Option<String>>(5)?)?,
+        computed_at: parse_optional_ts_row(row.get::<_, Option<String>>(6)?)?,
+        created_at: parse_ts_row(row.get::<_, String>(7)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(8)?)?,
+    })
+}
+
+fn verification_publication_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<VerificationPublicationIntent> {
+    Ok(VerificationPublicationIntent {
+        intent_id: row.get(0)?,
+        run_id: row.get(1)?,
+        attempt_id: row.get(2)?,
+        kind: row.get(3)?,
+        status: parse_publication_status(&row.get::<_, String>(4)?).map_err(row_error)?,
+        completed_steps: serde_json::from_str(&row.get::<_, String>(5)?).map_err(row_error)?,
+        retry_count: row.get::<_, i64>(6)? as u32,
+        last_error: optional_from_json(row.get::<_, Option<String>>(7)?)?,
+        comment_id: row.get(8)?,
+        created_at: parse_ts_row(row.get::<_, String>(9)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(10)?)?,
     })
 }
 
@@ -6661,6 +7451,350 @@ mod tests {
         assert!(!store
             .review_artifact_exists("run-review", "head-sha", "other-base")
             .unwrap());
+    }
+
+    #[test]
+    fn verification_attempt_launch_cas_and_completion_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        let attempt = store
+            .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                attempt_id: "verification-attempt-1".to_string(),
+                stage_run_id: stage.stage_run_id.clone(),
+                pr_number: 42,
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                review_artifact_id: "review".to_string(),
+                configuration_revision: "cfg-rev".to_string(),
+                execution_profile: "local".to_string(),
+            })
+            .unwrap();
+        assert_eq!(attempt.status, "running");
+        assert_eq!(attempt.run_id, stage.run_id);
+
+        // Launching record + nonce, then a CAS identity transition.
+        let run_id = stage.run_id.clone();
+        let command_run_id = store
+            .record_verification_command_launch(
+                &run_id,
+                "verification-attempt-1",
+                1,
+                "affected-validation",
+                VerificationCommandKind::Test,
+                "cfg-rev",
+                "sha256-command",
+                "local",
+                "nonce-1",
+            )
+            .unwrap();
+        let identity = ProcessIdentity {
+            pid: 4242,
+            process_group_id: 4242,
+            start_token: Some("token-1".to_string()),
+            executable: Some("/bin/sh".to_string()),
+        };
+        store
+            .cas_verification_launch_identity(&command_run_id, "nonce-1", &identity)
+            .unwrap();
+        // A stale nonce or already-transitioned record cannot claim the launch.
+        let stale = store.cas_verification_launch_identity(&command_run_id, "nonce-1", &identity);
+        assert!(stale.is_err(), "second CAS must fail");
+        let wrong_nonce =
+            store.cas_verification_launch_identity(&command_run_id, "nonce-2", &identity);
+        assert!(wrong_nonce.is_err(), "nonce mismatch must fail");
+
+        let runs = store
+            .list_verification_command_runs("verification-attempt-1")
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "running");
+        assert_eq!(runs[0].pid, Some(4242));
+        assert_eq!(runs[0].process_group_id, Some(4242));
+        assert_eq!(runs[0].launch_nonce.as_deref(), Some("nonce-1"));
+
+        store
+            .complete_verification_command(CompleteVerificationCommandRequest {
+                command_run_id: &command_run_id,
+                status: "completed",
+                exit_code: Some(0),
+                termination_reason: None,
+                passed: Some(true),
+                output_tail: Some("ok"),
+                output_sha256: Some("out-digest"),
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                duration_ms: 12,
+            })
+            .unwrap();
+        let runs = store
+            .list_verification_command_runs("verification-attempt-1")
+            .unwrap();
+        assert_eq!(runs[0].status, "completed");
+        assert_eq!(runs[0].passed, Some(true));
+        assert_eq!(runs[0].duration_ms, Some(12));
+        assert_eq!(runs[0].output_sha256.as_deref(), Some("out-digest"));
+
+        // Not-run marking for commands skipped after a failure.
+        let skipped_id = store
+            .record_verification_command_launch(
+                &run_id,
+                "verification-attempt-1",
+                2,
+                "product-acceptance",
+                VerificationCommandKind::Acceptance,
+                "cfg-rev",
+                "sha256-acceptance",
+                "local",
+                "nonce-2",
+            )
+            .unwrap();
+        store.mark_verification_command_not_run(&skipped_id).unwrap();
+        let runs = store
+            .list_verification_command_runs("verification-attempt-1")
+            .unwrap();
+        assert_eq!(runs[1].status, "not_run");
+    }
+
+    #[test]
+    fn verification_evidence_gate_and_publication_persist_durably() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        let run_id = stage.run_id.clone();
+        store
+            .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                attempt_id: "verification-attempt-1".to_string(),
+                stage_run_id: stage.stage_run_id.clone(),
+                pr_number: 42,
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                review_artifact_id: "review".to_string(),
+                configuration_revision: "cfg-rev".to_string(),
+                execution_profile: "local".to_string(),
+            })
+            .unwrap();
+
+        store
+            .store_verification_evidence(&[VerificationEvidenceRecord {
+                evidence_id: "evidence-1".to_string(),
+                run_id: run_id.clone(),
+                attempt_id: "verification-attempt-1".to_string(),
+                relative_path: "reports/summary.json".to_string(),
+                sha256: "digest-1".to_string(),
+                bytes_len: 42,
+                collected_at: Utc::now(),
+            }])
+            .unwrap();
+        let evidence = store
+            .list_verification_evidence("verification-attempt-1")
+            .unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].relative_path, "reports/summary.json");
+        assert_eq!(evidence[0].sha256, "digest-1");
+
+        store
+            .store_verification_gate(&VerificationGateRecord {
+                gate_id: "gate-1".to_string(),
+                run_id: run_id.clone(),
+                attempt_id: "verification-attempt-1".to_string(),
+                status: "passed".to_string(),
+                verifier_manifest: None,
+                command_summary: None,
+                computed_at: Some(Utc::now()),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        let gate = store
+            .get_verification_gate("verification-attempt-1")
+            .unwrap()
+            .expect("gate must persist");
+        assert_eq!(gate.status, "passed");
+
+        let intent = store
+            .create_verification_publication_intent(&run_id, "verification-attempt-1", "preview")
+            .unwrap();
+        store
+            .mark_verification_publication_applied(&intent.intent_id, "comment-99")
+            .unwrap();
+        let intents = store.list_verification_publications_for_run(&run_id).unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].status.as_str(), "applied");
+        assert_eq!(intents[0].comment_id.as_deref(), Some("comment-99"));
+    }
+
+    #[test]
+    fn a5_eligibility_requires_applied_automatic_review_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute(
+                "INSERT INTO factory_runs (
+                    run_id, forge_host, repository, issue_id, issue_identifier,
+                    issue_revision, status, current_stage, created_at, updated_at
+                 ) VALUES ('run-review', 'github.com', 'owner/repo', '123', '#123',
+                    'issue-rev', 'running', 'review', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO spec_run_state (
+                    run_id, approved_artifact_id, approved_version, decision, updated_at
+                 ) VALUES ('run-review', 'spec-artifact', 1, 'approved', ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_artifacts (
+                    artifact_id, run_id, stage_run_id, approved_artifact_id,
+                    approved_version, issue_revision, configuration_revision,
+                    schema_version, manifest_json, base_commit, approved_spec_path,
+                    validation_cycles, execution_profile, received_at, bytes_len
+                 ) VALUES ('implementation-artifact', 'run-review', 'implementation-stage',
+                    'spec-artifact', 1, 'issue-rev', 'config-rev', 1, '{}', 'base',
+                    'spec.md', 1, 'default', ?1, 1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('implementation-intent', 'run-review',
+                    'implementation-artifact', 'draft_pr', 'applied', '[]', '{}', '{}',
+                    '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_draft_pr_artifacts (
+                    artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 ) VALUES ('draft-artifact', 'run-review', 'implementation-artifact',
+                    'implementation-intent', 42, 'https://github.com/owner/repo/pull/42',
+                    1, 'feature', 'main', 'head-sha', 'marker', ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_attempts (
+                    attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                    implementation_artifact_id, spec_artifact_id, pr_number,
+                    reviewed_head_sha, base_sha, status, created_at, updated_at
+                 ) VALUES ('review-attempt', 'run-review', 'review-stage', 'draft-artifact',
+                    'implementation-artifact', 'spec-artifact', 42, 'head-sha', 'base-sha',
+                    'completed', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_findings_artifacts (
+                    artifact_id, run_id, stage_run_id, attempt_id,
+                    draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                    schema_version, reviewed_head_sha, base_sha, manifest_json,
+                    no_findings, finding_count, received_at, bytes_len
+                 ) VALUES ('review-artifact', 'run-review', 'review-stage', 'review-attempt',
+                    'draft-artifact', 'implementation-artifact', 'spec-artifact',
+                    1, 'head-sha', 'base-sha', ?1, 1, 0, ?2, 2)",
+                params![
+                    serde_json::json!({"schema_version":1,"reviewed_head_sha":"head-sha","base_sha":"base-sha","spec_conformance_summary":"none","no_findings":true,"findings":[]}).to_string(),
+                    now,
+                ],
+            )
+            .unwrap();
+
+        // No applied automatic publication yet: not eligible.
+        assert!(store.list_a5_eligible_verification_runs().unwrap().is_empty());
+
+        // A preview publication is never sufficient.
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, route_state,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('preview-intent', 'run-review', 'review-artifact', 'preview',
+                    'applied', '[]', 0, 'Verification', '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        assert!(
+            store.list_a5_eligible_verification_runs().unwrap().is_empty(),
+            "A4 preview publication must never feed A5"
+        );
+
+        // The applied automatic publication routes into the trigger state.
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, route_state,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('automatic-intent', 'run-review', 'review-artifact', 'automatic',
+                    'applied', '[]', 0, 'Verification', '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        let eligible = store.list_a5_eligible_verification_runs().unwrap();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].run_id, "run-review");
+        assert_eq!(eligible[0].review_artifact_id, "review-artifact");
+        assert_eq!(eligible[0].reviewed_head_sha, "head-sha");
+        assert_eq!(eligible[0].reviewed_base_sha, "base-sha");
+        assert_eq!(eligible[0].route_state.as_deref(), Some("Verification"));
+        assert_eq!(eligible[0].spec_artifact_id, "spec-artifact");
+        assert_eq!(eligible[0].implementation_artifact_id, "implementation-artifact");
+
+        // A nonterminal verification stage run removes the run from the queue.
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        assert_eq!(stage.stage, VERIFICATION_STAGE_NAME);
+        assert!(store.list_a5_eligible_verification_runs().unwrap().is_empty());
     }
 
     #[test]

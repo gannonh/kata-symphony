@@ -200,7 +200,10 @@ pub fn sha256_file(path: &Path) -> Result<String> {
 
 /// Atomically store bytes (or a file) under content-addressed layout.
 ///
-/// Returns `(sha256, bytes_len)`. Existing digests are re-verified before reuse.
+/// Returns `(sha256, bytes_len)`. The staged copy is hashed after the source
+/// copy and its digest/size are compared with the intended identity before the
+/// rename, so a source that mutates between hashing and storing can never land
+/// beneath the wrong digest. Existing digests are re-verified before reuse.
 pub fn store_blob_atomic(
     artifacts_dir: &Path,
     source: BlobSource<'_>,
@@ -260,7 +263,62 @@ pub fn store_blob_atomic(
             file.sync_all().map_err(|error| {
                 SymphonyError::StorageError(format!("failed syncing staged blob: {error}"))
             })?;
+            // Hash the staged copy, not the source: a source that changed
+            // after `sha256_file` must be caught here.
+            let staged_sha = sha256_file(&staged)?;
+            if staged_sha != sha256 {
+                let _ = fs::remove_file(&staged);
+                return Err(SymphonyError::StorageError(format!(
+                    "staged blob digest {staged_sha} differs from source digest {sha256}; source mutated while copying"
+                )));
+            }
             (sha256, bytes_len, staged)
+        }
+        BlobSource::PathVerified {
+            path,
+            intended_sha256,
+            intended_bytes_len,
+        } => {
+            let meta = fs::metadata(path).map_err(|error| {
+                SymphonyError::StorageError(format!("failed stating {}: {error}", path.display()))
+            })?;
+            let bytes_len = meta.len();
+            if bytes_len != intended_bytes_len {
+                return Err(SymphonyError::StorageError(format!(
+                    "evidence {} size {} does not match intended size {intended_bytes_len}",
+                    path.display(),
+                    bytes_len
+                )));
+            }
+            if bytes_len > max_bytes {
+                return Err(SymphonyError::StorageError(format!(
+                    "evidence is {bytes_len} bytes; max is {max_bytes}"
+                )));
+            }
+            let staged = artifacts_dir.join(unique_temp_name(&intended_sha256));
+            fs::copy(path, &staged).map_err(|error| {
+                SymphonyError::StorageError(format!(
+                    "failed copying evidence into temp {}: {error}",
+                    staged.display()
+                ))
+            })?;
+            let file = File::open(&staged).map_err(|error| {
+                SymphonyError::StorageError(format!("failed opening staged blob: {error}"))
+            })?;
+            file.sync_all().map_err(|error| {
+                SymphonyError::StorageError(format!("failed syncing staged blob: {error}"))
+            })?;
+            // The staged copy must hash to the intended digest recorded when
+            // the evidence was collected; a post-hash mutation fails closed.
+            let staged_sha = sha256_file(&staged)?;
+            if staged_sha != intended_sha256 {
+                let _ = fs::remove_file(&staged);
+                return Err(SymphonyError::StorageError(format!(
+                    "evidence {} staged digest {staged_sha} does not match intended digest {intended_sha256}",
+                    path.display()
+                )));
+            }
+            (intended_sha256.clone(), intended_bytes_len, staged)
         }
     };
 
@@ -308,6 +366,14 @@ pub fn store_blob_atomic(
 pub enum BlobSource<'a> {
     Bytes(&'a [u8]),
     Path(&'a Path),
+    /// Path whose bytes must match the intended content identity recorded when
+    /// the evidence was collected. The staged copy is hashed after the source
+    /// copy and compared with the intended digest/size before rename.
+    PathVerified {
+        path: &'a Path,
+        intended_sha256: String,
+        intended_bytes_len: u64,
+    },
 }
 
 /// Clone a verified bundle into a fresh workspace directory.
@@ -620,5 +686,92 @@ mod tests {
         let arts = tmp.path().join("arts");
         let err = store_blob_atomic(&arts, BlobSource::Bytes(&[0u8; 64]), 16).unwrap_err();
         assert!(err.to_string().contains("max_bundle_bytes"));
+    }
+
+    #[test]
+    fn verified_blob_rejects_a_mutated_source_beneath_a_wrong_digest() {
+        let tmp = tempdir().unwrap();
+        let arts = tmp.path().join("arts");
+        let source = tmp.path().join("evidence.txt");
+        fs::write(&source, b"immutable bytes").unwrap();
+        let intended = sha256_file(&source).unwrap();
+        let len = fs::metadata(&source).unwrap().len();
+
+        // Adversarial mutation after collection: the file bytes change but the
+        // recorded digest still describes the old content.
+        fs::write(&source, b"tampered bytes!").unwrap();
+        let err = store_blob_atomic(
+            &arts,
+            BlobSource::PathVerified {
+                path: &source,
+                intended_sha256: intended.clone(),
+                intended_bytes_len: len,
+            },
+            1024,
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("does not match intended digest"),
+            "mutated evidence must fail closed: {err}"
+        );
+        assert!(
+            !blob_path(&arts, &intended).exists(),
+            "no blob may be stored beneath the stale digest"
+        );
+
+        // Size mismatch also fails closed.
+        fs::write(&source, b"short").unwrap();
+        let err = store_blob_atomic(
+            &arts,
+            BlobSource::PathVerified {
+                path: &source,
+                intended_sha256: intended.clone(),
+                intended_bytes_len: len,
+            },
+            1024,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("does not match intended size"));
+    }
+
+    #[test]
+    fn verified_blob_stores_when_staged_copy_matches_identity() {
+        let tmp = tempdir().unwrap();
+        let arts = tmp.path().join("arts");
+        let source = tmp.path().join("evidence.txt");
+        fs::write(&source, b"stable bytes").unwrap();
+        let intended = sha256_file(&source).unwrap();
+        let len = fs::metadata(&source).unwrap().len();
+
+        let (digest, stored_len) = store_blob_atomic(
+            &arts,
+            BlobSource::PathVerified {
+                path: &source,
+                intended_sha256: intended.clone(),
+                intended_bytes_len: len,
+            },
+            1024,
+        )
+        .unwrap();
+        assert_eq!(digest, intended);
+        assert_eq!(stored_len, len);
+        assert!(blob_path(&arts, &digest).is_file());
+        assert_eq!(fs::read(blob_path(&arts, &digest)).unwrap(), b"stable bytes");
+        // No incomplete temp remains behind.
+        assert_eq!(cleanup_incomplete_temps(&arts).unwrap(), 0);
+    }
+
+    #[test]
+    fn plain_path_source_still_hashes_the_staged_copy() {
+        let tmp = tempdir().unwrap();
+        let arts = tmp.path().join("arts");
+        let source = tmp.path().join("plain.txt");
+        fs::write(&source, b"plain content").unwrap();
+
+        let (digest, len) =
+            store_blob_atomic(&arts, BlobSource::Path(&source), 1024).unwrap();
+        assert_eq!(digest, sha256_file(&source).unwrap());
+        assert_eq!(len, 13);
+        assert!(blob_path(&arts, &digest).is_file());
     }
 }
