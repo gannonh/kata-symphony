@@ -5385,6 +5385,26 @@ impl SqliteFactoryStore {
             .map_err(storage_error)
     }
 
+    /// Every attempt that was still running when the process stopped.
+    pub fn list_running_verification_attempts(&self) -> Result<Vec<VerificationAttemptRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT attempt_id, run_id, stage_run_id, pr_number,
+                    reviewed_head_sha, base_sha, spec_artifact_id,
+                    implementation_artifact_id, review_artifact_id,
+                    configuration_revision, execution_profile, status,
+                    workspace_path, evidence_dir, error_json, created_at, updated_at
+                 FROM verification_attempts WHERE status = 'running' ORDER BY created_at",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], verification_attempt_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
     pub fn update_verification_attempt(
         &mut self,
         request: UpdateVerificationAttemptRequest<'_>,
@@ -5826,6 +5846,60 @@ impl SqliteFactoryStore {
         if changed == 0 {
             return Err(SymphonyError::StorageError(format!(
                 "verification intent {intent_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Complete a running verification stage run with usage accounting.
+    pub fn complete_verification_stage_run(
+        &mut self,
+        stage_run_id: &str,
+        usage: StageUsage,
+    ) -> Result<()> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE stage_runs SET status = 'completed', completed_at = ?1,
+                    input_tokens = ?2, output_tokens = ?3, total_tokens = ?4, updated_at = ?1
+                 WHERE stage_run_id = ?5 AND status = 'running'",
+                params![
+                    now_s,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.total_tokens,
+                    stage_run_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification stage run {stage_run_id} is not running"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Mark a running verification stage run interrupted (restart recovery).
+    pub fn interrupt_verification_stage_run(
+        &mut self,
+        stage_run_id: &str,
+        error: &FactoryError,
+    ) -> Result<()> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE stage_runs SET status = 'interrupted', completed_at = ?1,
+                    error_json = ?2, updated_at = ?1
+                 WHERE stage_run_id = ?3 AND status IN ('running', 'pending')",
+                params![now_s, bounded_json(error)?, stage_run_id],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification stage run {stage_run_id} is not running or pending"
             )));
         }
         Ok(())

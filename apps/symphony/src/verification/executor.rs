@@ -560,6 +560,11 @@ async fn execute_docker(
     })
 }
 
+/// Stop and remove a persisted verification container (recovery path).
+pub async fn stop_persisted_container(container_id: &str) -> Result<()> {
+    stop_container(container_id).await
+}
+
 async fn stop_container(container_id: &str) -> Result<()> {
     let output = Command::new("docker")
         .args(["stop", "-t", "5", container_id])

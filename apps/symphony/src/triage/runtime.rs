@@ -564,6 +564,199 @@ impl SharedFactoryStore {
         self.with_store(|store| store.get_review_artifact(artifact_id))
     }
 
+    // ── A5 verification wrappers ──────────────────────────────────────────
+
+    pub fn claim_verification_attempt(&self, request: ClaimAttemptRequest) -> Result<StageRunRecord> {
+        self.with_store_mut(|store| {
+            store.claim_stage_attempt(crate::verification::domain::VERIFICATION_STAGE_NAME, request)
+        })
+    }
+
+    pub fn list_a5_eligible_verification_runs(
+        &self,
+    ) -> Result<Vec<crate::triage::store::A5EligibleVerificationRun>> {
+        self.with_store(|store| store.list_a5_eligible_verification_runs())
+    }
+
+    pub fn store_verification_attempt_inputs(
+        &self,
+        request: crate::triage::store::StoreVerificationAttemptRequest,
+    ) -> Result<crate::verification::domain::VerificationAttemptRecord> {
+        self.with_store_mut(|store| store.store_verification_attempt_inputs(request))
+    }
+
+    pub fn get_verification_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<crate::verification::domain::VerificationAttemptRecord>> {
+        self.with_store(|store| store.get_verification_attempt(attempt_id))
+    }
+
+    pub fn list_verification_attempts(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::verification::domain::VerificationAttemptRecord>> {
+        self.with_store(|store| store.list_verification_attempts(run_id))
+    }
+
+    pub fn list_running_verification_attempts(
+        &self,
+    ) -> Result<Vec<crate::verification::domain::VerificationAttemptRecord>> {
+        self.with_store(|store| store.list_running_verification_attempts())
+    }
+
+    pub fn update_verification_attempt(
+        &self,
+        request: crate::triage::store::UpdateVerificationAttemptRequest<'_>,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.update_verification_attempt(request))
+    }
+
+    pub fn record_verification_command_launch(
+        &self,
+        run_id: &str,
+        attempt_id: &str,
+        ordinal: u32,
+        name: &str,
+        kind: crate::verification::domain::VerificationCommandKind,
+        configuration_revision: &str,
+        command_sha256: &str,
+        execution_profile: &str,
+        launch_nonce: &str,
+    ) -> Result<String> {
+        self.with_store_mut(|store| {
+            store.record_verification_command_launch(
+                run_id,
+                attempt_id,
+                ordinal,
+                name,
+                kind,
+                configuration_revision,
+                command_sha256,
+                execution_profile,
+                launch_nonce,
+            )
+        })
+    }
+
+    pub fn cas_verification_launch_identity(
+        &self,
+        command_run_id: &str,
+        launch_nonce: &str,
+        identity: &crate::triage::process_identity::ProcessIdentity,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.cas_verification_launch_identity(command_run_id, launch_nonce, identity)
+        })
+    }
+
+    pub fn cas_verification_container(
+        &self,
+        command_run_id: &str,
+        launch_nonce: &str,
+        container_id: &str,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.cas_verification_container(command_run_id, launch_nonce, container_id)
+        })
+    }
+
+    pub fn complete_verification_command(
+        &self,
+        request: crate::triage::store::CompleteVerificationCommandRequest<'_>,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.complete_verification_command(request))
+    }
+
+    pub fn mark_verification_command_not_run(&self, command_run_id: &str) -> Result<()> {
+        self.with_store_mut(|store| store.mark_verification_command_not_run(command_run_id))
+    }
+
+    pub fn list_verification_command_runs(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<crate::verification::domain::VerificationCommandRunRecord>> {
+        self.with_store(|store| store.list_verification_command_runs(attempt_id))
+    }
+
+    pub fn store_verification_evidence(
+        &self,
+        records: &[crate::verification::domain::VerificationEvidenceRecord],
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.store_verification_evidence(records))
+    }
+
+    pub fn list_verification_evidence(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<crate::verification::domain::VerificationEvidenceRecord>> {
+        self.with_store(|store| store.list_verification_evidence(attempt_id))
+    }
+
+    pub fn store_verification_gate(
+        &self,
+        record: &crate::verification::domain::VerificationGateRecord,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.store_verification_gate(record))
+    }
+
+    pub fn get_verification_gate(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<crate::verification::domain::VerificationGateRecord>> {
+        self.with_store(|store| store.get_verification_gate(attempt_id))
+    }
+
+    pub fn create_verification_publication_intent(
+        &self,
+        run_id: &str,
+        attempt_id: &str,
+        kind: &str,
+    ) -> Result<crate::verification::domain::VerificationPublicationIntent> {
+        self.with_store_mut(|store| {
+            store.create_verification_publication_intent(run_id, attempt_id, kind)
+        })
+    }
+
+    pub fn list_verification_publications_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::verification::domain::VerificationPublicationIntent>> {
+        self.with_store(|store| store.list_verification_publications_for_run(run_id))
+    }
+
+    pub fn mark_verification_publication_applied(
+        &self,
+        intent_id: &str,
+        comment_id: &str,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.mark_verification_publication_applied(intent_id, comment_id)
+        })
+    }
+
+    pub fn complete_verification_stage_run(
+        &self,
+        stage_run_id: &str,
+        usage: crate::triage::domain::StageUsage,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.complete_verification_stage_run(stage_run_id, usage))
+    }
+
+    pub fn interrupt_verification_stage_run(
+        &self,
+        stage_run_id: &str,
+        error: &FactoryError,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.interrupt_verification_stage_run(stage_run_id, error))
+    }
+
+    pub fn verification_metrics(
+        &self,
+    ) -> Result<crate::verification::domain::VerificationMetricsAggregate> {
+        self.with_store(|store| store.verification_metrics())
+    }
+
     pub fn list_review_finding_records_for_artifact(
         &self,
         artifact_id: &str,
@@ -1507,6 +1700,11 @@ pub struct TriageRuntime {
     implementation_coordinator:
         Option<ImplementationCoordinator<GithubClient, GithubClient, LiveImplementationHarness>>,
     review_coordinator: Option<ReviewCoordinator<GithubClient, LiveReviewWorker>>,
+    verification_coordinator:
+        Option<crate::verification::coordinator::VerificationCoordinator<
+            GithubClient,
+            crate::verification::worker::LiveVerificationWorker,
+        >>,
     store: SharedFactoryStore,
     sessions: Arc<Mutex<crate::domain::TriageSessionRegistry>>,
     factory_sessions: Arc<Mutex<FactorySessionRegistry>>,
@@ -1770,8 +1968,35 @@ impl TriageRuntime {
                     .max(1),
             },
         );
-        if let Some(events) = emitter {
+        if let Some(events) = emitter.clone() {
             review_coordinator = review_coordinator.with_events(events);
+        }
+
+        let workspace_root = crate::verification::coordinator::resolve_workspace_root(config)?;
+        let mut verification_coordinator =
+            crate::verification::coordinator::VerificationCoordinator::new(
+                store.clone(),
+                client.clone(),
+                client.clone(),
+                crate::github::projects_v2::ProjectsV2Client::new(client.clone()),
+                crate::verification::worker::LiveVerificationWorker,
+                crate::verification::coordinator::VerificationCoordinatorConfig {
+                    forge_host: forge_host.clone(),
+                    repository: repository.clone(),
+                    owner_instance: owner_instance.clone(),
+                    workflow_dir: workflow_dir.clone(),
+                    project_owner: owner.to_string(),
+                    project_number,
+                    max_pages: config
+                        .triage
+                        .max_intake_pages
+                        .max(config.spec.max_intake_pages)
+                        .max(1),
+                    workspace_root,
+                },
+            );
+        if let Some(events) = emitter.clone() {
+            verification_coordinator = verification_coordinator.with_events(events);
         }
 
         Ok(Some(Self {
@@ -1779,6 +2004,7 @@ impl TriageRuntime {
             spec_coordinator,
             implementation_coordinator: Some(implementation_coordinator),
             review_coordinator: Some(review_coordinator),
+            verification_coordinator: Some(verification_coordinator),
             store,
             sessions,
             factory_sessions,
@@ -1838,6 +2064,38 @@ impl TriageRuntime {
 
     pub async fn poll(&mut self, config: &ServiceConfig) -> Result<TriagePollSummary> {
         self.reconcile_factory_sessions();
+        // A5 claim/reconciliation runs before legacy dispatch so verification
+        // recovery can terminate owned processes before any new dispatch.
+        if let Some(coordinator) = self.verification_coordinator.as_mut() {
+            match coordinator.poll_once(config).await {
+                Ok(summary) => {
+                    if summary.verification_enabled
+                        || summary.candidates_seen > 0
+                        || summary.recovered > 0
+                    {
+                        tracing::info!(
+                            event = "verification_poll_completed",
+                            enabled = summary.verification_enabled,
+                            candidates_seen = summary.candidates_seen,
+                            attempts_started = summary.attempts_started,
+                            attempts_completed = summary.attempts_completed,
+                            attempts_failed = summary.attempts_failed,
+                            waiting = summary.waiting,
+                            recovered = summary.recovered,
+                            preview_published = summary.preview_published,
+                            "verification poll completed"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "verification_poll_failed",
+                        error = %error,
+                        "verification poll failed; continuing orchestrator loop"
+                    );
+                }
+            }
+        }
         let triage = if let Some(coordinator) = self.coordinator.as_mut() {
             coordinator.poll_once(config).await?
         } else {
