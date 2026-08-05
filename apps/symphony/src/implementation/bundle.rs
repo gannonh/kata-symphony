@@ -149,7 +149,30 @@ pub fn create_result_bundle(workspace: &Path, base: &str, head: &str, dest: &Pat
 }
 
 pub fn verify_bundle(path: &Path) -> Result<()> {
+    // `git bundle verify` demands a repository context even for complete
+    // bundles. Verify against a neutral empty repository so the runtime
+    // working directory never matters (the tests only passed before because
+    // the crate directory sits inside a git checkout).
+    let context = tempdir().map_err(|error| {
+        SymphonyError::StorageError(format!("failed creating bundle verify context: {error}"))
+    })?;
+    let context_git_dir = context.path().join(".git");
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(context.path())
+        .output()
+        .map_err(|error| {
+            SymphonyError::TriageError(format!("git init for bundle verify failed: {error}"))
+        })?;
+    if !init.status.success() {
+        return Err(SymphonyError::TriageError(format!(
+            "git init for bundle verify failed: {}",
+            String::from_utf8_lossy(&init.stderr).trim()
+        )));
+    }
     let output = Command::new("git")
+        .arg("--git-dir")
+        .arg(&context_git_dir)
         .args(["bundle", "verify"])
         .arg(path)
         .output()
