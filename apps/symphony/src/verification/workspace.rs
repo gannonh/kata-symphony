@@ -209,7 +209,10 @@ pub fn verify_workspace_unchanged(workspace: &Path, expected_head: &str) -> Resu
     let flags = git_stdout(workspace, &["ls-files", "-v"])?;
     for line in flags.lines() {
         if let Some(flag) = line.chars().next() {
-            if flag.is_ascii_lowercase() {
+            // `H` is the normal cached flag; `h` (assume-unchanged) and
+            // `S`/`s` (skip-worktree) hide tracked edits from porcelain output
+            // and must fail the attestation.
+            if flag != 'H' {
                 return Err(SymphonyError::TriageError(format!(
                     "tracked file has an assume-unchanged/skip-worktree flag: {}",
                     line.trim()

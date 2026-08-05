@@ -195,15 +195,17 @@ where
                     continue;
                 }
                 if let Some(container_id) = run.container_id.as_deref() {
-                    termination_verified =
-                        crate::verification::executor::stop_persisted_container(container_id)
+                    termination_verified = termination_verified
+                        && crate::verification::executor::stop_persisted_container(container_id)
                             .await
                             .is_ok();
                 } else if let Some(identity) = local_identity_from_record(&run) {
-                    termination_verified = matches!(
-                        crate::triage::process_identity::terminate_process_group(&identity).await,
-                        crate::triage::process_identity::TerminationOutcome::Terminated
-                    );
+                    termination_verified = termination_verified
+                        && matches!(
+                            crate::triage::process_identity::terminate_process_group(&identity)
+                                .await,
+                            crate::triage::process_identity::TerminationOutcome::Terminated
+                        );
                 } else {
                     // A launching record with no identity never released its
                     // payload; nothing is left to terminate.
@@ -226,12 +228,23 @@ where
             }
             // The read-only verifier may also still be running.
             if let Some(identity) = local_identity_from_attempt(&attempt) {
-                if !matches!(
-                    crate::triage::process_identity::terminate_process_group(&identity).await,
-                    crate::triage::process_identity::TerminationOutcome::Terminated
-                ) {
-                    termination_verified = false;
-                }
+                termination_verified = termination_verified
+                    && matches!(
+                        crate::triage::process_identity::terminate_process_group(&identity).await,
+                        crate::triage::process_identity::TerminationOutcome::Terminated
+                    );
+            }
+            if !termination_verified {
+                // The attempt stays RUNNING: the stage pin keeps the run out
+                // of the eligibility queue, no new dispatch can start while
+                // the surviving process group or container is still owned,
+                // and the next poll retries termination until it is verified.
+                tracing::error!(
+                    event = "verification_recovery_termination_failed",
+                    attempt_id = %attempt.attempt_id,
+                    "persisted process group or container survived recovery; attempt retained for retry"
+                );
+                continue;
             }
             let error = FactoryError::new(
                 "verification_attempt_interrupted",
@@ -253,16 +266,8 @@ where
                     error: Some(&error),
                 },
             );
-            if termination_verified {
-                if let Some(workspace_path) = attempt.workspace_path.as_deref() {
-                    self.cleanup_attempt_workspace(workspace_path, &attempt.attempt_id);
-                }
-            } else {
-                tracing::error!(
-                    event = "verification_recovery_termination_failed",
-                    attempt_id = %attempt.attempt_id,
-                    "persisted process group or container survived recovery; workspace retained for diagnosis"
-                );
+            if let Some(workspace_path) = attempt.workspace_path.as_deref() {
+                self.cleanup_attempt_workspace(workspace_path, &attempt.attempt_id);
             }
         }
         Ok(recovered)
@@ -558,12 +563,19 @@ where
             let verifier_repo_path = workspace.workspace_path.clone();
             let store_sink = self.store.clone();
             let attempt_sink = attempt_id.clone();
+            let identity_error: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(None));
+            let identity_error_sink = identity_error.clone();
             let spawned: Option<crate::triage::runner::TriageSpawnSink> =
                 Some(std::sync::Arc::new(move |info| {
-                    let _ = store_sink.record_verifier_identity(
-                        &attempt_sink,
-                        &info.identity,
-                    );
+                    if let Err(error) =
+                        store_sink.record_verifier_identity(&attempt_sink, &info.identity)
+                    {
+                        *identity_error_sink
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                            Some(error.to_string());
+                    }
                 }));
             let mut worker_request = VerificationWorkerRequest {
                 attempt_id: attempt_id.clone(),
@@ -621,6 +633,16 @@ where
                 total_usage.input_tokens += result.usage.input_tokens;
                 total_usage.output_tokens += result.usage.output_tokens;
                 total_usage.total_tokens += result.usage.total_tokens;
+                if let Some(error) = identity_error
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take()
+                {
+                    last_error = Some(format!(
+                        "verifier process identity could not be durably recorded: {error}"
+                    ));
+                    continue;
+                }
                 let parsed: crate::verification::domain::VerifierManifest =
                     match serde_json::from_slice(&result.output_bytes) {
                         Ok(manifest) => manifest,
@@ -732,7 +754,12 @@ where
                 },
             )?;
 
-            // Final revision fence immediately before publication.
+            // Preview publication: one owned comment; nothing else mutates.
+            let intent = self
+                .store
+                .create_verification_publication_intent(&candidate.run_id, &attempt_id, "preview")?;
+
+            // Final revision fence immediately before the comment side effect.
             if self.revision_changed(candidate, issue_number).await? {
                 let error = FactoryError::new(
                     "verification_superseded",
@@ -767,11 +794,6 @@ where
                 );
                 return Ok(ProcessOutcome::Waiting);
             }
-
-            // Preview publication: one owned comment; nothing else mutates.
-            let intent = self
-                .store
-                .create_verification_publication_intent(&candidate.run_id, &attempt_id, "preview")?;
             let comment_id = publish_preview_comment(
                 &self.comments,
                 &self.store,

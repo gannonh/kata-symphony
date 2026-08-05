@@ -151,7 +151,9 @@ pub async fn publish_preview_comment<C: TriageCommentPort>(
                     .map(|user| user.login.as_str())
                     .map(str::trim)
                     .filter(|value| !value.is_empty());
-                if author.is_some_and(|value| !value.eq_ignore_ascii_case(&login)) {
+                // A comment with no author is never adoptable: updating it
+                // could clobber a foreign marker.
+                if !author.is_some_and(|value| value.eq_ignore_ascii_case(&login)) {
                     return Err(SymphonyError::TriageError(format!(
                         "verification marker {marker} is owned by another GitHub login {}",
                         author.unwrap_or("unknown")
