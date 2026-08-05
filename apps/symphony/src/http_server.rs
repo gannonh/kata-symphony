@@ -1002,6 +1002,8 @@ pub struct FactoryRunVerificationHttp {
     pub status: String,
     pub configuration_revision: String,
     pub execution_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::triage::domain::FactoryError>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commands: Vec<VerificationCommandHttp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1077,6 +1079,7 @@ pub fn attach_verification_http_response(
         status: attempt.status.clone(),
         configuration_revision: attempt.configuration_revision.clone(),
         execution_profile: attempt.execution_profile.clone(),
+        error: attempt.error.clone(),
         commands: commands
             .iter()
             .map(|command| VerificationCommandHttp {

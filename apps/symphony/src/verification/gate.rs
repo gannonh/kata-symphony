@@ -46,8 +46,12 @@ pub struct CriterionVerdict {
 
 /// Validate the verifier manifest strictly, then compute the gate.
 ///
-/// Returns the verdict; any violation is a hard error (the attempt fails with
-/// a manifest validation error rather than a product gate failure).
+/// The gate passes only when every command completed and passed (including the
+/// single acceptance command) and every criterion is asserted `pass` with
+/// valid evidence. A `fail` or `not_proven` criterion holds the gate — the
+/// verifier cannot waive it and Symphony never auto-retries a completed gate.
+/// Any manifest violation is a hard error (the attempt fails with a manifest
+/// validation error rather than a product gate failure).
 pub fn compute_gate(
     manifest: &VerifierManifest,
     identity: &GateIdentity<'_>,
@@ -67,6 +71,17 @@ pub fn compute_gate(
         .collect::<Vec<_>>();
 
     let mut reasons = Vec::new();
+    for criterion in &manifest.criteria {
+        match criterion.status {
+            VerifierCriterionStatus::Pass => {}
+            VerifierCriterionStatus::Fail => {
+                reasons.push(format!("criterion {} is assessed as fail", criterion.index))
+            }
+            VerifierCriterionStatus::NotProven => {
+                reasons.push(format!("criterion {} is not proven", criterion.index))
+            }
+        }
+    }
     for run in command_runs {
         match run.status.as_str() {
             "completed" if run.passed == Some(true) => {}
@@ -342,10 +357,10 @@ mod tests {
     }
 
     #[test]
-    fn green_gate_passes_with_full_coverage() {
+    fn green_gate_passes_with_full_pass_coverage() {
         let manifest = manifest(vec![
             criterion(1, VerifierCriterionStatus::Pass, &["reports/ok.json"]),
-            criterion(2, VerifierCriterionStatus::NotProven, &[]),
+            criterion(2, VerifierCriterionStatus::Pass, &["reports/ok.json"]),
         ]);
         let verdict =
             compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap();

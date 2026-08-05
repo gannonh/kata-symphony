@@ -103,6 +103,17 @@ pub struct VerificationAttemptRecord {
     pub evidence_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<crate::triage::domain::FactoryError>,
+    /// Durable identity of the read-only verifier process (post-spawn record,
+    /// same contract as the A3/A4 workers) so restart recovery can terminate
+    /// it before touching the workspace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_pid: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_process_group_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_start_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier_executable: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

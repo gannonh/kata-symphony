@@ -199,12 +199,25 @@ pub fn verify_workspace_unchanged(workspace: &Path, expected_head: &str) -> Resu
         .lines()
         .filter(|line| !line.trim().is_empty())
         .count();
-    let _ = tree;
     if tracked_count == 0 {
         return Err(SymphonyError::TriageError(
             "workspace has no tracked files; cannot attest the reviewed tree".to_string(),
         ));
     }
+    // `assume-unchanged`/`skip-worktree` flags hide tracked edits from
+    // porcelain output; a command that sets them must fail the attestation.
+    let flags = git_stdout(workspace, &["ls-files", "-v"])?;
+    for line in flags.lines() {
+        if let Some(flag) = line.chars().next() {
+            if flag.is_ascii_lowercase() {
+                return Err(SymphonyError::TriageError(format!(
+                    "tracked file has an assume-unchanged/skip-worktree flag: {}",
+                    line.trim()
+                )));
+            }
+        }
+    }
+    let _ = tree;
     Ok(())
 }
 

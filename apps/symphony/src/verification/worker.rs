@@ -17,13 +17,13 @@ use crate::review::domain::ReviewFindingsArtifactRecord;
 use crate::spec::domain::SpecArtifact;
 use crate::triage::domain::StageUsage;
 use crate::triage::runner::{
-    run_isolated_raw_turn, TriageHarness, TriageIssueIdentity, TriageRunnerRequest,
+    run_isolated_raw_turn, TriageHarness, TriageIssueIdentity, TriageRunnerRequest, TriageSpawnSink,
 };
 use crate::verification::domain::{
     VerificationCommandRunRecord, VerificationConfig, VerificationEvidenceRecord,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct VerificationWorkerRequest {
     pub attempt_id: String,
     pub workspace_root: PathBuf,
@@ -40,6 +40,9 @@ pub struct VerificationWorkerRequest {
     pub review_artifact: ReviewFindingsArtifactRecord,
     pub command_runs: Vec<VerificationCommandRunRecord>,
     pub evidence: Vec<VerificationEvidenceRecord>,
+    /// Fired with the verifier's process identity as soon as the child exists,
+    /// so the attempt record stays durable for restart recovery.
+    pub spawned: Option<TriageSpawnSink>,
 }
 
 #[derive(Debug, Clone)]
@@ -114,7 +117,7 @@ impl VerificationWorker for LiveVerificationWorker {
             issue: request.issue.clone(),
             codex: request.codex.clone(),
             progress: None,
-            spawned: None,
+            spawned: request.spawned.clone(),
         };
         let raw = run_isolated_raw_turn(&raw_request, &context).await?;
         Ok(VerificationWorkerResult {

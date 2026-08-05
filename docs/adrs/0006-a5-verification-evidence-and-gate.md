@@ -77,11 +77,13 @@ attests acceptance criteria from that evidence.
    identities, duplicate or missing criteria, unsupported statuses, empty
    rationale, and references to evidence outside the attempt. The gate passes
    only when every command completed and passed (including the single
-   acceptance command), every approved acceptance criterion appears exactly
-   once as `pass`, `fail`, or `not_proven`, and `pass`/`fail` carry at least
-   one valid stored evidence reference. A verifier cannot override a failed
-   command, an unexecuted required command, a missing criterion, or an invalid
-   evidence reference.
+   acceptance command) AND every approved acceptance criterion appears exactly
+   once as `pass` with valid stored evidence references. A `fail` or
+   `not_proven` criterion holds the gate: the verifier cannot waive it, and
+   the failed gate stays in Verification without auto-retry. Eligibility
+   guards exclude completed attempts for the reviewed head/base pair and cap
+   failed/interrupted attempts at `max_attempts`, so repeated crashes cannot
+   reclaim the same revision pair.
 
 7. **Failed gates are product evidence and hold.** A completed failed gate
    remains in `Verification`, is never auto-retried, and does not consume the

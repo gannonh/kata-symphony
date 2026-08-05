@@ -23,9 +23,19 @@ CREATE TABLE IF NOT EXISTS verification_attempts (
   workspace_path TEXT,
   evidence_dir TEXT,
   error_json TEXT,
+  verifier_pid INTEGER,
+  verifier_process_group_id INTEGER,
+  verifier_start_token TEXT,
+  verifier_executable TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+-- Durable verifier launch identity (idempotent for pre-existing stores).
+ALTER TABLE verification_attempts ADD COLUMN verifier_pid INTEGER;
+ALTER TABLE verification_attempts ADD COLUMN verifier_process_group_id INTEGER;
+ALTER TABLE verification_attempts ADD COLUMN verifier_start_token TEXT;
+ALTER TABLE verification_attempts ADD COLUMN verifier_executable TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_verification_attempts_run
 ON verification_attempts(run_id, created_at DESC);

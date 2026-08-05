@@ -125,7 +125,9 @@ where
             .query_all_items(&status_field.project_id, self.config.max_pages)
             .await?;
         let trigger = service.verification.trigger_state.trim();
-        let candidates = self.store.list_a5_eligible_verification_runs()?;
+        let candidates = self
+            .store
+            .list_a5_eligible_verification_runs(service.verification.max_attempts.max(1))?;
         summary.candidates_seen = candidates.len() as u32;
 
         for candidate in candidates {
@@ -187,16 +189,25 @@ where
             let command_runs = self
                 .store
                 .list_verification_command_runs(&attempt.attempt_id)?;
+            let mut termination_verified = true;
             for run in command_runs {
                 if run.status != "launching" && run.status != "running" {
                     continue;
                 }
                 if let Some(container_id) = run.container_id.as_deref() {
-                    let _ =
-                        crate::verification::executor::stop_persisted_container(container_id).await;
+                    termination_verified =
+                        crate::verification::executor::stop_persisted_container(container_id)
+                            .await
+                            .is_ok();
                 } else if let Some(identity) = local_identity_from_record(&run) {
-                    let _ =
-                        crate::triage::process_identity::terminate_process_group(&identity).await;
+                    termination_verified = matches!(
+                        crate::triage::process_identity::terminate_process_group(&identity).await,
+                        crate::triage::process_identity::TerminationOutcome::Terminated
+                    );
+                } else {
+                    // A launching record with no identity never released its
+                    // payload; nothing is left to terminate.
+                    termination_verified = true;
                 }
                 let _ = self.store.complete_verification_command(
                     crate::triage::store::CompleteVerificationCommandRequest {
@@ -212,6 +223,15 @@ where
                         duration_ms: 0,
                     },
                 );
+            }
+            // The read-only verifier may also still be running.
+            if let Some(identity) = local_identity_from_attempt(&attempt) {
+                if !matches!(
+                    crate::triage::process_identity::terminate_process_group(&identity).await,
+                    crate::triage::process_identity::TerminationOutcome::Terminated
+                ) {
+                    termination_verified = false;
+                }
             }
             let error = FactoryError::new(
                 "verification_attempt_interrupted",
@@ -233,8 +253,16 @@ where
                     error: Some(&error),
                 },
             );
-            if let Some(workspace_path) = attempt.workspace_path.as_deref() {
-                self.cleanup_attempt_workspace(workspace_path, &attempt.attempt_id);
+            if termination_verified {
+                if let Some(workspace_path) = attempt.workspace_path.as_deref() {
+                    self.cleanup_attempt_workspace(workspace_path, &attempt.attempt_id);
+                }
+            } else {
+                tracing::error!(
+                    event = "verification_recovery_termination_failed",
+                    attempt_id = %attempt.attempt_id,
+                    "persisted process group or container survived recovery; workspace retained for diagnosis"
+                );
             }
         }
         Ok(recovered)
@@ -453,10 +481,8 @@ where
                             error: Some(&factory_error),
                         },
                     );
-                    self.cleanup_attempt_workspace(
-                        &workspace.workspace_path.display().to_string(),
-                        &attempt_id,
-                    );
+                    // Workspace is retained: termination could not be
+                    // verified, so cleanup must wait for recovery.
                     return Err(error);
                 }
             };
@@ -527,10 +553,22 @@ where
 
             // Read-only verifier.
             let verifier_command = command_for_verification(service)?;
+            // The verifier works from the reviewed-head bundle clone (no
+            // authenticated remote), not from the controller's checkout.
+            let verifier_repo_path = workspace.workspace_path.clone();
+            let store_sink = self.store.clone();
+            let attempt_sink = attempt_id.clone();
+            let spawned: Option<crate::triage::runner::TriageSpawnSink> =
+                Some(std::sync::Arc::new(move |info| {
+                    let _ = store_sink.record_verifier_identity(
+                        &attempt_sink,
+                        &info.identity,
+                    );
+                }));
             let mut worker_request = VerificationWorkerRequest {
                 attempt_id: attempt_id.clone(),
                 workspace_root,
-                repo_path,
+                repo_path: verifier_repo_path,
                 command: verifier_command,
                 prompt,
                 config: service.verification.clone(),
@@ -548,12 +586,22 @@ where
                 review_artifact: review_artifact.clone(),
                 command_runs: command_runs.clone(),
                 evidence: evidence_records.clone(),
+                spawned,
             };
 
-            let mut last_error = None;
-            let mut output_bytes = None;
+            let mut last_error: Option<String> = None;
+            let mut manifest: Option<crate::verification::domain::VerifierManifest> = None;
             let mut total_usage = StageUsage::default();
             let base_prompt = worker_request.prompt.clone();
+            let criterion_count = spec.artifact.acceptance_criteria.len();
+            let gate_identity = GateIdentity {
+                spec_artifact_id: &candidate.spec_artifact_id,
+                implementation_artifact_id: &candidate.implementation_artifact_id,
+                review_artifact_id: &candidate.review_artifact_id,
+                reviewed_head_sha: &pull.head.sha,
+                base_sha: &pull.base.sha,
+                criterion_count,
+            };
             for reprompt in 0..=service.verification.max_reprompts {
                 worker_request.prompt = if reprompt == 0 {
                     base_prompt.clone()
@@ -563,20 +611,38 @@ where
                         last_error.as_deref().unwrap_or("invalid manifest")
                     )
                 };
-                match self.worker.run(&worker_request).await {
-                    Ok(result) => {
-                        total_usage.input_tokens += result.usage.input_tokens;
-                        total_usage.output_tokens += result.usage.output_tokens;
-                        total_usage.total_tokens += result.usage.total_tokens;
-                        output_bytes = Some(result.output_bytes);
-                        break;
-                    }
+                let result = match self.worker.run(&worker_request).await {
+                    Ok(result) => result,
                     Err(error) => {
-                        last_error = Some(error.to_string());
+                        last_error = Some(format!("worker invocation failed: {error}"));
+                        continue;
                     }
+                };
+                total_usage.input_tokens += result.usage.input_tokens;
+                total_usage.output_tokens += result.usage.output_tokens;
+                total_usage.total_tokens += result.usage.total_tokens;
+                let parsed: crate::verification::domain::VerifierManifest =
+                    match serde_json::from_slice(&result.output_bytes) {
+                        Ok(manifest) => manifest,
+                        Err(error) => {
+                            last_error = Some(format!("manifest is not valid JSON: {error}"));
+                            continue;
+                        }
+                    };
+                // Strict validation runs inside the retry loop so an invalid
+                // manifest costs a reprompt, not a failed attempt.
+                if let Err(error) = crate::verification::gate::validate_manifest(
+                    &parsed,
+                    &gate_identity,
+                    &evidence_records,
+                ) {
+                    last_error = Some(error.to_string());
+                    continue;
                 }
+                manifest = Some(parsed);
+                break;
             }
-            let Some(output_bytes) = output_bytes else {
+            let Some(manifest) = manifest else {
                 let factory_error = FactoryError::new(
                     "verification_verifier_failed",
                     "verification_coordinator",
@@ -605,31 +671,7 @@ where
                 return Err(SymphonyError::TriageError(factory_error.remediation.clone()));
             };
 
-            // Strict manifest validation + deterministic gate.
-            let manifest: crate::verification::domain::VerifierManifest =
-                serde_json::from_slice(&output_bytes).map_err(|error| {
-                    fail_verification_attempt(
-                        &self.store,
-                        &stage.stage_run_id,
-                        &attempt_id,
-                        "verification_verifier_manifest_invalid",
-                        format!("verifier manifest is not valid JSON: {error}"),
-                        &workspace,
-                        &self.config.workspace_root,
-                    );
-                    SymphonyError::TriageError(format!(
-                        "verifier manifest is not valid JSON: {error}"
-                    ))
-                })?;
-            let criterion_count = spec.artifact.acceptance_criteria.len();
-            let gate_identity = GateIdentity {
-                spec_artifact_id: &candidate.spec_artifact_id,
-                implementation_artifact_id: &candidate.implementation_artifact_id,
-                review_artifact_id: &candidate.review_artifact_id,
-                reviewed_head_sha: &pull.head.sha,
-                base_sha: &pull.base.sha,
-                criterion_count,
-            };
+            // Deterministic gate from the validated manifest.
             let verdict = compute_gate(&manifest, &gate_identity, &command_runs, &evidence_records)
                 .inspect_err(|error| {
                     fail_verification_attempt(
@@ -689,6 +731,42 @@ where
                     error: None,
                 },
             )?;
+
+            // Final revision fence immediately before publication.
+            if self.revision_changed(candidate, issue_number).await? {
+                let error = FactoryError::new(
+                    "verification_superseded",
+                    "verification_coordinator",
+                    "head or base changed before publication; gate retained without publishing"
+                        .to_string(),
+                    false,
+                    None,
+                );
+                let _ = self.store.update_verification_attempt(
+                    crate::triage::store::UpdateVerificationAttemptRequest {
+                        attempt_id: &attempt_id,
+                        status: Some("superseded"),
+                        workspace_path: None,
+                        evidence_dir: None,
+                        error: Some(&error),
+                    },
+                );
+                self.record_event(
+                    Some(&candidate.run_id),
+                    Some(&stage.stage_run_id),
+                    "verification_superseded",
+                    serde_json::json!({
+                        "status": "superseded",
+                        "reason": "head_or_base_changed_before_publication",
+                        "attempt_id": attempt_id,
+                    }),
+                )?;
+                self.cleanup_attempt_workspace(
+                    &workspace.workspace_path.display().to_string(),
+                    &attempt_id,
+                );
+                return Ok(ProcessOutcome::Waiting);
+            }
 
             // Preview publication: one owned comment; nothing else mutates.
             let intent = self
@@ -896,15 +974,13 @@ where
                     failed = true;
                     interrupted_index = Some(index + 1);
                 }
-                Err(CommandRunFailure::SpawnError(message))
-                | Err(CommandRunFailure::NotSignalable(message))
-                | Err(CommandRunFailure::StillRunning(message)) => {
+                Err(CommandRunFailure::SpawnError(message)) => {
                     self.store.complete_verification_command(
                         crate::triage::store::CompleteVerificationCommandRequest {
                             command_run_id: &command_run_id,
                             status: "interrupted",
                             exit_code: None,
-                            termination_reason: Some("launch_or_termination_failure"),
+                            termination_reason: Some("launch_failure"),
                             passed: Some(false),
                             output_tail: None,
                             output_sha256: None,
@@ -921,6 +997,31 @@ where
                         error = %message,
                         "verification command could not run"
                     );
+                }
+                Err(CommandRunFailure::NotSignalable(message))
+                | Err(CommandRunFailure::StillRunning(message)) => {
+                    // The persisted process group/container could not be
+                    // terminated and verified: this is an infrastructure
+                    // failure, not product evidence. Abort the pipeline and
+                    // retain the workspace for diagnosis.
+                    self.store.complete_verification_command(
+                        crate::triage::store::CompleteVerificationCommandRequest {
+                            command_run_id: &command_run_id,
+                            status: "interrupted",
+                            exit_code: None,
+                            termination_reason: Some("termination_failed"),
+                            passed: Some(false),
+                            output_tail: None,
+                            output_sha256: None,
+                            started_at: Utc::now(),
+                            completed_at: Utc::now(),
+                            duration_ms: 0,
+                        },
+                    )?;
+                    return Err(SymphonyError::TriageError(format!(
+                        "verification command '{}' could not be terminated and verified: {message}",
+                        command.name
+                    )));
                 }
             }
         }
@@ -1020,6 +1121,22 @@ fn fail_verification_attempt(
     {
         let _ = std::fs::remove_dir_all(&attempt_root);
     }
+}
+
+fn local_identity_from_attempt(
+    attempt: &crate::verification::domain::VerificationAttemptRecord,
+) -> Option<crate::triage::process_identity::ProcessIdentity> {
+    let pid = attempt.verifier_pid?;
+    let process_group_id = attempt.verifier_process_group_id?;
+    if pid <= 0 || process_group_id <= 0 {
+        return None;
+    }
+    Some(crate::triage::process_identity::ProcessIdentity {
+        pid,
+        process_group_id,
+        start_token: attempt.verifier_start_token.clone(),
+        executable: attempt.verifier_executable.clone(),
+    })
 }
 
 fn local_identity_from_record(

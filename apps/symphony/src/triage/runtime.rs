@@ -581,8 +581,9 @@ impl SharedFactoryStore {
 
     pub fn list_a5_eligible_verification_runs(
         &self,
+        max_attempts: u32,
     ) -> Result<Vec<crate::triage::store::A5EligibleVerificationRun>> {
-        self.with_store(|store| store.list_a5_eligible_verification_runs())
+        self.with_store(|store| store.list_a5_eligible_verification_runs(max_attempts))
     }
 
     pub fn store_verification_attempt_inputs(
@@ -720,6 +721,14 @@ impl SharedFactoryStore {
         self.with_store_mut(|store| {
             store.mark_verification_publication_applied(intent_id, comment_id)
         })
+    }
+
+    pub fn record_verifier_identity(
+        &self,
+        attempt_id: &str,
+        identity: &crate::triage::process_identity::ProcessIdentity,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.record_verifier_identity(attempt_id, identity))
     }
 
     pub fn complete_verification_stage_run(

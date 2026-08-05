@@ -32,9 +32,18 @@ pub fn collect_evidence(
     artifacts_dir: &Path,
     limits: &EvidenceLimits,
 ) -> Result<Vec<VerificationEvidenceRecord>> {
-    if !evidence_dir.is_dir() {
+    // The root itself must be a real directory, never a symlink: a command
+    // could replace the evidence dir with a symlink to elsewhere, and the
+    // walker would otherwise collect and store foreign files.
+    let root_meta = fs::symlink_metadata(evidence_dir).map_err(|error| {
+        SymphonyError::TriageError(format!(
+            "failed stating evidence directory {}: {error}",
+            evidence_dir.display()
+        ))
+    })?;
+    if root_meta.file_type().is_symlink() || !root_meta.is_dir() {
         return Err(SymphonyError::TriageError(format!(
-            "evidence directory {} is not a directory",
+            "evidence directory {} must be a real directory, not a symlink or special file",
             evidence_dir.display()
         )));
     }

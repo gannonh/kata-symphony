@@ -5370,7 +5370,9 @@ impl SqliteFactoryStore {
                     reviewed_head_sha, base_sha, spec_artifact_id,
                     implementation_artifact_id, review_artifact_id,
                     configuration_revision, execution_profile, status,
-                    workspace_path, evidence_dir, error_json, created_at, updated_at
+                    workspace_path, evidence_dir, error_json,
+                    verifier_pid, verifier_process_group_id, verifier_start_token,
+                    verifier_executable, created_at, updated_at
                  FROM verification_attempts WHERE attempt_id = ?1",
                 params![attempt_id],
                 verification_attempt_from_row,
@@ -5390,7 +5392,9 @@ impl SqliteFactoryStore {
                     reviewed_head_sha, base_sha, spec_artifact_id,
                     implementation_artifact_id, review_artifact_id,
                     configuration_revision, execution_profile, status,
-                    workspace_path, evidence_dir, error_json, created_at, updated_at
+                    workspace_path, evidence_dir, error_json,
+                    verifier_pid, verifier_process_group_id, verifier_start_token,
+                    verifier_executable, created_at, updated_at
                  FROM verification_attempts WHERE run_id = ?1 ORDER BY created_at DESC",
             )
             .map_err(storage_error)?;
@@ -5410,7 +5414,9 @@ impl SqliteFactoryStore {
                     reviewed_head_sha, base_sha, spec_artifact_id,
                     implementation_artifact_id, review_artifact_id,
                     configuration_revision, execution_profile, status,
-                    workspace_path, evidence_dir, error_json, created_at, updated_at
+                    workspace_path, evidence_dir, error_json,
+                    verifier_pid, verifier_process_group_id, verifier_start_token,
+                    verifier_executable, created_at, updated_at
                  FROM verification_attempts WHERE status = 'running' ORDER BY created_at",
             )
             .map_err(storage_error)?;
@@ -5457,7 +5463,10 @@ impl SqliteFactoryStore {
     /// Candidates for A5: a durable A4 findings artifact whose automatic
     /// publication was applied. Route equality with `verification.trigger_state`
     /// and live head/base equality are checked by the coordinator.
-    pub fn list_a5_eligible_verification_runs(&self) -> Result<Vec<A5EligibleVerificationRun>> {
+    pub fn list_a5_eligible_verification_runs(
+        &self,
+        max_attempts: u32,
+    ) -> Result<Vec<A5EligibleVerificationRun>> {
         let mut stmt = self
             .conn
             .prepare(
@@ -5472,37 +5481,56 @@ impl SqliteFactoryStore {
                     ON p.artifact_id = a.artifact_id
                     AND p.kind = 'automatic'
                     AND p.status = 'applied'
-                 JOIN implementation_draft_pr_artifacts d ON d.run_id = r.run_id
+                 JOIN implementation_draft_pr_artifacts d
+                    ON d.artifact_id = a.draft_pr_artifact_id
                     AND d.draft = 1
                  WHERE NOT EXISTS (
                      SELECT 1 FROM stage_runs sr
                      WHERE sr.run_id = r.run_id AND sr.stage = ?1
                        AND sr.status IN ('pending', 'running')
                  )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM verification_attempts va
+                     JOIN stage_runs vrs ON vrs.stage_run_id = va.stage_run_id
+                     WHERE va.run_id = r.run_id
+                       AND va.reviewed_head_sha = a.reviewed_head_sha
+                       AND va.base_sha = a.base_sha
+                       AND vrs.status = 'completed'
+                   )
+                   AND (
+                     SELECT COUNT(*) FROM verification_attempts va2
+                     WHERE va2.run_id = r.run_id
+                       AND va2.reviewed_head_sha = a.reviewed_head_sha
+                       AND va2.base_sha = a.base_sha
+                       AND va2.status IN ('failed', 'interrupted')
+                   ) < ?2
                  ORDER BY r.updated_at ASC, a.received_at DESC",
             )
             .map_err(storage_error)?;
         let rows = stmt
-            .query_map(params![VERIFICATION_STAGE_NAME], |row| {
-                Ok(A5EligibleVerificationRun {
-                    run_id: row.get(0)?,
-                    forge_host: row.get(1)?,
-                    repository: row.get(2)?,
-                    issue_id: row.get(3)?,
-                    issue_identifier: row.get(4)?,
-                    pr_number: row.get::<_, i64>(5)? as u64,
-                    pr_url: row.get(6)?,
-                    head: row.get(7)?,
-                    base: row.get(8)?,
-                    head_sha: row.get(9)?,
-                    review_artifact_id: row.get(10)?,
-                    reviewed_head_sha: row.get(11)?,
-                    reviewed_base_sha: row.get(12)?,
-                    spec_artifact_id: row.get(13)?,
-                    implementation_artifact_id: row.get(14)?,
-                    route_state: row.get(15)?,
-                })
-            })
+            .query_map(
+                params![VERIFICATION_STAGE_NAME, max_attempts as i64],
+                |row| {
+                    Ok(A5EligibleVerificationRun {
+                        run_id: row.get(0)?,
+                        forge_host: row.get(1)?,
+                        repository: row.get(2)?,
+                        issue_id: row.get(3)?,
+                        issue_identifier: row.get(4)?,
+                        pr_number: row.get::<_, i64>(5)? as u64,
+                        pr_url: row.get(6)?,
+                        head: row.get(7)?,
+                        base: row.get(8)?,
+                        head_sha: row.get(9)?,
+                        review_artifact_id: row.get(10)?,
+                        reviewed_head_sha: row.get(11)?,
+                        reviewed_base_sha: row.get(12)?,
+                        spec_artifact_id: row.get(13)?,
+                        implementation_artifact_id: row.get(14)?,
+                        route_state: row.get(15)?,
+                    })
+                },
+            )
             .map_err(storage_error)?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(storage_error)
@@ -5891,6 +5919,40 @@ impl SqliteFactoryStore {
         Ok(())
     }
 
+    /// Durably record the read-only verifier's process identity once spawned.
+    pub fn record_verifier_identity(
+        &mut self,
+        attempt_id: &str,
+        identity: &crate::triage::process_identity::ProcessIdentity,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_attempts SET
+                    verifier_pid = ?1,
+                    verifier_process_group_id = ?2,
+                    verifier_start_token = ?3,
+                    verifier_executable = ?4,
+                    updated_at = ?5
+                 WHERE attempt_id = ?6",
+                params![
+                    identity.pid,
+                    identity.process_group_id,
+                    identity.start_token,
+                    identity.executable,
+                    ts(Self::now()),
+                    attempt_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification attempt {attempt_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
     /// Mark a running verification stage run interrupted (restart recovery).
     pub fn interrupt_verification_stage_run(
         &mut self,
@@ -6152,8 +6214,12 @@ fn verification_attempt_from_row(
         workspace_path: row.get(12)?,
         evidence_dir: row.get(13)?,
         error: optional_from_json(row.get::<_, Option<String>>(14)?)?,
-        created_at: parse_ts_row(row.get::<_, String>(15)?)?,
-        updated_at: parse_ts_row(row.get::<_, String>(16)?)?,
+        verifier_pid: row.get(15)?,
+        verifier_process_group_id: row.get(16)?,
+        verifier_start_token: row.get(17)?,
+        verifier_executable: row.get(18)?,
+        created_at: parse_ts_row(row.get::<_, String>(19)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(20)?)?,
     })
 }
 
@@ -7943,7 +8009,7 @@ mod tests {
 
         // No applied automatic publication yet: not eligible.
         assert!(store
-            .list_a5_eligible_verification_runs()
+            .list_a5_eligible_verification_runs(3)
             .unwrap()
             .is_empty());
 
@@ -7963,7 +8029,7 @@ mod tests {
             .unwrap();
         assert!(
             store
-                .list_a5_eligible_verification_runs()
+                .list_a5_eligible_verification_runs(3)
                 .unwrap()
                 .is_empty(),
             "A4 preview publication must never feed A5"
@@ -7983,7 +8049,7 @@ mod tests {
                 params![now],
             )
             .unwrap();
-        let eligible = store.list_a5_eligible_verification_runs().unwrap();
+        let eligible = store.list_a5_eligible_verification_runs(3).unwrap();
         assert_eq!(eligible.len(), 1);
         assert_eq!(eligible[0].run_id, "run-review");
         assert_eq!(eligible[0].review_artifact_id, "review-artifact");
@@ -8002,9 +8068,284 @@ mod tests {
             .unwrap();
         assert_eq!(stage.stage, VERIFICATION_STAGE_NAME);
         assert!(store
-            .list_a5_eligible_verification_runs()
+            .list_a5_eligible_verification_runs(3)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn completed_verification_attempts_never_reopen_the_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        seed_eligible_a5_run(&store);
+
+        // A completed attempt with a FAILED gate is expected product evidence
+        // and must hold: it never reopens the queue and never auto-retries.
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        store
+            .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                attempt_id: "verification-attempt-1".to_string(),
+                stage_run_id: stage.stage_run_id.clone(),
+                pr_number: 42,
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                spec_artifact_id: "spec-artifact".to_string(),
+                implementation_artifact_id: "implementation-artifact".to_string(),
+                review_artifact_id: "review-artifact".to_string(),
+                configuration_revision: "cfg-rev".to_string(),
+                execution_profile: "local".to_string(),
+            })
+            .unwrap();
+        store
+            .complete_verification_stage_run(&stage.stage_run_id, StageUsage::default())
+            .unwrap();
+        store
+            .store_verification_gate(&VerificationGateRecord {
+                gate_id: "gate-failed".to_string(),
+                run_id: stage.run_id.clone(),
+                attempt_id: "verification-attempt-1".to_string(),
+                status: "failed".to_string(),
+                verifier_manifest: None,
+                command_summary: None,
+                computed_at: Some(Utc::now()),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        store
+            .update_verification_attempt(UpdateVerificationAttemptRequest {
+                attempt_id: "verification-attempt-1",
+                status: Some("completed"),
+                workspace_path: None,
+                evidence_dir: None,
+                error: None,
+            })
+            .unwrap();
+        assert!(
+            store
+                .list_a5_eligible_verification_runs(3)
+                .unwrap()
+                .is_empty(),
+            "a completed failed gate must hold and never auto-retry"
+        );
+    }
+
+    #[test]
+    fn interrupted_verification_attempts_consume_the_retry_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        seed_eligible_a5_run(&store);
+
+        // Two interrupted attempts leave the run eligible once more...
+        for index in 1..=2u32 {
+            let stage = store
+                .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+                .unwrap();
+            store
+                .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                    attempt_id: format!("verification-attempt-{index}"),
+                    stage_run_id: stage.stage_run_id.clone(),
+                    pr_number: 42,
+                    reviewed_head_sha: "head-sha".to_string(),
+                    base_sha: "base-sha".to_string(),
+                    spec_artifact_id: "spec-artifact".to_string(),
+                    implementation_artifact_id: "implementation-artifact".to_string(),
+                    review_artifact_id: "review-artifact".to_string(),
+                    configuration_revision: "cfg-rev".to_string(),
+                    execution_profile: "local".to_string(),
+                })
+                .unwrap();
+            store
+                .interrupt_verification_stage_run(
+                    &stage.stage_run_id,
+                    &FactoryError::new(
+                        "verification_attempt_interrupted",
+                        "test",
+                        "crashed".to_string(),
+                        true,
+                        None,
+                    ),
+                )
+                .unwrap();
+            store
+                .update_verification_attempt(UpdateVerificationAttemptRequest {
+                    attempt_id: &format!("verification-attempt-{index}"),
+                    status: Some("interrupted"),
+                    workspace_path: None,
+                    evidence_dir: None,
+                    error: None,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            store.list_a5_eligible_verification_runs(3).unwrap().len(),
+            1
+        );
+        // ...but the third interrupted attempt exhausts max_attempts=3.
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        store
+            .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                attempt_id: "verification-attempt-3".to_string(),
+                stage_run_id: stage.stage_run_id.clone(),
+                pr_number: 42,
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                spec_artifact_id: "spec-artifact".to_string(),
+                implementation_artifact_id: "implementation-artifact".to_string(),
+                review_artifact_id: "review-artifact".to_string(),
+                configuration_revision: "cfg-rev".to_string(),
+                execution_profile: "local".to_string(),
+            })
+            .unwrap();
+        store
+            .interrupt_verification_stage_run(
+                &stage.stage_run_id,
+                &FactoryError::new(
+                    "verification_attempt_interrupted",
+                    "test",
+                    "crashed".to_string(),
+                    true,
+                    None,
+                ),
+            )
+            .unwrap();
+        store
+            .update_verification_attempt(UpdateVerificationAttemptRequest {
+                attempt_id: "verification-attempt-3",
+                status: Some("interrupted"),
+                workspace_path: None,
+                evidence_dir: None,
+                error: None,
+            })
+            .unwrap();
+        assert!(
+            store
+                .list_a5_eligible_verification_runs(3)
+                .unwrap()
+                .is_empty(),
+            "repeated crashes must not reclaim the same revision pair indefinitely"
+        );
+    }
+
+    /// Seed the full A2/A3/A4 fixture used by the eligibility tests.
+    fn seed_eligible_a5_run(store: &SqliteFactoryStore) {
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute(
+                "INSERT INTO factory_runs (
+                    run_id, forge_host, repository, issue_id, issue_identifier,
+                    issue_revision, status, current_stage, created_at, updated_at
+                 ) VALUES ('run-review', 'github.com', 'owner/repo', '123', '#123',
+                    'issue-rev', 'running', 'review', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO spec_run_state (
+                    run_id, approved_artifact_id, approved_version, decision, updated_at
+                 ) VALUES ('run-review', 'spec-artifact', 1, 'approved', ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_artifacts (
+                    artifact_id, run_id, stage_run_id, approved_artifact_id,
+                    approved_version, issue_revision, configuration_revision,
+                    schema_version, manifest_json, base_commit, approved_spec_path,
+                    validation_cycles, execution_profile, received_at, bytes_len
+                 ) VALUES ('implementation-artifact', 'run-review', 'implementation-stage',
+                    'spec-artifact', 1, 'issue-rev', 'config-rev', 1, '{}', 'base',
+                    'spec.md', 1, 'default', ?1, 1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('implementation-intent', 'run-review',
+                    'implementation-artifact', 'draft_pr', 'applied', '[]', '{}', '{}',
+                    '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_draft_pr_artifacts (
+                    artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 ) VALUES ('draft-artifact', 'run-review', 'implementation-artifact',
+                    'implementation-intent', 42, 'https://github.com/owner/repo/pull/42',
+                    1, 'feature', 'main', 'head-sha', 'marker', ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_attempts (
+                    attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                    implementation_artifact_id, spec_artifact_id, pr_number,
+                    reviewed_head_sha, base_sha, status, created_at, updated_at
+                 ) VALUES ('review-attempt', 'run-review', 'review-stage', 'draft-artifact',
+                    'implementation-artifact', 'spec-artifact', 42, 'head-sha', 'base-sha',
+                    'completed', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_findings_artifacts (
+                    artifact_id, run_id, stage_run_id, attempt_id,
+                    draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                    schema_version, reviewed_head_sha, base_sha, manifest_json,
+                    no_findings, finding_count, received_at, bytes_len
+                 ) VALUES ('review-artifact', 'run-review', 'review-stage', 'review-attempt',
+                    'draft-artifact', 'implementation-artifact', 'spec-artifact',
+                    1, 'head-sha', 'base-sha', ?1, 1, 0, ?2, 2)",
+                params![
+                    serde_json::json!({"schema_version":1,"reviewed_head_sha":"head-sha","base_sha":"base-sha","spec_conformance_summary":"none","no_findings":true,"findings":[]}).to_string(),
+                    now,
+                ],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, route_state,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('automatic-intent', 'run-review', 'review-artifact', 'automatic',
+                    'applied', '[]', 0, 'Verification', '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
     }
 
     #[test]

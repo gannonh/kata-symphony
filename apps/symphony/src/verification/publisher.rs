@@ -4,7 +4,7 @@
 //! other tracker or PR mutation. The comment is keyed by a durable marker so a
 //! restart updates the same comment instead of duplicating it.
 
-use crate::error::Result;
+use crate::error::{Result, SymphonyError};
 use crate::github::client::GithubIssueComment;
 use crate::triage::domain::PublicationStatus;
 use crate::triage::publisher::TriageCommentPort;
@@ -134,6 +134,7 @@ pub async fn publish_preview_comment<C: TriageCommentPort>(
     }
     let marker = verification_marker(&intent.intent_id);
     let body = render_verification_preview_comment(context);
+    let login = comments.authenticated_login().await?;
     let mut owned: Option<GithubIssueComment> = None;
     let mut page = 0;
     loop {
@@ -144,6 +145,18 @@ pub async fn publish_preview_comment<C: TriageCommentPort>(
                 .as_deref()
                 .is_some_and(|body| body.contains(&marker))
             {
+                let author = comment
+                    .user
+                    .as_ref()
+                    .map(|user| user.login.as_str())
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                if author.is_some_and(|value| !value.eq_ignore_ascii_case(&login)) {
+                    return Err(SymphonyError::TriageError(format!(
+                        "verification marker {marker} is owned by another GitHub login {}",
+                        author.unwrap_or("unknown")
+                    )));
+                }
                 owned = Some(comment);
                 break;
             }

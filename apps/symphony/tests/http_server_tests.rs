@@ -2093,6 +2093,7 @@ fn sample_verification_run() -> symphony::http_server::FactoryRunHttpResponse {
         status: "completed".to_string(),
         configuration_revision: "cfg-rev".to_string(),
         execution_profile: "local".to_string(),
+        error: None,
         commands: vec![symphony::http_server::VerificationCommandHttp {
             ordinal: 1,
             name: "affected-validation".to_string(),
