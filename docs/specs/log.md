@@ -1,5 +1,9 @@
 # Specs Update Log
 
+## 2026-08-05
+
+**A5.1 reviewed PR verification evidence preview (#617) built.** Implemented the A4 head/base review-cycle identity (migration 009), stage-neutral verification foundations (launch barrier, Docker create-before-start, staged blob hardening), the evidence pipeline (exact-head commands, bounded evidence, read-only verifier, deterministic gate), and the preview surfaces (owned comment, HTTP/evidence metadata, metrics, doctor, starter config). Added [ADR-0006](../adrs/0006-a5-verification-evidence-and-gate.md) for exact-head verification evidence, deterministic gate authority, and failed-gate hold semantics.
+
 ## 2026-08-04
 
 **A4 residual verification accepted for #615.** Formal worker credential isolation, bounded Docker execution, a fixture-controlled real Pi worker changed-head re-review, and live HTTP foreign-review recovery passed. #615 is verified and closed. The full Symphony suite has five implementation-branch git-bundle failures. Evidence: `uat-evidence/mixed-20260804-202303/` and the [final Verify report](https://github.com/gannonh/kata-symphony/issues/615#issuecomment-5184771982).

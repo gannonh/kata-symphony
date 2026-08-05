@@ -5447,7 +5447,7 @@ impl SqliteFactoryStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT r.run_id, r.forge_host, r.repository, r.issue_id,
+                "SELECT DISTINCT r.run_id, r.forge_host, r.repository, r.issue_id,
                     r.issue_identifier, d.number, d.url, d.head, d.base, d.head_sha,
                     a.artifact_id, a.reviewed_head_sha, a.base_sha,
                     a.spec_artifact_id, a.implementation_artifact_id,
@@ -7638,6 +7638,108 @@ mod tests {
             .list_verification_command_runs("verification-attempt-1")
             .unwrap();
         assert_eq!(runs[1].status, "not_run");
+    }
+
+    #[test]
+    fn verification_metrics_aggregate_stage_activity() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        store
+            .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                attempt_id: "verification-attempt-1".to_string(),
+                stage_run_id: stage.stage_run_id.clone(),
+                pr_number: 42,
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                review_artifact_id: "review".to_string(),
+                configuration_revision: "cfg-rev".to_string(),
+                execution_profile: "local".to_string(),
+            })
+            .unwrap();
+        store
+            .complete_verification_stage_run(&stage.stage_run_id, StageUsage::default())
+            .unwrap();
+        store
+            .update_verification_attempt(UpdateVerificationAttemptRequest {
+                attempt_id: "verification-attempt-1",
+                status: Some("completed"),
+                workspace_path: None,
+                evidence_dir: None,
+                error: None,
+            })
+            .unwrap();
+        store
+            .store_verification_gate(&VerificationGateRecord {
+                gate_id: "gate-1".to_string(),
+                run_id: stage.run_id.clone(),
+                attempt_id: "verification-attempt-1".to_string(),
+                status: "passed".to_string(),
+                verifier_manifest: None,
+                command_summary: None,
+                computed_at: Some(Utc::now()),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        store
+            .store_verification_evidence(&[VerificationEvidenceRecord {
+                evidence_id: "evidence-1".to_string(),
+                run_id: stage.run_id.clone(),
+                attempt_id: "verification-attempt-1".to_string(),
+                relative_path: "reports/ok.json".to_string(),
+                sha256: "digest-1".to_string(),
+                bytes_len: 3,
+                collected_at: Utc::now(),
+            }])
+            .unwrap();
+        store
+            .record_verification_command_launch(
+                &stage.run_id,
+                "verification-attempt-1",
+                1,
+                "unit",
+                VerificationCommandKind::Test,
+                "cfg-rev",
+                "sha",
+                "local",
+                "nonce",
+            )
+            .unwrap();
+        store
+            .complete_verification_command(CompleteVerificationCommandRequest {
+                command_run_id: &store
+                    .list_verification_command_runs("verification-attempt-1")
+                    .unwrap()[0]
+                    .command_run_id,
+                status: "completed",
+                exit_code: Some(0),
+                termination_reason: None,
+                passed: Some(true),
+                output_tail: Some("ok"),
+                output_sha256: Some("out"),
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                duration_ms: 5,
+            })
+            .unwrap();
+
+        let metrics = store.verification_metrics().unwrap();
+        assert_eq!(metrics.total_attempts, 1);
+        assert_eq!(metrics.completed_attempts, 1);
+        assert_eq!(metrics.commands_run, 1);
+        assert_eq!(metrics.commands_passed, 1);
+        assert_eq!(metrics.gates_passed, 1);
+        assert_eq!(metrics.evidence_files, 1);
     }
 
     #[test]

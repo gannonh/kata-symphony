@@ -14,11 +14,12 @@ use crate::github::client::GithubClient;
 use crate::github::projects_v2::ProjectsV2Client;
 use crate::http_server::{
     attach_implementation_http_response, attach_review_http_response_with_attempts,
-    attach_spec_http_response, factory_run_http_response, factory_run_metrics_http_response,
-    implementation_run_metrics_http_response, review_run_metrics_http_response,
-    spec_run_metrics_http_response, FactoryArtifactHttpResponse, FactoryRunHttpResponse,
-    FactoryRunMetricsHttpResponse, FactoryRunQuery, ImplementationRunMetricsHttpResponse,
-    ReviewRunMetricsHttpResponse, SpecRunMetricsHttpResponse,
+    attach_spec_http_response, attach_verification_http_response, factory_run_http_response,
+    factory_run_metrics_http_response, implementation_run_metrics_http_response,
+    review_run_metrics_http_response, spec_run_metrics_http_response, FactoryArtifactHttpResponse,
+    FactoryRunHttpResponse, FactoryRunMetricsHttpResponse, FactoryRunQuery,
+    ImplementationRunMetricsHttpResponse, ReviewRunMetricsHttpResponse,
+    SpecRunMetricsHttpResponse, VerificationRunHttpResponse,
 };
 use crate::implementation::coordinator::{
     ImplementationCoordinator, ImplementationCoordinatorConfig,
@@ -1038,6 +1039,49 @@ impl SharedFactoryStore {
         f(&mut guard)
     }
 
+    fn load_verification_run_response(
+        &self,
+        run_id: &str,
+    ) -> std::result::Result<Option<VerificationRunHttpResponse>, String> {
+        self.with_store(|store| {
+            let Some(run) = store.get_run_by_id(run_id)? else {
+                return Ok(None);
+            };
+            let attempts = store.list_verification_attempts(&run.run_id)?;
+            let Some(attempt) = attempts.first().cloned() else {
+                return Ok(None);
+            };
+            let commands = store.list_verification_command_runs(&attempt.attempt_id)?;
+            let gate = store.get_verification_gate(&attempt.attempt_id)?;
+            let evidence = store.list_verification_evidence(&attempt.attempt_id)?;
+            let publication = store
+                .list_verification_publications_for_run(&run.run_id)?
+                .into_iter()
+                .next();
+            let mut response = factory_run_http_response(&run, &[], None, None);
+            attach_verification_http_response(
+                &mut response,
+                Some(&attempt),
+                &commands,
+                gate.as_ref(),
+                &evidence,
+                publication.as_ref(),
+            );
+            let verification = response.verification.clone();
+            Ok(Some(VerificationRunHttpResponse {
+                run_id: run.run_id.clone(),
+                forge_host: run.forge_host,
+                repository: run.repository,
+                issue_identifier: run.issue_identifier,
+                verification: verification.clone(),
+                evidence: verification
+                    .map(|verification| verification.evidence)
+                    .unwrap_or_default(),
+            }))
+        })
+        .map_err(|err| err.to_string())
+    }
+
     fn load_run_response(
         &self,
         lookup: impl FnOnce(&SqliteFactoryStore) -> Result<Option<FactoryRunRecord>>,
@@ -1116,6 +1160,35 @@ impl SharedFactoryStore {
                 review_artifact,
                 review_publication.as_ref(),
                 &attempts,
+            );
+            let verification_attempts = store.list_verification_attempts(&run.run_id)?;
+            let verification_attempt = verification_attempts.first().cloned();
+            let verification_commands = verification_attempt
+                .as_ref()
+                .map(|attempt| store.list_verification_command_runs(&attempt.attempt_id))
+                .transpose()?
+                .unwrap_or_default();
+            let verification_gate = verification_attempt
+                .as_ref()
+                .map(|attempt| store.get_verification_gate(&attempt.attempt_id))
+                .transpose()?
+                .flatten();
+            let verification_evidence = verification_attempt
+                .as_ref()
+                .map(|attempt| store.list_verification_evidence(&attempt.attempt_id))
+                .transpose()?
+                .unwrap_or_default();
+            let verification_publication = store
+                .list_verification_publications_for_run(&run.run_id)?
+                .into_iter()
+                .next();
+            attach_verification_http_response(
+                &mut response,
+                verification_attempt.as_ref(),
+                &verification_commands,
+                verification_gate.as_ref(),
+                &verification_evidence,
+                verification_publication.as_ref(),
             );
             Ok(Some(response))
         })
@@ -1373,6 +1446,50 @@ impl FactoryRunQuery for SharedFactoryStore {
         self.with_store(|store| store.review_metrics())
             .map(review_run_metrics_http_response)
             .map_err(|err| err.to_string())
+    }
+
+    fn verification_metrics(
+        &self,
+    ) -> std::result::Result<crate::http_server::VerificationRunMetricsHttpResponse, String> {
+        self.with_store(|store| store.verification_metrics())
+            .map(crate::http_server::verification_run_metrics_http_response)
+            .map_err(|err| err.to_string())
+    }
+
+    fn get_verification_run(
+        &self,
+        run_id: &str,
+    ) -> std::result::Result<Option<crate::http_server::VerificationRunHttpResponse>, String> {
+        self.load_verification_run_response(run_id)
+    }
+
+    fn get_verification_evidence(
+        &self,
+        run_id: &str,
+    ) -> std::result::Result<Option<Vec<crate::http_server::VerificationEvidenceHttp>>, String> {
+        self.with_store(|store| {
+            let run = store.get_run_by_id(run_id)?;
+            let Some(run) = run else {
+                return Ok(None);
+            };
+            let attempts = store.list_verification_attempts(&run.run_id)?;
+            let Some(attempt) = attempts.first() else {
+                return Ok(None);
+            };
+            let evidence = store.list_verification_evidence(&attempt.attempt_id)?;
+            Ok(Some(
+                evidence
+                    .iter()
+                    .map(|record| crate::http_server::VerificationEvidenceHttp {
+                        evidence_id: record.evidence_id.clone(),
+                        relative_path: record.relative_path.clone(),
+                        sha256: record.sha256.clone(),
+                        bytes_len: record.bytes_len,
+                    })
+                    .collect(),
+            ))
+        })
+        .map_err(|err| err.to_string())
     }
 
     fn blocked_publications(

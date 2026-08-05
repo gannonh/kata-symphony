@@ -648,6 +648,68 @@ server:
 #   # changes_requested_route:
 #   #   state: Implementation
 
+# ─── Verification stage (A5) ───────────────────────────────────────────────────
+# GitHub Projects v2 only. Admits factory runs whose durable A4 findings
+# artifact has an APPLIED AUTOMATIC publication whose deterministic route equals
+# verification.trigger_state, with the tracker item in that state. A4 preview
+# publications never start A5.
+#
+# The controller fetches `refs/pull/<n>/head` with subprocess-scoped
+# authentication, verifies the fetched SHA equals the A4 reviewed head, and
+# gives commands a credential-free bundle clone. Commands run in configured
+# order against the exact reviewed head and stop at the first non-passing
+# result; later commands are recorded as `not_run`. A local command is launched
+# through a new-process-group supervisor blocked on a controller pipe: the
+# launching record and nonce are persisted first, then the supervisor's
+# PID/process-group/start-token/executable identity is durably CAS-recorded
+# before the payload runs. Docker commands use labeled `docker create`, persist
+# the container ID before `docker start`, and recovery removes label-matching
+# stopped orphans. Timeout/restart/cancellation terminates and reaps the
+# persisted process group or container before cleanup.
+#
+# Evidence files are accepted only below `$SYMPHONY_EVIDENCE_DIR`, bounded by
+# count and size, stored by digest in the content-addressed artifact store, and
+# never served as bytes over the unauthenticated HTTP API. The read-only
+# verifier receives the pinned A2 spec, A3 claims, A4 findings, command
+# results, and evidence metadata and emits a strict criterion matrix. Symphony
+# computes the gate: a verifier cannot override a failed command, an unexecuted
+# required command, a missing criterion, or an invalid evidence reference. A
+# completed failed gate is expected product evidence, stays in Verification,
+# and never auto-retries. Preview mode publishes one owned issue comment and
+# otherwise performs no tracker or PR mutation.
+#
+# Requires review.mode 'automatic' with completion_route.state equal to
+# verification.trigger_state; commands must be 1-20 unique names with exactly
+# one kind: acceptance. `verification.model` is rejected for Codex backends.
+#
+# HTTP additions:
+#   GET /api/v1/factory-runs/{run_id}                   # includes verification when present
+#   GET /api/v1/factory-runs/metrics?stage=verification
+#   GET /api/v1/verification/runs/{run_id}              # run-scoped view
+#   GET /api/v1/verification/runs/{run_id}/evidence     # metadata only
+#
+# verification:
+#   enabled: false
+#   mode: preview                 # preview only in this slice
+#   prompt: prompts/verification.md
+#   # model: provider/model-name  # Pi only
+#   max_turns: 1
+#   invocation_timeout_ms: 1800000
+#   max_attempts: 3
+#   max_reprompts: 2
+#   max_evidence_files: 100
+#   max_evidence_bytes: 104857600
+#   trigger_state: Verification
+#   commands:
+#     - name: affected-validation
+#       kind: test
+#       command: pnpm run validate:affected
+#       timeout_ms: 1800000
+#     - name: product-acceptance
+#       kind: acceptance
+#       command: ./scripts/verify-product.sh
+#       timeout_ms: 1800000
+
 # ─── Prompts (per-state prompt injection) ─────────────────────────────────────
 # Optional. When configured, the orchestrator selects a prompt template based on
 # the issue's tracker state at dispatch time instead of using the markdown body

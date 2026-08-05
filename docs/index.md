@@ -14,7 +14,7 @@ Open Knowledge Format (OKF) bundle for the Kata monorepo: Kata CLI (`apps/cli`) 
 * [A4 Agent Review Stage](specs/archive/2026-07-30-a4-agent-review-stage-design.md) - Active; PR1 preview and typed TUI state are implemented; PR2 formal publication, active-lease fencing, restart recovery, and live routing are verified with credential-isolation and Docker residuals
 * [A1 GitHub Issue Triage](specs/archive/2026-07-16-a1-github-issue-triage-design.md) - completed GitHub path (PR1–PR3 shipped: [#587](https://github.com/gannonh/kata-symphony/pull/587), [#598](https://github.com/gannonh/kata-symphony/pull/598), [#599](https://github.com/gannonh/kata-symphony/pull/599)); Linear triage deferred
 * [A2 Spec Stage](specs/archive/2026-07-18-a2-spec-stage-design.md) - completed; live UAT accepted ([verify](specs/archive/2026-07-26-a2-uat-verify-report.md))
-* [ADRs](adrs/) - architecture decision records ([ADR-0001](adrs/0001-a1-triage-durability-and-isolation.md), [ADR-0002](adrs/0002-triage-process-recovery-identity.md), [ADR-0003](adrs/0003-a2-spec-stage-artifacts-and-gates.md), [ADR-0004](adrs/0004-a3-implementation-durability-and-bundles.md), [ADR-0005](adrs/0005-a4-review-publication-fencing.md))
+* [ADRs](adrs/) - architecture decision records ([ADR-0001](adrs/0001-a1-triage-durability-and-isolation.md), [ADR-0002](adrs/0002-triage-process-recovery-identity.md), [ADR-0003](adrs/0003-a2-spec-stage-artifacts-and-gates.md), [ADR-0004](adrs/0004-a3-implementation-durability-and-bundles.md), [ADR-0005](adrs/0005-a4-review-publication-fencing.md), [ADR-0006](adrs/0006-a5-verification-evidence-and-gate.md))
 
 # Guides
 

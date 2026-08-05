@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Features
+
+- **A5 verification evidence preview** — a typed `verification` stage runs configured blocking commands against the exact A4-reviewed PR head in a credential-free bundle workspace, collects bounded digest-addressed evidence, invokes a read-only verifier against the pinned spec/implementation/review artifacts, and computes a deterministic gate the verifier cannot override. Preview mode publishes one owned issue comment. A4 review cycles are keyed by head and base so a base-only change opens a fresh review cycle while preserving every existing artifact, finding, and publication reference.
+
 ## 2.3.0
 
 ### Features

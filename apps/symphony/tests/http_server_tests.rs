@@ -1364,6 +1364,7 @@ struct FakeFactoryRunQuery {
     by_issue: BTreeMap<String, symphony::http_server::FactoryRunHttpResponse>,
     metrics: Option<symphony::http_server::FactoryRunMetricsHttpResponse>,
     review_metrics: Option<symphony::http_server::ReviewRunMetricsHttpResponse>,
+    verification_metrics: Option<symphony::http_server::VerificationRunMetricsHttpResponse>,
     spec_metrics: Option<symphony::http_server::SpecRunMetricsHttpResponse>,
     /// `None` leaves the trait default in place, standing in for an implementor
     /// that does not serve publication recovery at all.
@@ -1413,6 +1414,42 @@ impl symphony::http_server::FactoryRunQuery for FakeFactoryRunQuery {
         self.review_metrics
             .clone()
             .ok_or_else(|| "review metrics unavailable".to_string())
+    }
+
+    fn verification_metrics(
+        &self,
+    ) -> Result<symphony::http_server::VerificationRunMetricsHttpResponse, String> {
+        self.verification_metrics
+            .clone()
+            .ok_or_else(|| "verification metrics unavailable".to_string())
+    }
+
+    fn get_verification_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<symphony::http_server::VerificationRunHttpResponse>, String> {
+        let Some(run) = self.by_id.get(run_id) else {
+            return Ok(None);
+        };
+        let Some(verification) = run.verification.clone() else {
+            return Ok(None);
+        };
+        Ok(Some(symphony::http_server::VerificationRunHttpResponse {
+            run_id: run_id.to_string(),
+            forge_host: "github.com".to_string(),
+            repository: "owner/repo".to_string(),
+            issue_identifier: "#123".to_string(),
+            verification: Some(verification.clone()),
+            evidence: verification.evidence,
+        }))
+    }
+
+    fn get_verification_evidence(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<Vec<symphony::http_server::VerificationEvidenceHttp>>, String> {
+        self.get_verification_run(run_id)
+            .map(|run| run.map(|run| run.evidence))
     }
 
     fn blocked_publications(
@@ -1561,6 +1598,7 @@ fn sample_factory_run() -> symphony::http_server::FactoryRunHttpResponse {
         spec: None,
         implementation: None,
         review: None,
+        verification: None,
     }
 }
 
@@ -1776,6 +1814,62 @@ async fn test_factory_run_metrics_stage_validation() {
     assert_eq!(review_payload["automatic_publications"], 2);
     assert_eq!(review_payload["no_findings"], 1);
 
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        metrics: Some(metrics.clone()),
+        verification_metrics: Some(symphony::http_server::VerificationRunMetricsHttpResponse {
+            base: symphony::http_server::FactoryRunMetricsHttpResponse {
+                stage: "verification".to_string(),
+                ..metrics.clone()
+            },
+            total_attempts: 3,
+            completed_attempts: 2,
+            failed_attempts: 1,
+            interrupted_attempts: 0,
+            superseded_attempts: 0,
+            commands_run: 4,
+            commands_passed: 3,
+            commands_failed: 1,
+            gates_passed: 1,
+            gates_failed: 1,
+            evidence_files: 5,
+            preview_publications: 1,
+        }),
+        ..Default::default()
+    });
+    let verification = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/factory-runs/metrics?stage=verification")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(verification.status(), StatusCode::OK);
+    let verification_payload = body_json(verification).await;
+    assert_eq!(verification_payload["stage"], "verification");
+    assert_eq!(verification_payload["gates_passed"], 1);
+    assert_eq!(verification_payload["gates_failed"], 1);
+    assert_eq!(verification_payload["evidence_files"], 5);
+    assert_eq!(verification_payload["preview_publications"], 1);
+
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        metrics: Some(metrics.clone()),
+        review_metrics: Some(symphony::http_server::ReviewRunMetricsHttpResponse {
+            base: symphony::http_server::FactoryRunMetricsHttpResponse {
+                stage: "review".to_string(),
+                ..metrics.clone()
+            },
+            blocked_publications: 1,
+            preview_publications: 1,
+            automatic_publications: 2,
+            findings: 0,
+            no_findings: 1,
+        }),
+        ..Default::default()
+    });
+
     let missing_stage = app
         .clone()
         .oneshot(
@@ -1987,6 +2081,138 @@ async fn test_publication_reset_route_records_the_operator() {
         operators.lock().expect("operators lock").as_slice(),
         [("intent-blocked-1".to_string(), "ada".to_string())]
     );
+}
+
+fn sample_verification_run() -> symphony::http_server::FactoryRunHttpResponse {
+    let mut run = sample_factory_run();
+    run.verification = Some(symphony::http_server::FactoryRunVerificationHttp {
+        attempt_id: "verification-attempt-1".to_string(),
+        pr_number: 42,
+        reviewed_head_sha: "head-sha".to_string(),
+        base_sha: "base-sha".to_string(),
+        status: "completed".to_string(),
+        configuration_revision: "cfg-rev".to_string(),
+        execution_profile: "local".to_string(),
+        commands: vec![symphony::http_server::VerificationCommandHttp {
+            ordinal: 1,
+            name: "affected-validation".to_string(),
+            kind: "test".to_string(),
+            status: "completed".to_string(),
+            exit_code: Some(0),
+            passed: Some(true),
+            termination_reason: None,
+            duration_ms: Some(1200),
+            output_sha256: Some("abcdef012345".to_string()),
+            execution_profile: "local".to_string(),
+        }],
+        gate: Some(symphony::http_server::VerificationGateHttp {
+            gate_id: "gate-1".to_string(),
+            status: "passed".to_string(),
+            computed_at: Some(Utc::now()),
+            command_summary: None,
+        }),
+        evidence: vec![symphony::http_server::VerificationEvidenceHttp {
+            evidence_id: "evidence-1".to_string(),
+            relative_path: "reports/summary.json".to_string(),
+            sha256: "digest-1".to_string(),
+            bytes_len: 42,
+        }],
+        publication: Some(symphony::http_server::FactoryRunVerificationPublicationHttp {
+            intent_id: "verification-intent-1".to_string(),
+            kind: "preview".to_string(),
+            status: "applied".to_string(),
+            comment_id: Some("comment-1".to_string()),
+        }),
+    });
+    run
+}
+
+#[tokio::test]
+async fn test_verification_run_by_id_404_and_200() {
+    let run = sample_verification_run();
+    let mut by_id = BTreeMap::new();
+    by_id.insert(run.run_id.clone(), run);
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        by_id,
+        ..Default::default()
+    });
+
+    let missing = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/verification/runs/missing")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+    let missing_payload = body_json(missing).await;
+    assert_eq!(missing_payload["error"]["code"], "verification_run_not_found");
+
+    let found = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/verification/runs/run-1")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(found.status(), StatusCode::OK);
+    let payload = body_json(found).await;
+    assert_eq!(payload["run_id"], "run-1");
+    assert_eq!(payload["verification"]["status"], "completed");
+    assert_eq!(payload["verification"]["reviewed_head_sha"], "head-sha");
+    assert_eq!(payload["verification"]["commands"][0]["name"], "affected-validation");
+    assert_eq!(payload["verification"]["gate"]["status"], "passed");
+    assert_eq!(
+        payload["verification"]["publication"]["comment_id"],
+        "comment-1"
+    );
+    // Evidence is metadata only: no blob bytes are ever served.
+    assert_eq!(payload["evidence"][0]["relative_path"], "reports/summary.json");
+    assert_eq!(payload["evidence"][0]["sha256"], "digest-1");
+    assert!(payload["evidence"][0].get("bytes").is_none());
+}
+
+#[tokio::test]
+async fn test_verification_evidence_endpoint_returns_metadata_only() {
+    let run = sample_verification_run();
+    let mut by_id = BTreeMap::new();
+    by_id.insert(run.run_id.clone(), run);
+    let app = router_with_factory_query(FakeFactoryRunQuery {
+        by_id,
+        ..Default::default()
+    });
+
+    let missing = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/verification/runs/missing/evidence")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    let found = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/verification/runs/run-1/evidence")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(found.status(), StatusCode::OK);
+    let payload = body_json(found).await;
+    assert_eq!(payload[0]["relative_path"], "reports/summary.json");
+    assert_eq!(payload[0]["sha256"], "digest-1");
+    assert_eq!(payload[0]["bytes_len"], 42);
 }
 
 #[tokio::test]

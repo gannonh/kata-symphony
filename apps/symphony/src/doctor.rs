@@ -1580,6 +1580,179 @@ pub fn check_spec(config: &ServiceConfig, workflow_path: &Path) -> Vec<DoctorChe
     results
 }
 
+/// A5 verification checks: dependencies, prompt, commands, and workspace /
+/// artifact-directory access. No live forge calls — the Projects v2 option
+/// check for the trigger state is covered by the review checks.
+pub fn check_verification(
+    config: &ServiceConfig,
+    workflow_path: &Path,
+) -> Vec<DoctorCheckResult> {
+    let verification = &config.verification;
+    if !verification.enabled {
+        return vec![DoctorCheckResult::skipped(
+            "Verification",
+            "verification.enabled is false — verification checks skipped",
+        )];
+    }
+    let mut results = Vec::new();
+    if !config.spec.enabled || !config.implementation.enabled || !config.review.enabled {
+        results.push(DoctorCheckResult::error(
+            "Verification Dependencies",
+            "verification.enabled requires spec.enabled, implementation.enabled, and review.enabled",
+        ));
+    } else {
+        results.push(DoctorCheckResult::pass(
+            "Verification Dependencies",
+            "A2/A3/A4 stages are enabled",
+        ));
+    }
+    if config.review.mode != ReviewMode::Automatic {
+        results.push(DoctorCheckResult::error(
+            "Verification A4 Publication",
+            "verification.enabled requires review.mode 'automatic' so clean reviews route into the trigger state",
+        ));
+    } else {
+        let route_matches = config
+            .review
+            .completion_route
+            .as_ref()
+            .map(|route| route.state.trim() == verification.trigger_state.trim())
+            .unwrap_or(false);
+        if route_matches {
+            results.push(DoctorCheckResult::pass(
+                "Verification A4 Publication",
+                format!(
+                    "Automatic A4 clean reviews route into verification.trigger_state '{}'",
+                    verification.trigger_state
+                ),
+            ));
+        } else {
+            results.push(DoctorCheckResult::error(
+                "Verification A4 Publication",
+                "review.completion_route.state must equal verification.trigger_state",
+            ));
+        }
+    }
+    let workflow_dir = workflow_path.parent().unwrap_or(Path::new("."));
+    let prompt_path = resolve_prompt_path(workflow_dir, verification.prompt.as_str());
+    if prompt_path.is_file() {
+        results.push(DoctorCheckResult::pass(
+            "Verification Prompt",
+            format!("Resolved {}", prompt_path.display()),
+        ));
+    } else {
+        results.push(DoctorCheckResult::error(
+            "Verification Prompt",
+            format!("Missing verification prompt {}", prompt_path.display()),
+        ));
+    }
+    let mut acceptance = 0usize;
+    let mut names = std::collections::HashSet::new();
+    let mut unique = true;
+    for command in &verification.commands {
+        if command.kind == crate::verification::domain::VerificationCommandKind::Acceptance {
+            acceptance += 1;
+        }
+        if !names.insert(command.name.trim().to_ascii_lowercase()) {
+            unique = false;
+        }
+        if command.command.trim().is_empty() || command.timeout_ms == 0 {
+            results.push(DoctorCheckResult::error(
+                "Verification Commands",
+                format!(
+                    "verification.commands[{}] must have a non-empty command and a positive timeout_ms",
+                    command.name
+                ),
+            ));
+        }
+    }
+    if verification.commands.is_empty() || verification.commands.len() > 20 {
+        results.push(DoctorCheckResult::error(
+            "Verification Commands",
+            "verification.commands must declare 1-20 blocking commands",
+        ));
+    } else if !unique {
+        results.push(DoctorCheckResult::error(
+            "Verification Commands",
+            "verification.commands names must be unique",
+        ));
+    } else if acceptance != 1 {
+        results.push(DoctorCheckResult::error(
+            "Verification Commands",
+            format!(
+                "verification.commands must declare exactly one command with kind 'acceptance'; found {acceptance}"
+            ),
+        ));
+    } else {
+        results.push(DoctorCheckResult::pass(
+            "Verification Commands",
+            format!(
+                "{} commands declared with exactly one acceptance command",
+                verification.commands.len()
+            ),
+        ));
+    }
+    if config.workspace.repo.as_deref().map(|path| Path::new(path).is_dir()).unwrap_or(false) {
+        results.push(DoctorCheckResult::pass(
+            "Verification Workspace",
+            format!(
+                "workspace.repo resolves to {}",
+                config.workspace.repo.as_deref().unwrap_or("")
+            ),
+        ));
+    } else {
+        results.push(DoctorCheckResult::error(
+            "Verification Workspace",
+            "workspace.repo must resolve to an existing trusted repository",
+        ));
+    }
+    let root = Path::new(config.workspace.root.as_str());
+    if root.is_dir() {
+        results.push(DoctorCheckResult::pass(
+            "Verification Workspace Root",
+            format!("workspace.root resolves to {}", root.display()),
+        ));
+    } else {
+        results.push(DoctorCheckResult::error(
+            "Verification Workspace Root",
+            format!("workspace.root does not exist: {}", root.display()),
+        ));
+    }
+    if let Some(storage_path) = config.storage.path.as_deref() {
+        let artifacts = crate::implementation::bundle::artifacts_dir(Path::new(storage_path));
+        if artifacts.parent().map(|parent| parent.exists()).unwrap_or(false) {
+            results.push(DoctorCheckResult::pass(
+                "Verification Artifacts",
+                format!("Evidence blob directory {}", artifacts.display()),
+            ));
+        } else {
+            results.push(DoctorCheckResult::error(
+                "Verification Artifacts",
+                format!(
+                    "Artifact-directory parent does not exist: {}",
+                    artifacts.parent().unwrap_or(Path::new(".")).display()
+                ),
+            ));
+        }
+    } else {
+        results.push(DoctorCheckResult::error(
+            "Verification Artifacts",
+            "storage.path is required when verification is enabled",
+        ));
+    }
+    let verifier_command = match config.agent_backend {
+        crate::domain::AgentBackend::Codex => &config.codex.command,
+        crate::domain::AgentBackend::KataCli => &config.pi_agent.command,
+    };
+    if verifier_command.is_empty() {
+        results.push(DoctorCheckResult::error(
+            "Verification Verifier",
+            "the verifier command is empty; the read-only verifier cannot run",
+        ));
+    }
+    results
+}
+
 pub fn check_implementation(
     config: &ServiceConfig,
     workflow_path: &Path,
