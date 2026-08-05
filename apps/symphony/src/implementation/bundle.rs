@@ -92,6 +92,11 @@ pub fn create_base_bundle(repo: &Path, commit: &str, dest: &Path) -> Result<()> 
 }
 
 /// Create a verified result bundle for `base..head` from `workspace`.
+///
+/// The bundle is SELF-CONTAINED: the base commit is included as an object, so
+/// `git bundle verify` succeeds without a prerequisite repository. Thin
+/// `base..HEAD` bundles fail standalone verification, which the A3 publication
+/// path requires when it re-verifies the stored blob.
 pub fn create_result_bundle(workspace: &Path, base: &str, head: &str, dest: &Path) -> Result<()> {
     let dest = absolute_output_path(dest)?;
     if let Some(parent) = dest.parent() {
@@ -117,11 +122,11 @@ pub fn create_result_bundle(workspace: &Path, base: &str, head: &str, dest: &Pat
             head,
         ],
     )?;
-    let range = format!("{base}..HEAD");
     let output = Command::new("git")
         .args(["bundle", "create"])
         .arg(&dest)
-        .arg(&range)
+        .arg(base)
+        .arg("HEAD")
         .current_dir(worktree.path())
         .output();
     let _ = Command::new("git")
@@ -639,6 +644,37 @@ mod tests {
         assert!(tmp.path().join("result.bundle").is_file());
         verify_bundle(&base_bundle).unwrap();
         verify_bundle_in(repo.path(), &tmp.path().join("result.bundle")).unwrap();
+    }
+
+    #[test]
+    fn result_bundle_verifies_standalone_without_a_prerequisite_repo() {
+        // #617: the A3 publication path re-verifies the stored result bundle
+        // standalone; a thin base..HEAD bundle fails that check.
+        let repo = init_tiny_repo();
+        let base = head_sha(repo.path());
+        fs::write(repo.path().join("code.rs"), "fn main() {}\n").unwrap();
+        run_git(repo.path(), &["add", "code.rs"]).unwrap();
+        run_git(repo.path(), &["commit", "-m", "impl"]).unwrap();
+        let head = head_sha(repo.path());
+
+        let tmp = tempdir().unwrap();
+        let result = tmp.path().join("result.bundle");
+        create_result_bundle(repo.path(), &base, &head, &result).unwrap();
+
+        // Standalone verification must pass: no repository context exists.
+        let empty = tempdir().unwrap();
+        run_git(empty.path(), &["init"]).unwrap();
+        let output = Command::new("git")
+            .args(["bundle", "verify"])
+            .arg(&result)
+            .current_dir(empty.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "self-contained result bundle must verify standalone: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
