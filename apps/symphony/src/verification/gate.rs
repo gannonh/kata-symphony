@@ -9,8 +9,8 @@ use std::collections::HashSet;
 
 use crate::error::{Result, SymphonyError};
 use crate::verification::domain::{
-    VerifierCriterionStatus, VerifierManifest, VerificationCommandRunRecord,
-    VerificationEvidenceRecord, VERIFICATION_CRITERIA_MAX_ITEMS,
+    VerificationCommandRunRecord, VerificationEvidenceRecord, VerifierCriterionStatus,
+    VerifierManifest, VERIFICATION_CRITERIA_MAX_ITEMS,
 };
 
 /// Identity the verifier manifest must match exactly.
@@ -82,9 +82,9 @@ pub fn compute_gate(
                 "required command '{}' was never executed",
                 run.name
             )),
-            "launching" | "running" => reasons.push(format!(
-                "command '{}' is still {}", run.name, run.status
-            )),
+            "launching" | "running" => {
+                reasons.push(format!("command '{}' is still {}", run.name, run.status))
+            }
             _ => reasons.push(format!(
                 "command '{}' has an unexpected status '{}'",
                 run.name, run.status
@@ -232,8 +232,8 @@ pub fn validate_manifest(
 mod tests {
     use super::*;
     use crate::verification::domain::{
-        VerifierCriterion, VerifierCriterionStatus, VerifierManifest,
-        VerificationCommandKind, VerificationCommandRunRecord,
+        VerificationCommandKind, VerificationCommandRunRecord, VerifierCriterion,
+        VerifierCriterionStatus, VerifierManifest,
     };
 
     fn identity() -> GateIdentity<'static> {
@@ -259,7 +259,12 @@ mod tests {
         }]
     }
 
-    fn command(name: &str, kind: VerificationCommandKind, status: &str, passed: Option<bool>) -> VerificationCommandRunRecord {
+    fn command(
+        name: &str,
+        kind: VerificationCommandKind,
+        status: &str,
+        passed: Option<bool>,
+    ) -> VerificationCommandRunRecord {
         VerificationCommandRunRecord {
             command_run_id: format!("run-{name}"),
             run_id: "run".to_string(),
@@ -303,19 +308,36 @@ mod tests {
         }
     }
 
-    fn criterion(index: u32, status: VerifierCriterionStatus, evidence_refs: &[&str]) -> VerifierCriterion {
+    fn criterion(
+        index: u32,
+        status: VerifierCriterionStatus,
+        evidence_refs: &[&str],
+    ) -> VerifierCriterion {
         VerifierCriterion {
             index,
             status,
             rationale: "because".to_string(),
-            evidence: evidence_refs.iter().map(|value| value.to_string()).collect(),
+            evidence: evidence_refs
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
         }
     }
 
     fn passing_commands() -> Vec<VerificationCommandRunRecord> {
         vec![
-            command("unit", VerificationCommandKind::Test, "completed", Some(true)),
-            command("acceptance", VerificationCommandKind::Acceptance, "completed", Some(true)),
+            command(
+                "unit",
+                VerificationCommandKind::Test,
+                "completed",
+                Some(true),
+            ),
+            command(
+                "acceptance",
+                VerificationCommandKind::Acceptance,
+                "completed",
+                Some(true),
+            ),
         ]
     }
 
@@ -325,7 +347,8 @@ mod tests {
             criterion(1, VerifierCriterionStatus::Pass, &["reports/ok.json"]),
             criterion(2, VerifierCriterionStatus::NotProven, &[]),
         ]);
-        let verdict = compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap();
+        let verdict =
+            compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap();
         assert!(verdict.passed, "{:?}", verdict.reasons);
         assert_eq!(verdict.criteria.len(), 2);
     }
@@ -337,13 +360,26 @@ mod tests {
             criterion(2, VerifierCriterionStatus::Pass, &["reports/ok.json"]),
         ]);
         let commands = vec![
-            command("unit", VerificationCommandKind::Test, "completed", Some(false)),
-            command("acceptance", VerificationCommandKind::Acceptance, "not_run", None),
+            command(
+                "unit",
+                VerificationCommandKind::Test,
+                "completed",
+                Some(false),
+            ),
+            command(
+                "acceptance",
+                VerificationCommandKind::Acceptance,
+                "not_run",
+                None,
+            ),
         ];
         let verdict = compute_gate(&manifest, &identity(), &commands, &evidence()).unwrap();
         assert!(!verdict.passed);
         assert!(verdict.reasons.iter().any(|reason| reason.contains("unit")));
-        assert!(verdict.reasons.iter().any(|reason| reason.contains("acceptance")));
+        assert!(verdict
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("acceptance")));
     }
 
     #[test]
@@ -353,18 +389,36 @@ mod tests {
             criterion(2, VerifierCriterionStatus::Pass, &["reports/ok.json"]),
         ]);
         let commands = vec![
-            command("unit", VerificationCommandKind::Test, "completed", Some(true)),
-            command("acceptance", VerificationCommandKind::Acceptance, "not_run", None),
+            command(
+                "unit",
+                VerificationCommandKind::Test,
+                "completed",
+                Some(true),
+            ),
+            command(
+                "acceptance",
+                VerificationCommandKind::Acceptance,
+                "not_run",
+                None,
+            ),
         ];
         let verdict = compute_gate(&manifest, &identity(), &commands, &evidence()).unwrap();
         assert!(!verdict.passed);
-        assert!(verdict.reasons.iter().any(|reason| reason.contains("never executed")));
+        assert!(verdict
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("never executed")));
     }
 
     #[test]
     fn missing_criterion_is_rejected() {
-        let manifest = manifest(vec![criterion(1, VerifierCriterionStatus::Pass, &["reports/ok.json"])]);
-        let err = compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
+        let manifest = manifest(vec![criterion(
+            1,
+            VerifierCriterionStatus::Pass,
+            &["reports/ok.json"],
+        )]);
+        let err =
+            compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
         assert!(err.to_string().contains("approved spec has 2"));
     }
 
@@ -374,7 +428,8 @@ mod tests {
             criterion(1, VerifierCriterionStatus::Pass, &["reports/ok.json"]),
             criterion(1, VerifierCriterionStatus::NotProven, &[]),
         ]);
-        let err = compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
+        let err =
+            compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
         assert!(err.to_string().contains("more than once"));
     }
 
@@ -384,7 +439,8 @@ mod tests {
             criterion(1, VerifierCriterionStatus::Pass, &["reports/other.json"]),
             criterion(2, VerifierCriterionStatus::NotProven, &[]),
         ]);
-        let err = compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
+        let err =
+            compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
         assert!(err.to_string().contains("outside the attempt"));
     }
 
@@ -399,7 +455,8 @@ mod tests {
             },
             criterion(2, VerifierCriterionStatus::NotProven, &[]),
         ]);
-        let err = compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
+        let err =
+            compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
         assert!(err.to_string().contains("empty rationale"));
     }
 
@@ -410,12 +467,14 @@ mod tests {
             criterion(2, VerifierCriterionStatus::NotProven, &[]),
         ]);
         manifest.reviewed_head_sha = "other-head".to_string();
-        let err = compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
+        let err =
+            compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
         assert!(err.to_string().contains("reviewed_head_sha"));
 
         manifest.reviewed_head_sha = "head-sha".to_string();
         manifest.spec_artifact_id = "other-spec".to_string();
-        let err = compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
+        let err =
+            compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
         assert!(err.to_string().contains("spec_artifact_id"));
     }
 }

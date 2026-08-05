@@ -23,8 +23,8 @@ use crate::verification::domain::{
 };
 use crate::verification::evidence::collect_evidence;
 use crate::verification::executor::{
-    cleanup_stopped_verification_containers, command_sha256, execute_command, CommandExecutionRequest,
-    CommandRunFailure, LaunchIdentity,
+    cleanup_stopped_verification_containers, command_sha256, execute_command,
+    CommandExecutionRequest, CommandRunFailure, LaunchIdentity,
 };
 use crate::verification::gate::{compute_gate, GateIdentity};
 use crate::verification::publisher::publish_preview_comment;
@@ -95,7 +95,10 @@ where
         }
     }
 
-    pub fn with_events(mut self, events: std::sync::Arc<dyn crate::triage::coordinator::EventEmitter>) -> Self {
+    pub fn with_events(
+        mut self,
+        events: std::sync::Arc<dyn crate::triage::coordinator::EventEmitter>,
+    ) -> Self {
         self.events = Some(events);
         self
     }
@@ -181,15 +184,19 @@ where
         let attempts = self.store.list_running_verification_attempts()?;
         for attempt in attempts {
             recovered += 1;
-            let command_runs = self.store.list_verification_command_runs(&attempt.attempt_id)?;
+            let command_runs = self
+                .store
+                .list_verification_command_runs(&attempt.attempt_id)?;
             for run in command_runs {
                 if run.status != "launching" && run.status != "running" {
                     continue;
                 }
                 if let Some(container_id) = run.container_id.as_deref() {
-                    let _ = crate::verification::executor::stop_persisted_container(container_id).await;
+                    let _ =
+                        crate::verification::executor::stop_persisted_container(container_id).await;
                 } else if let Some(identity) = local_identity_from_record(&run) {
-                    let _ = crate::triage::process_identity::terminate_process_group(&identity).await;
+                    let _ =
+                        crate::triage::process_identity::terminate_process_group(&identity).await;
                 }
                 let _ = self.store.complete_verification_command(
                     crate::triage::store::CompleteVerificationCommandRequest {
@@ -214,7 +221,9 @@ where
                 true,
                 None,
             );
-            let _ = self.store.interrupt_verification_stage_run(&attempt.stage_run_id, &error);
+            let _ = self
+                .store
+                .interrupt_verification_stage_run(&attempt.stage_run_id, &error);
             let _ = self.store.update_verification_attempt(
                 crate::triage::store::UpdateVerificationAttemptRequest {
                     attempt_id: &attempt.attempt_id,
@@ -416,9 +425,7 @@ where
             let commands = service.verification.commands.clone();
             let command_outcome = self
                 .run_commands(
-                    service,
                     &attempt_id,
-                    &stage.stage_run_id,
                     &candidate.run_id,
                     &workspace,
                     &commands,
@@ -508,10 +515,12 @@ where
             let evidence_records = collect_evidence(
                 &workspace.evidence_dir,
                 &artifacts,
-                &candidate.run_id,
-                &attempt_id,
-                service.verification.max_evidence_files,
-                service.verification.max_evidence_bytes,
+                &crate::verification::evidence::EvidenceLimits {
+                    run_id: candidate.run_id.clone(),
+                    attempt_id: attempt_id.clone(),
+                    max_files: service.verification.max_evidence_files,
+                    max_bytes: service.verification.max_evidence_bytes,
+                },
             )?;
             self.store
                 .store_verification_evidence(&evidence_records)?;
@@ -622,7 +631,7 @@ where
                 criterion_count,
             };
             let verdict = compute_gate(&manifest, &gate_identity, &command_runs, &evidence_records)
-                .map_err(|error| {
+                .inspect_err(|error| {
                     fail_verification_attempt(
                         &self.store,
                         &stage.stage_run_id,
@@ -632,7 +641,6 @@ where
                         &workspace,
                         &self.config.workspace_root,
                     );
-                    error
                 })?;
 
             // Re-read head/base before gate persistence and publication.
@@ -690,13 +698,16 @@ where
                 &self.comments,
                 &self.store,
                 &intent,
-                &candidate.run_id,
-                &attempt_id,
-                candidate.pr_number,
-                &pull.head.sha,
-                &gate,
-                &command_runs,
-                &evidence_records,
+                &crate::verification::publisher::PreviewCommentContext {
+                    intent_id: &intent.intent_id,
+                    run_id: &candidate.run_id,
+                    attempt_id: &attempt_id,
+                    pr_number: candidate.pr_number,
+                    reviewed_head_sha: &pull.head.sha,
+                    gate: &gate,
+                    commands: &command_runs,
+                    evidence: &evidence_records,
+                },
                 self.config.max_pages,
             )
             .await?;
@@ -745,7 +756,9 @@ where
                         true,
                         None,
                     );
-                    let _ = self.store.fail_attempt(&stage.stage_run_id, factory_error.clone());
+                    let _ = self
+                        .store
+                        .fail_attempt(&stage.stage_run_id, factory_error.clone());
                     let _ = self.store.update_verification_attempt(
                         crate::triage::store::UpdateVerificationAttemptRequest {
                             attempt_id: &attempt_id,
@@ -766,15 +779,16 @@ where
     /// records and whether any command failed.
     async fn run_commands(
         &self,
-        service: &ServiceConfig,
         attempt_id: &str,
-        _stage_run_id: &str,
         run_id: &str,
         workspace: &VerificationWorkspace,
         commands: &[VerificationCommandConfig],
         configuration_revision: &str,
         docker: Option<crate::domain::DockerConfig>,
-    ) -> Result<(Vec<crate::verification::domain::VerificationCommandRunRecord>, bool)> {
+    ) -> Result<(
+        Vec<crate::verification::domain::VerificationCommandRunRecord>,
+        bool,
+    )> {
         let profile = if docker.is_some() {
             crate::implementation::domain::ExecutionProfile::Docker
         } else {
@@ -788,18 +802,21 @@ where
             let nonce = Uuid::now_v7().to_string();
             let sha256 = command_sha256(&command.command);
             let command_run_id = self.store.record_verification_command_launch(
-                run_id,
-                attempt_id,
-                ordinal,
-                &command.name,
-                command.kind,
-                configuration_revision,
-                &sha256,
-                profile.as_str(),
-                &nonce,
+                crate::triage::store::RecordVerificationCommandLaunchRequest {
+                    run_id,
+                    attempt_id,
+                    ordinal,
+                    name: &command.name,
+                    kind: command.kind,
+                    configuration_revision,
+                    command_sha256: &sha256,
+                    execution_profile: profile.as_str(),
+                    launch_nonce: &nonce,
+                },
             )?;
             if interrupted_index.is_some() {
-                self.store.mark_verification_command_not_run(&command_run_id)?;
+                self.store
+                    .mark_verification_command_not_run(&command_run_id)?;
                 continue;
             }
             let request = CommandExecutionRequest {
@@ -822,8 +839,11 @@ where
                     &launch_nonce,
                     &identity,
                 ),
-                LaunchIdentity::Container { container_id } => store
-                    .cas_verification_container(&launch_command_run_id, &launch_nonce, &container_id),
+                LaunchIdentity::Container { container_id } => store.cas_verification_container(
+                    &launch_command_run_id,
+                    &launch_nonce,
+                    &container_id,
+                ),
             };
             match execute_command(&request, on_launch).await {
                 Ok(result) => {
@@ -905,7 +925,6 @@ where
             }
         }
         let records = self.store.list_verification_command_runs(attempt_id)?;
-        let _ = service;
         Ok((records, failed))
     }
 
@@ -936,7 +955,9 @@ where
             false,
             None,
         );
-        let _ = self.store.interrupt_verification_stage_run(stage_run_id, &error);
+        let _ = self
+            .store
+            .interrupt_verification_stage_run(stage_run_id, &error);
         let _ = self.store.update_verification_attempt(
             crate::triage::store::UpdateVerificationAttemptRequest {
                 attempt_id,
@@ -986,15 +1007,14 @@ fn fail_verification_attempt(
     let mut store = store.clone();
     let factory_error = FactoryError::new(code, "verification_coordinator", message, false, None);
     let _ = store.fail_attempt(stage_run_id, factory_error.clone());
-    let _ = store.update_verification_attempt(
-        crate::triage::store::UpdateVerificationAttemptRequest {
+    let _ =
+        store.update_verification_attempt(crate::triage::store::UpdateVerificationAttemptRequest {
             attempt_id,
             status: Some("failed"),
             workspace_path: None,
             evidence_dir: None,
             error: Some(&factory_error),
-        },
-    );
+        });
     if let Some(attempt_root) =
         attempt_root_for_cleanup(&workspace.workspace_path, workspace_root, attempt_id)
     {

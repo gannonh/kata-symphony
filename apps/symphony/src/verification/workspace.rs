@@ -47,9 +47,12 @@ pub async fn fetch_pull_head_verified(
         .current_dir(repo_path)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_ASKPASS", "");
-    if let Some(token) = github_token.map(str::trim).filter(|token| !token.is_empty()) {
-        let credentials = base64::engine::general_purpose::STANDARD
-            .encode(format!("x-access-token:{token}"));
+    if let Some(token) = github_token
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        let credentials =
+            base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
         command
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "http.extraHeader")
@@ -89,7 +92,11 @@ pub async fn fetch_pull_head_verified(
 
     let resolved = git_stdout(
         repo_path,
-        &["rev-parse", "--verify", &format!("refs/{ref_name}^{{commit}}")],
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/{ref_name}^{{commit}}"),
+        ],
     )?;
     if resolved != expected_head_sha {
         return Err(SymphonyError::TriageError(format!(
@@ -107,7 +114,8 @@ pub async fn prepare_verification_workspace(
     attempt_id: &str,
     head_sha: &str,
 ) -> Result<VerificationWorkspace> {
-    let attempt_root = workspace_root.join(format!("{VERIFICATION_ATTEMPT_DIR_PREFIX}{attempt_id}"));
+    let attempt_root =
+        workspace_root.join(format!("{VERIFICATION_ATTEMPT_DIR_PREFIX}{attempt_id}"));
     let workspace_path = attempt_root.join("workspace");
     let evidence_dir = attempt_root.join("evidence");
     let home_dir = attempt_root.join("home");
@@ -187,7 +195,10 @@ pub fn verify_workspace_unchanged(workspace: &Path, expected_head: &str) -> Resu
         )));
     }
     let tracked = git_stdout(workspace, &["ls-files"])?;
-    let tracked_count = tracked.lines().filter(|line| !line.trim().is_empty()).count();
+    let tracked_count = tracked
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
     let _ = tree;
     if tracked_count == 0 {
         return Err(SymphonyError::TriageError(
@@ -290,8 +301,14 @@ mod tests {
         let remotes = git_stdout(&workspace.workspace_path, &["remote", "-v"]).unwrap();
         assert!(remotes.is_empty(), "bundle clone must have no remote");
         let config = fs::read_to_string(workspace.workspace_path.join(".git/config")).unwrap();
-        assert!(!config.contains("extraHeader"), "no credential config may leak");
-        assert!(!config.contains("http."), "no http credential config may leak");
+        assert!(
+            !config.contains("extraHeader"),
+            "no credential config may leak"
+        );
+        assert!(
+            !config.contains("http."),
+            "no http credential config may leak"
+        );
     }
 
     #[tokio::test]

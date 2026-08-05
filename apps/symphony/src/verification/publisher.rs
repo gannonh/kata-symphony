@@ -5,8 +5,8 @@
 //! restart updates the same comment instead of duplicating it.
 
 use crate::error::Result;
-use crate::triage::domain::PublicationStatus;
 use crate::github::client::GithubIssueComment;
+use crate::triage::domain::PublicationStatus;
 use crate::triage::publisher::TriageCommentPort;
 use crate::triage::runtime::SharedFactoryStore;
 use crate::verification::domain::{
@@ -19,18 +19,32 @@ pub fn verification_marker(intent_id: &str) -> String {
     format!("{VERIFICATION_COMMENT_MARKER_PREFIX}{intent_id}{VERIFICATION_COMMENT_MARKER_SUFFIX}")
 }
 
-/// Render the owned preview summary. Only digests and metadata — never blob
-/// bytes — and stable HTTP links for the run.
-pub fn render_verification_preview_comment(
-    intent_id: &str,
-    run_id: &str,
-    attempt_id: &str,
-    pr_number: u64,
-    reviewed_head_sha: &str,
-    gate: &VerificationGateRecord,
-    commands: &[VerificationCommandRunRecord],
-    evidence: &[VerificationEvidenceRecord],
-) -> String {
+/// Everything needed to render the owned preview summary. Only digests and
+/// metadata — never blob bytes — and stable HTTP links for the run.
+#[derive(Debug, Clone)]
+pub struct PreviewCommentContext<'a> {
+    pub intent_id: &'a str,
+    pub run_id: &'a str,
+    pub attempt_id: &'a str,
+    pub pr_number: u64,
+    pub reviewed_head_sha: &'a str,
+    pub gate: &'a VerificationGateRecord,
+    pub commands: &'a [VerificationCommandRunRecord],
+    pub evidence: &'a [VerificationEvidenceRecord],
+}
+
+/// Render the owned preview summary.
+pub fn render_verification_preview_comment(context: &PreviewCommentContext<'_>) -> String {
+    let PreviewCommentContext {
+        intent_id,
+        run_id,
+        attempt_id,
+        pr_number,
+        reviewed_head_sha,
+        gate,
+        commands,
+        evidence,
+    } = context;
     let marker = verification_marker(intent_id);
     let mut lines = vec![
         format!("{marker}"),
@@ -46,7 +60,7 @@ pub fn render_verification_preview_comment(
         "| command | kind | status | exit | output sha256 |".to_string(),
         "| --- | --- | --- | --- | --- |".to_string(),
     ];
-    for command in commands {
+    for command in *commands {
         let exit = command
             .exit_code
             .map(|code| code.to_string())
@@ -60,7 +74,11 @@ pub fn render_verification_preview_comment(
             .collect::<String>();
         lines.push(format!(
             "| {} | {} | {} | {} | {} |",
-            command.name, command.kind.as_str(), command.status, exit, digest
+            command.name,
+            command.kind.as_str(),
+            command.status,
+            exit,
+            digest
         ));
     }
     if let Some(manifest) = &gate.verifier_manifest {
@@ -82,15 +100,11 @@ pub fn render_verification_preview_comment(
         lines.push(String::new());
         lines.push("### Evidence".to_string());
         lines.push(String::new());
-        for record in evidence {
+        for record in *evidence {
             lines.push(format!(
                 "- `{}` sha256 `{}` ({} bytes)",
                 record.relative_path,
-                record
-                    .sha256
-                    .chars()
-                    .take(12)
-                    .collect::<String>(),
+                record.sha256.chars().take(12).collect::<String>(),
                 record.bytes_len
             ));
         }
@@ -110,13 +124,7 @@ pub async fn publish_preview_comment<C: TriageCommentPort>(
     comments: &C,
     store: &SharedFactoryStore,
     intent: &VerificationPublicationIntent,
-    run_id: &str,
-    attempt_id: &str,
-    pr_number: u64,
-    reviewed_head_sha: &str,
-    gate: &VerificationGateRecord,
-    commands: &[VerificationCommandRunRecord],
-    evidence: &[VerificationEvidenceRecord],
+    context: &PreviewCommentContext<'_>,
     max_pages: u32,
 ) -> Result<String> {
     if intent.status == PublicationStatus::Applied {
@@ -125,20 +133,11 @@ pub async fn publish_preview_comment<C: TriageCommentPort>(
         }
     }
     let marker = verification_marker(&intent.intent_id);
-    let body = render_verification_preview_comment(
-        &intent.intent_id,
-        run_id,
-        attempt_id,
-        pr_number,
-        reviewed_head_sha,
-        gate,
-        commands,
-        evidence,
-    );
+    let body = render_verification_preview_comment(context);
     let mut owned: Option<GithubIssueComment> = None;
     let mut page = 0;
     loop {
-        let comments_page = comments.list_comments(pr_number, max_pages).await?;
+        let comments_page = comments.list_comments(context.pr_number, max_pages).await?;
         for comment in comments_page {
             if comment
                 .body
@@ -164,7 +163,7 @@ pub async fn publish_preview_comment<C: TriageCommentPort>(
             updated.id.to_string()
         }
         None => {
-            let created = comments.create_comment(pr_number, &body).await?;
+            let created = comments.create_comment(context.pr_number, &body).await?;
             created.id.to_string()
         }
     };
@@ -176,7 +175,7 @@ pub async fn publish_preview_comment<C: TriageCommentPort>(
 mod tests {
     use super::*;
     use crate::verification::domain::{
-        VerifierCriterion, VerifierCriterionStatus, VerifierManifest, VerificationCommandKind,
+        VerificationCommandKind, VerifierCriterion, VerifierCriterionStatus, VerifierManifest,
     };
     use chrono::Utc;
 
@@ -241,16 +240,16 @@ mod tests {
 
     #[test]
     fn rendered_comment_contains_marker_gate_commands_and_digests() {
-        let body = render_verification_preview_comment(
-            "intent-1",
-            "run-1",
-            "attempt-1",
-            42,
-            "head-sha",
-            &gate(),
-            &commands(),
-            &[],
-        );
+        let body = render_verification_preview_comment(&PreviewCommentContext {
+            intent_id: "intent-1",
+            run_id: "run-1",
+            attempt_id: "attempt-1",
+            pr_number: 42,
+            reviewed_head_sha: "head-sha",
+            gate: &gate(),
+            commands: &commands(),
+            evidence: &[],
+        });
         assert!(body.contains("<!-- symphony:verification:intent-1 -->"));
         assert!(body.contains("**passed**"));
         assert!(body.contains("affected-validation"));

@@ -131,7 +131,10 @@ pub enum LaunchIdentity {
 /// the forbidden credential keys.
 pub fn assert_no_forge_credentials(env: &[(String, String)]) -> Result<()> {
     for (key, _) in env {
-        if FORBIDDEN_COMMAND_ENV.iter().any(|forbidden| forbidden == key) {
+        if FORBIDDEN_COMMAND_ENV
+            .iter()
+            .any(|forbidden| forbidden == key)
+        {
             return Err(SymphonyError::TriageError(format!(
                 "forbidden credential {key} present in command env"
             )));
@@ -263,12 +266,8 @@ async fn execute_local(
         raw
     });
 
-    let wait_result = timeout(
-        Duration::from_millis(request.timeout_ms),
-        child.wait(),
-    )
-    .await;
-    if let Err(_) = wait_result {
+    let wait_result = timeout(Duration::from_millis(request.timeout_ms), child.wait()).await;
+    if wait_result.is_err() {
         // Terminate and reap BEFORE draining output: the output pumps only
         // return when the child closes its pipes.
         let outcome = process_identity::terminate_process_group(&identity).await;
@@ -356,7 +355,7 @@ pub async fn cleanup_stopped_verification_containers() -> Result<u64> {
             "ps",
             "-a",
             "--filter",
-            DOCKER_LABEL_STAGE,
+            "label=symphony.stage=verification",
             "--filter",
             "status=exited",
             "--filter",
@@ -443,9 +442,10 @@ async fn execute_docker(
     let image = docker.image.clone();
     create.arg(&image).arg("sh").arg("-c").arg(&request.command);
 
-    let output = create.output().await.map_err(|error| {
-        CommandRunFailure::SpawnError(format!("docker create failed: {error}"))
-    })?;
+    let output = create
+        .output()
+        .await
+        .map_err(|error| CommandRunFailure::SpawnError(format!("docker create failed: {error}")))?;
     if !output.status.success() {
         return Err(CommandRunFailure::SpawnError(format!(
             "docker create failed: {}",
@@ -474,9 +474,7 @@ async fn execute_docker(
         .args(["start", &container_id])
         .output()
         .await
-        .map_err(|error| {
-            CommandRunFailure::SpawnError(format!("docker start failed: {error}"))
-        })?;
+        .map_err(|error| CommandRunFailure::SpawnError(format!("docker start failed: {error}")))?;
     if !start.status.success() {
         let _ = remove_container(&container_id).await;
         return Err(CommandRunFailure::SpawnError(format!(
@@ -535,9 +533,7 @@ async fn execute_docker(
         .args(["logs", "--tail", "200", &container_id])
         .output()
         .await
-        .map_err(|error| {
-            CommandRunFailure::SpawnError(format!("docker logs failed: {error}"))
-        })?;
+        .map_err(|error| CommandRunFailure::SpawnError(format!("docker logs failed: {error}")))?;
     let stdout_tail = bounded_redacted_tail(&logs.stdout);
     let stderr_tail = bounded_redacted_tail(&logs.stderr);
     let output_sha256 = output_digest(&stdout_tail, &stderr_tail);
@@ -625,21 +621,6 @@ mod tests {
     use crate::implementation::domain::ExecutionProfile;
     use tempfile::tempdir;
 
-    fn request(command: &str, timeout_ms: u64) -> CommandExecutionRequest {
-        let dir = tempdir().unwrap();
-        CommandExecutionRequest {
-            attempt_id: "attempt-1".to_string(),
-            command_name: "test-command".to_string(),
-            workspace_path: dir.path().join("workspace"),
-            evidence_dir: dir.path().join("evidence"),
-            home_dir: dir.path().join("home"),
-            command: command.to_string(),
-            timeout_ms,
-            execution_profile: ExecutionProfile::Local,
-            docker: None,
-        }
-    }
-
     #[tokio::test]
     async fn local_command_runs_after_launch_identity_is_recorded() {
         let dir = tempdir().unwrap();
@@ -696,9 +677,7 @@ mod tests {
         std::fs::create_dir_all(&request.workspace_path).unwrap();
 
         let error = execute_command(&request, |_| {
-            Err(SymphonyError::StorageError(
-                "CAS failed".to_string(),
-            ))
+            Err(SymphonyError::StorageError("CAS failed".to_string()))
         })
         .await
         .unwrap_err();
@@ -777,10 +756,7 @@ mod tests {
             workspace_path: dir.path().join("workspace"),
             evidence_dir: dir.path().join("evidence"),
             home_dir: dir.path().join("home"),
-            command: format!(
-                "sh -c 'sleep 5; touch {}' & wait",
-                marker.display()
-            ),
+            command: format!("sh -c 'sleep 5; touch {}' & wait", marker.display()),
             timeout_ms: 1_000,
             execution_profile: ExecutionProfile::Local,
             docker: None,

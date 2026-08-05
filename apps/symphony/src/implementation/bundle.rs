@@ -756,7 +756,10 @@ mod tests {
         assert_eq!(digest, intended);
         assert_eq!(stored_len, len);
         assert!(blob_path(&arts, &digest).is_file());
-        assert_eq!(fs::read(blob_path(&arts, &digest)).unwrap(), b"stable bytes");
+        assert_eq!(
+            fs::read(blob_path(&arts, &digest)).unwrap(),
+            b"stable bytes"
+        );
         // No incomplete temp remains behind.
         assert_eq!(cleanup_incomplete_temps(&arts).unwrap(), 0);
     }
@@ -768,8 +771,7 @@ mod tests {
         let source = tmp.path().join("plain.txt");
         fs::write(&source, b"plain content").unwrap();
 
-        let (digest, len) =
-            store_blob_atomic(&arts, BlobSource::Path(&source), 1024).unwrap();
+        let (digest, len) = store_blob_atomic(&arts, BlobSource::Path(&source), 1024).unwrap();
         assert_eq!(digest, sha256_file(&source).unwrap());
         assert_eq!(len, 13);
         assert!(blob_path(&arts, &digest).is_file());

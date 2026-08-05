@@ -125,6 +125,7 @@ fn test_service_config_defaults_match_spec() {
         spec: symphony::spec::domain::SpecConfig::default(),
         implementation: symphony::implementation::domain::ImplementationConfig::default(),
         review: symphony::review::domain::ReviewConfig::default(),
+        verification: symphony::verification::domain::VerificationConfig::default(),
     };
 
     // Polling §5.3.2

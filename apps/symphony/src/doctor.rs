@@ -1583,10 +1583,7 @@ pub fn check_spec(config: &ServiceConfig, workflow_path: &Path) -> Vec<DoctorChe
 /// A5 verification checks: dependencies, prompt, commands, and workspace /
 /// artifact-directory access. No live forge calls — the Projects v2 option
 /// check for the trigger state is covered by the review checks.
-pub fn check_verification(
-    config: &ServiceConfig,
-    workflow_path: &Path,
-) -> Vec<DoctorCheckResult> {
+pub fn check_verification(config: &ServiceConfig, workflow_path: &Path) -> Vec<DoctorCheckResult> {
     let verification = &config.verification;
     if !verification.enabled {
         return vec![DoctorCheckResult::skipped(
@@ -1692,7 +1689,13 @@ pub fn check_verification(
             ),
         ));
     }
-    if config.workspace.repo.as_deref().map(|path| Path::new(path).is_dir()).unwrap_or(false) {
+    if config
+        .workspace
+        .repo
+        .as_deref()
+        .map(|path| Path::new(path).is_dir())
+        .unwrap_or(false)
+    {
         results.push(DoctorCheckResult::pass(
             "Verification Workspace",
             format!(
@@ -1720,7 +1723,11 @@ pub fn check_verification(
     }
     if let Some(storage_path) = config.storage.path.as_deref() {
         let artifacts = crate::implementation::bundle::artifacts_dir(Path::new(storage_path));
-        if artifacts.parent().map(|parent| parent.exists()).unwrap_or(false) {
+        if artifacts
+            .parent()
+            .map(|parent| parent.exists())
+            .unwrap_or(false)
+        {
             results.push(DoctorCheckResult::pass(
                 "Verification Artifacts",
                 format!("Evidence blob directory {}", artifacts.display()),

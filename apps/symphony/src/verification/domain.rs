@@ -277,8 +277,14 @@ mod tests {
         assert_eq!(config.prompt, VERIFICATION_DEFAULT_PROMPT);
         assert_eq!(config.invocation_timeout_ms, 1_800_000);
         assert_eq!(config.max_attempts, 3);
-        assert_eq!(config.max_evidence_files, VERIFICATION_EVIDENCE_FILES_DEFAULT);
-        assert_eq!(config.max_evidence_bytes, VERIFICATION_EVIDENCE_BYTES_DEFAULT);
+        assert_eq!(
+            config.max_evidence_files,
+            VERIFICATION_EVIDENCE_FILES_DEFAULT
+        );
+        assert_eq!(
+            config.max_evidence_bytes,
+            VERIFICATION_EVIDENCE_BYTES_DEFAULT
+        );
         assert_eq!(config.trigger_state, "Verification");
         assert!(config.commands.is_empty());
     }

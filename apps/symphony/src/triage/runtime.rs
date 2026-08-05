@@ -18,8 +18,8 @@ use crate::http_server::{
     factory_run_metrics_http_response, implementation_run_metrics_http_response,
     review_run_metrics_http_response, spec_run_metrics_http_response, FactoryArtifactHttpResponse,
     FactoryRunHttpResponse, FactoryRunMetricsHttpResponse, FactoryRunQuery,
-    ImplementationRunMetricsHttpResponse, ReviewRunMetricsHttpResponse,
-    SpecRunMetricsHttpResponse, VerificationRunHttpResponse,
+    ImplementationRunMetricsHttpResponse, ReviewRunMetricsHttpResponse, SpecRunMetricsHttpResponse,
+    VerificationRunHttpResponse,
 };
 use crate::implementation::coordinator::{
     ImplementationCoordinator, ImplementationCoordinatorConfig,
@@ -567,9 +567,15 @@ impl SharedFactoryStore {
 
     // ── A5 verification wrappers ──────────────────────────────────────────
 
-    pub fn claim_verification_attempt(&self, request: ClaimAttemptRequest) -> Result<StageRunRecord> {
+    pub fn claim_verification_attempt(
+        &self,
+        request: ClaimAttemptRequest,
+    ) -> Result<StageRunRecord> {
         self.with_store_mut(|store| {
-            store.claim_stage_attempt(crate::verification::domain::VERIFICATION_STAGE_NAME, request)
+            store.claim_stage_attempt(
+                crate::verification::domain::VERIFICATION_STAGE_NAME,
+                request,
+            )
         })
     }
 
@@ -615,29 +621,9 @@ impl SharedFactoryStore {
 
     pub fn record_verification_command_launch(
         &self,
-        run_id: &str,
-        attempt_id: &str,
-        ordinal: u32,
-        name: &str,
-        kind: crate::verification::domain::VerificationCommandKind,
-        configuration_revision: &str,
-        command_sha256: &str,
-        execution_profile: &str,
-        launch_nonce: &str,
+        request: crate::triage::store::RecordVerificationCommandLaunchRequest<'_>,
     ) -> Result<String> {
-        self.with_store_mut(|store| {
-            store.record_verification_command_launch(
-                run_id,
-                attempt_id,
-                ordinal,
-                name,
-                kind,
-                configuration_revision,
-                command_sha256,
-                execution_profile,
-                launch_nonce,
-            )
-        })
+        self.with_store_mut(|store| store.record_verification_command_launch(request))
     }
 
     pub fn cas_verification_launch_identity(
@@ -1466,7 +1452,8 @@ impl FactoryRunQuery for SharedFactoryStore {
     fn get_verification_evidence(
         &self,
         run_id: &str,
-    ) -> std::result::Result<Option<Vec<crate::http_server::VerificationEvidenceHttp>>, String> {
+    ) -> std::result::Result<Option<Vec<crate::http_server::VerificationEvidenceHttp>>, String>
+    {
         self.with_store(|store| {
             let run = store.get_run_by_id(run_id)?;
             let Some(run) = run else {
@@ -1817,11 +1804,12 @@ pub struct TriageRuntime {
     implementation_coordinator:
         Option<ImplementationCoordinator<GithubClient, GithubClient, LiveImplementationHarness>>,
     review_coordinator: Option<ReviewCoordinator<GithubClient, LiveReviewWorker>>,
-    verification_coordinator:
-        Option<crate::verification::coordinator::VerificationCoordinator<
+    verification_coordinator: Option<
+        crate::verification::coordinator::VerificationCoordinator<
             GithubClient,
             crate::verification::worker::LiveVerificationWorker,
-        >>,
+        >,
+    >,
     store: SharedFactoryStore,
     sessions: Arc<Mutex<crate::domain::TriageSessionRegistry>>,
     factory_sessions: Arc<Mutex<FactorySessionRegistry>>,

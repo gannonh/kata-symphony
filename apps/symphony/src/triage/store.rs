@@ -13,11 +13,6 @@ use crate::review::domain::{
 };
 use crate::review::findings::finding_identity_key;
 use crate::review::manifest::ReviewFindingsManifest;
-use crate::verification::domain::{
-    VerificationAttemptRecord, VerificationCommandKind, VerificationCommandRunRecord,
-    VerificationEvidenceRecord, VerificationGateRecord, VerificationMetricsAggregate,
-    VerificationPublicationIntent, VERIFICATION_STAGE_NAME,
-};
 use crate::spec::artifact::validate_spec;
 use crate::spec::domain::{
     ReviewFinding, SpecArtifact, SpecArtifactRecord, SpecDecision, SpecPublicationIntent,
@@ -33,6 +28,11 @@ use crate::triage::domain::{
 };
 use crate::triage::process_identity::ProcessIdentity;
 use crate::triage::storage_path::lock_path_for_storage;
+use crate::verification::domain::{
+    VerificationAttemptRecord, VerificationCommandKind, VerificationCommandRunRecord,
+    VerificationEvidenceRecord, VerificationGateRecord, VerificationMetricsAggregate,
+    VerificationPublicationIntent, VERIFICATION_STAGE_NAME,
+};
 use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -529,8 +529,7 @@ impl SqliteFactoryStore {
         // head/base key exactly once, preserving existing artifacts, findings,
         // and publication references.
         if !review_identity_is_head_base(&conn).map_err(storage_error)? {
-            apply_migration(&conn, REVIEW_HEAD_BASE_IDENTITY_MIGRATION)
-                .map_err(storage_error)?;
+            apply_migration(&conn, REVIEW_HEAD_BASE_IDENTITY_MIGRATION).map_err(storage_error)?;
         }
 
         Ok(Self {
@@ -5291,6 +5290,19 @@ pub struct UpdateVerificationAttemptRequest<'a> {
 }
 
 #[derive(Debug, Clone)]
+pub struct RecordVerificationCommandLaunchRequest<'a> {
+    pub run_id: &'a str,
+    pub attempt_id: &'a str,
+    pub ordinal: u32,
+    pub name: &'a str,
+    pub kind: VerificationCommandKind,
+    pub configuration_revision: &'a str,
+    pub command_sha256: &'a str,
+    pub execution_profile: &'a str,
+    pub launch_nonce: &'a str,
+}
+
+#[derive(Debug, Clone)]
 pub struct CompleteVerificationCommandRequest<'a> {
     pub command_run_id: &'a str,
     pub status: &'a str,
@@ -5342,9 +5354,10 @@ impl SqliteFactoryStore {
                 ],
             )
             .map_err(storage_error)?;
-        self.get_verification_attempt(&request.attempt_id)?.ok_or_else(|| {
-            SymphonyError::StorageError("created verification attempt is missing".to_string())
-        })
+        self.get_verification_attempt(&request.attempt_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError("created verification attempt is missing".to_string())
+            })
     }
 
     pub fn get_verification_attempt(
@@ -5366,7 +5379,10 @@ impl SqliteFactoryStore {
             .map_err(storage_error)
     }
 
-    pub fn list_verification_attempts(&self, run_id: &str) -> Result<Vec<VerificationAttemptRecord>> {
+    pub fn list_verification_attempts(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<VerificationAttemptRecord>> {
         let mut stmt = self
             .conn
             .prepare(
@@ -5441,9 +5457,7 @@ impl SqliteFactoryStore {
     /// Candidates for A5: a durable A4 findings artifact whose automatic
     /// publication was applied. Route equality with `verification.trigger_state`
     /// and live head/base equality are checked by the coordinator.
-    pub fn list_a5_eligible_verification_runs(
-        &self,
-    ) -> Result<Vec<A5EligibleVerificationRun>> {
+    pub fn list_a5_eligible_verification_runs(&self) -> Result<Vec<A5EligibleVerificationRun>> {
         let mut stmt = self
             .conn
             .prepare(
@@ -5498,15 +5512,7 @@ impl SqliteFactoryStore {
     /// command_run_id is the CAS target for the identity record.
     pub fn record_verification_command_launch(
         &mut self,
-        run_id: &str,
-        attempt_id: &str,
-        ordinal: u32,
-        name: &str,
-        kind: VerificationCommandKind,
-        configuration_revision: &str,
-        command_sha256: &str,
-        execution_profile: &str,
-        launch_nonce: &str,
+        request: RecordVerificationCommandLaunchRequest<'_>,
     ) -> Result<String> {
         let command_run_id = new_id();
         let now_s = ts(Self::now());
@@ -5519,15 +5525,15 @@ impl SqliteFactoryStore {
                  ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'launching', ?9, ?10, ?11, ?11)",
                 params![
                     command_run_id,
-                    run_id,
-                    attempt_id,
-                    ordinal as i64,
-                    name,
-                    kind.as_str(),
-                    configuration_revision,
-                    command_sha256,
-                    launch_nonce,
-                    execution_profile,
+                    request.run_id,
+                    request.attempt_id,
+                    request.ordinal as i64,
+                    request.name,
+                    request.kind.as_str(),
+                    request.configuration_revision,
+                    request.command_sha256,
+                    request.launch_nonce,
+                    request.execution_profile,
                     now_s,
                 ],
             )
@@ -5759,7 +5765,11 @@ impl SqliteFactoryStore {
                         .as_ref()
                         .map(bounded_json)
                         .transpose()?,
-                    record.command_summary.as_ref().map(bounded_json).transpose()?,
+                    record
+                        .command_summary
+                        .as_ref()
+                        .map(bounded_json)
+                        .transpose()?,
                     record.computed_at.map(ts),
                     now_s,
                 ],
@@ -5916,7 +5926,15 @@ impl SqliteFactoryStore {
                     COALESCE(SUM(CASE WHEN status = 'superseded' THEN 1 ELSE 0 END), 0)
                  FROM verification_attempts",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .map_err(storage_error)?;
         let commands_run = self
@@ -5961,11 +5979,9 @@ impl SqliteFactoryStore {
             .map_err(storage_error)?;
         let evidence_files = self
             .conn
-            .query_row(
-                "SELECT COUNT(*) FROM verification_evidence",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM verification_evidence", [], |row| {
+                row.get(0)
+            })
             .map_err(storage_error)?;
         let preview_publications = self
             .conn
@@ -7514,7 +7530,9 @@ mod tests {
             "finding base_sha must be backfilled from the artifact"
         );
 
-        let intents = store.list_review_publications_for_run("run-review").unwrap();
+        let intents = store
+            .list_review_publications_for_run("run-review")
+            .unwrap();
         assert_eq!(intents.len(), 1);
         assert_eq!(intents[0].status.as_str(), "applied");
 
@@ -7560,17 +7578,17 @@ mod tests {
         // Launching record + nonce, then a CAS identity transition.
         let run_id = stage.run_id.clone();
         let command_run_id = store
-            .record_verification_command_launch(
-                &run_id,
-                "verification-attempt-1",
-                1,
-                "affected-validation",
-                VerificationCommandKind::Test,
-                "cfg-rev",
-                "sha256-command",
-                "local",
-                "nonce-1",
-            )
+            .record_verification_command_launch(RecordVerificationCommandLaunchRequest {
+                run_id: &run_id,
+                attempt_id: "verification-attempt-1",
+                ordinal: 1,
+                name: "affected-validation",
+                kind: VerificationCommandKind::Test,
+                configuration_revision: "cfg-rev",
+                command_sha256: "sha256-command",
+                execution_profile: "local",
+                launch_nonce: "nonce-1",
+            })
             .unwrap();
         let identity = ProcessIdentity {
             pid: 4242,
@@ -7621,19 +7639,21 @@ mod tests {
 
         // Not-run marking for commands skipped after a failure.
         let skipped_id = store
-            .record_verification_command_launch(
-                &run_id,
-                "verification-attempt-1",
-                2,
-                "product-acceptance",
-                VerificationCommandKind::Acceptance,
-                "cfg-rev",
-                "sha256-acceptance",
-                "local",
-                "nonce-2",
-            )
+            .record_verification_command_launch(RecordVerificationCommandLaunchRequest {
+                run_id: &run_id,
+                attempt_id: "verification-attempt-1",
+                ordinal: 2,
+                name: "product-acceptance",
+                kind: VerificationCommandKind::Acceptance,
+                configuration_revision: "cfg-rev",
+                command_sha256: "sha256-acceptance",
+                execution_profile: "local",
+                launch_nonce: "nonce-2",
+            })
             .unwrap();
-        store.mark_verification_command_not_run(&skipped_id).unwrap();
+        store
+            .mark_verification_command_not_run(&skipped_id)
+            .unwrap();
         let runs = store
             .list_verification_command_runs("verification-attempt-1")
             .unwrap();
@@ -7703,17 +7723,17 @@ mod tests {
             }])
             .unwrap();
         store
-            .record_verification_command_launch(
-                &stage.run_id,
-                "verification-attempt-1",
-                1,
-                "unit",
-                VerificationCommandKind::Test,
-                "cfg-rev",
-                "sha",
-                "local",
-                "nonce",
-            )
+            .record_verification_command_launch(RecordVerificationCommandLaunchRequest {
+                run_id: &stage.run_id,
+                attempt_id: "verification-attempt-1",
+                ordinal: 1,
+                name: "unit",
+                kind: VerificationCommandKind::Test,
+                configuration_revision: "cfg-rev",
+                command_sha256: "sha",
+                execution_profile: "local",
+                launch_nonce: "nonce",
+            })
             .unwrap();
         store
             .complete_verification_command(CompleteVerificationCommandRequest {
@@ -7813,7 +7833,9 @@ mod tests {
         store
             .mark_verification_publication_applied(&intent.intent_id, "comment-99")
             .unwrap();
-        let intents = store.list_verification_publications_for_run(&run_id).unwrap();
+        let intents = store
+            .list_verification_publications_for_run(&run_id)
+            .unwrap();
         assert_eq!(intents.len(), 1);
         assert_eq!(intents[0].status.as_str(), "applied");
         assert_eq!(intents[0].comment_id.as_deref(), Some("comment-99"));
@@ -7920,7 +7942,10 @@ mod tests {
             .unwrap();
 
         // No applied automatic publication yet: not eligible.
-        assert!(store.list_a5_eligible_verification_runs().unwrap().is_empty());
+        assert!(store
+            .list_a5_eligible_verification_runs()
+            .unwrap()
+            .is_empty());
 
         // A preview publication is never sufficient.
         store
@@ -7937,7 +7962,10 @@ mod tests {
             )
             .unwrap();
         assert!(
-            store.list_a5_eligible_verification_runs().unwrap().is_empty(),
+            store
+                .list_a5_eligible_verification_runs()
+                .unwrap()
+                .is_empty(),
             "A4 preview publication must never feed A5"
         );
 
@@ -7963,14 +7991,20 @@ mod tests {
         assert_eq!(eligible[0].reviewed_base_sha, "base-sha");
         assert_eq!(eligible[0].route_state.as_deref(), Some("Verification"));
         assert_eq!(eligible[0].spec_artifact_id, "spec-artifact");
-        assert_eq!(eligible[0].implementation_artifact_id, "implementation-artifact");
+        assert_eq!(
+            eligible[0].implementation_artifact_id,
+            "implementation-artifact"
+        );
 
         // A nonterminal verification stage run removes the run from the queue.
         let stage = store
             .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
             .unwrap();
         assert_eq!(stage.stage, VERIFICATION_STAGE_NAME);
-        assert!(store.list_a5_eligible_verification_runs().unwrap().is_empty());
+        assert!(store
+            .list_a5_eligible_verification_runs()
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

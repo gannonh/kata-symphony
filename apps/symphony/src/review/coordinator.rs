@@ -189,10 +189,11 @@ where
             .store
             .review_artifact_exists(&candidate.run_id, &pull.head.sha, &pull.base.sha)?
         {
-            if let Some(artifact) = self
-                .store
-                .get_orphaned_review_artifact(&candidate.run_id, &pull.head.sha, &pull.base.sha)?
-            {
+            if let Some(artifact) = self.store.get_orphaned_review_artifact(
+                &candidate.run_id,
+                &pull.head.sha,
+                &pull.base.sha,
+            )? {
                 let spec = self
                     .store
                     .get_spec_artifact(&candidate.approved_artifact_id)?

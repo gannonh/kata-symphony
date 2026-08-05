@@ -17,14 +17,20 @@ use crate::verification::domain::{
     VerificationEvidenceRecord, VERIFICATION_EVIDENCE_PATH_MAX_BYTES,
 };
 
+/// Immutable bounds for one evidence collection pass.
+#[derive(Debug, Clone)]
+pub struct EvidenceLimits {
+    pub run_id: String,
+    pub attempt_id: String,
+    pub max_files: usize,
+    pub max_bytes: u64,
+}
+
 /// Collect and durably store every regular file under `evidence_dir`.
 pub fn collect_evidence(
     evidence_dir: &Path,
     artifacts_dir: &Path,
-    run_id: &str,
-    attempt_id: &str,
-    max_files: usize,
-    max_bytes: u64,
+    limits: &EvidenceLimits,
 ) -> Result<Vec<VerificationEvidenceRecord>> {
     if !evidence_dir.is_dir() {
         return Err(SymphonyError::TriageError(format!(
@@ -38,10 +44,7 @@ pub fn collect_evidence(
         evidence_dir,
         evidence_dir,
         artifacts_dir,
-        run_id,
-        attempt_id,
-        max_files,
-        max_bytes,
+        limits,
         &mut aggregate_bytes,
         &mut records,
     )?;
@@ -52,10 +55,7 @@ fn walk_evidence_dir(
     root: &Path,
     dir: &Path,
     artifacts_dir: &Path,
-    run_id: &str,
-    attempt_id: &str,
-    max_files: usize,
-    max_bytes: u64,
+    limits: &EvidenceLimits,
     aggregate_bytes: &mut u64,
     records: &mut Vec<VerificationEvidenceRecord>,
 ) -> Result<()> {
@@ -86,17 +86,7 @@ fn walk_evidence_dir(
             )));
         }
         if meta.is_dir() {
-            walk_evidence_dir(
-                root,
-                &path,
-                artifacts_dir,
-                run_id,
-                attempt_id,
-                max_files,
-                max_bytes,
-                aggregate_bytes,
-                records,
-            )?;
+            walk_evidence_dir(root, &path, artifacts_dir, limits, aggregate_bytes, records)?;
             continue;
         }
         if !meta.is_file() {
@@ -105,9 +95,10 @@ fn walk_evidence_dir(
                 path.display()
             )));
         }
-        if records.len() >= max_files {
+        if records.len() >= limits.max_files {
             return Err(SymphonyError::TriageError(format!(
-                "evidence file count exceeds max_evidence_files={max_files}"
+                "evidence file count exceeds max_evidence_files={}",
+                limits.max_files
             )));
         }
         let relative_path = path.strip_prefix(root).map_err(|error| {
@@ -120,9 +111,10 @@ fn walk_evidence_dir(
             )));
         }
         *aggregate_bytes = aggregate_bytes.saturating_add(meta.len());
-        if *aggregate_bytes > max_bytes {
+        if *aggregate_bytes > limits.max_bytes {
             return Err(SymphonyError::TriageError(format!(
-                "evidence aggregate size exceeds max_evidence_bytes={max_bytes}"
+                "evidence aggregate size exceeds max_evidence_bytes={}",
+                limits.max_bytes
             )));
         }
         // The intended identity is recorded before storage; the atomic blob
@@ -136,13 +128,13 @@ fn walk_evidence_dir(
                 intended_sha256: intended_sha256.clone(),
                 intended_bytes_len,
             },
-            max_bytes,
+            limits.max_bytes,
         )?;
         debug_assert_eq!(sha256, intended_sha256);
         records.push(VerificationEvidenceRecord {
             evidence_id: uuid::Uuid::new_v4().to_string(),
-            run_id: run_id.to_string(),
-            attempt_id: attempt_id.to_string(),
+            run_id: limits.run_id.clone(),
+            attempt_id: limits.attempt_id.clone(),
             relative_path,
             sha256,
             bytes_len,
@@ -187,10 +179,12 @@ pub fn cleanup_evidence_dir(evidence_dir: &Path, workspace_root: &Path) -> Resul
             "evidence parent has no grandparent".to_string(),
         ));
     };
-    let workspace_root = workspace_root.canonicalize().unwrap_or_else(|_| {
-        workspace_root.to_path_buf()
-    });
-    let grandparent = grandparent.canonicalize().unwrap_or_else(|_| grandparent.to_path_buf());
+    let workspace_root = workspace_root
+        .canonicalize()
+        .unwrap_or_else(|_| workspace_root.to_path_buf());
+    let grandparent = grandparent
+        .canonicalize()
+        .unwrap_or_else(|_| grandparent.to_path_buf());
     if grandparent != workspace_root {
         return Err(SymphonyError::TriageError(format!(
             "refusing to remove evidence outside the configured workspace root: {}",
@@ -241,10 +235,12 @@ mod tests {
         let records = collect_evidence(
             &evidence,
             &artifacts,
-            "run-1",
-            "attempt-1",
-            10,
-            1024 * 1024,
+            &EvidenceLimits {
+                run_id: "run-1".to_string(),
+                attempt_id: "attempt-1".to_string(),
+                max_files: 10,
+                max_bytes: 1024 * 1024,
+            },
         )
         .unwrap();
         assert_eq!(records.len(), 2);
@@ -268,18 +264,17 @@ mod tests {
             let evidence = dir.path().join("evidence");
             fs::create_dir_all(&evidence).unwrap();
             write_fixture(&evidence, &[("real.txt", b"x")]);
-            std::os::unix::fs::symlink(
-                dir.path().join("real.txt"),
-                evidence.join("link.txt"),
-            )
-            .unwrap();
+            std::os::unix::fs::symlink(dir.path().join("real.txt"), evidence.join("link.txt"))
+                .unwrap();
             let err = collect_evidence(
                 &evidence,
                 &dir.path().join("arts"),
-                "run",
-                "att",
-                10,
-                1024,
+                &EvidenceLimits {
+                    run_id: "run".to_string(),
+                    attempt_id: "att".to_string(),
+                    max_files: 10,
+                    max_bytes: 1024,
+                },
             )
             .unwrap_err();
             assert!(err.to_string().contains("symlink"));
@@ -295,10 +290,12 @@ mod tests {
         let err = collect_evidence(
             &evidence,
             &dir.path().join("arts"),
-            "run",
-            "att",
-            1,
-            1024,
+            &EvidenceLimits {
+                run_id: "run".to_string(),
+                attempt_id: "att".to_string(),
+                max_files: 1,
+                max_bytes: 1024,
+            },
         )
         .unwrap_err();
         assert!(err.to_string().contains("max_evidence_files"));
@@ -313,10 +310,12 @@ mod tests {
         let err = collect_evidence(
             &evidence,
             &dir.path().join("arts"),
-            "run",
-            "att",
-            10,
-            2,
+            &EvidenceLimits {
+                run_id: "run".to_string(),
+                attempt_id: "att".to_string(),
+                max_files: 10,
+                max_bytes: 2,
+            },
         )
         .unwrap_err();
         assert!(err.to_string().contains("max_evidence_bytes"));
@@ -336,10 +335,12 @@ mod tests {
             let err = collect_evidence(
                 &evidence,
                 &dir.path().join("arts"),
-                "run",
-                "att",
-                10,
-                1024,
+                &EvidenceLimits {
+                    run_id: "run".to_string(),
+                    attempt_id: "att".to_string(),
+                    max_files: 10,
+                    max_bytes: 1024,
+                },
             )
             .unwrap_err();
             assert!(err.to_string().contains("special file"));
@@ -383,7 +384,9 @@ mod tests {
         let other = outside.join("verification-att-2/evidence");
         fs::create_dir_all(&other).unwrap();
         let err = cleanup_evidence_dir(&other, root.path()).unwrap_err();
-        assert!(err.to_string().contains("outside the configured workspace root"));
+        assert!(err
+            .to_string()
+            .contains("outside the configured workspace root"));
         assert!(other.exists());
     }
 

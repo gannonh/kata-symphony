@@ -30,12 +30,12 @@ use crate::repo_url::repo_is_remote;
 use crate::review::domain::{ReviewConfig, ReviewMode, ReviewRoute};
 use crate::review::manifest::ReviewSeverity;
 use crate::spec::domain::{SpecApprovalRoute, SpecConfig, SpecDecisionLabels, SpecPromptsConfig};
-use crate::verification::domain::{
-    VerificationCommandConfig, VerificationCommandKind, VerificationConfig,
-    VERIFICATION_MAX_COMMANDS, VERIFICATION_NAME_MAX_BYTES, VERIFICATION_COMMAND_MAX_BYTES,
-};
 use crate::triage::domain::{
     RouteMapping, StorageConfig, TriageConfig, TriageMode, TriageRoutesConfig,
+};
+use crate::verification::domain::{
+    VerificationCommandConfig, VerificationCommandKind, VerificationConfig,
+    VERIFICATION_COMMAND_MAX_BYTES, VERIFICATION_MAX_COMMANDS, VERIFICATION_NAME_MAX_BYTES,
 };
 
 // ── Key normalization and null-dropping ───────────────────────────────────────
@@ -779,8 +779,7 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
     let raw_implementation: RawImplementationConfig =
         extract_section(&normalized, "implementation")?;
     let raw_review: RawReviewConfig = extract_section(&normalized, "review")?;
-    let raw_verification: RawVerificationConfig =
-        extract_section(&normalized, "verification")?;
+    let raw_verification: RawVerificationConfig = extract_section(&normalized, "verification")?;
 
     let defaults = ServiceConfig::default();
     let has_kata_agent_section = normalized.get("kata_agent").is_some();
@@ -2427,15 +2426,30 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
             ));
         }
         for (field, value) in [
-            ("verification.max_turns", config.verification.max_turns as u64),
+            (
+                "verification.max_turns",
+                config.verification.max_turns as u64,
+            ),
             (
                 "verification.invocation_timeout_ms",
                 config.verification.invocation_timeout_ms,
             ),
-            ("verification.max_attempts", config.verification.max_attempts as u64),
-            ("verification.max_reprompts", config.verification.max_reprompts as u64),
-            ("verification.max_evidence_files", config.verification.max_evidence_files as u64),
-            ("verification.max_evidence_bytes", config.verification.max_evidence_bytes),
+            (
+                "verification.max_attempts",
+                config.verification.max_attempts as u64,
+            ),
+            (
+                "verification.max_reprompts",
+                config.verification.max_reprompts as u64,
+            ),
+            (
+                "verification.max_evidence_files",
+                config.verification.max_evidence_files as u64,
+            ),
+            (
+                "verification.max_evidence_bytes",
+                config.verification.max_evidence_bytes,
+            ),
         ] {
             if value == 0 {
                 return Err(SymphonyError::InvalidWorkflowConfig(format!(
@@ -2468,9 +2482,7 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
     Ok(ValidatedServiceConfig(config.clone()))
 }
 
-fn validate_verification_commands(
-    commands: &[VerificationCommandConfig],
-) -> Result<()> {
+fn validate_verification_commands(commands: &[VerificationCommandConfig]) -> Result<()> {
     if commands.is_empty() {
         return Err(SymphonyError::InvalidWorkflowConfig(
             "verification.commands must declare 1-20 blocking commands".to_string(),
@@ -2939,20 +2951,16 @@ verification:
         let err = validate(&config).unwrap_err().to_string();
         assert!(err.contains("review.mode 'automatic'"));
 
-        let yaml = verification_yaml(valid_verification_commands()).replace(
-            "    state: Verification",
-            "    state: Human Review",
-        );
+        let yaml = verification_yaml(valid_verification_commands())
+            .replace("    state: Verification", "    state: Human Review");
         let value: Value = serde_yaml::from_str(&yaml).unwrap();
         let config = from_workflow(&value).unwrap();
         let err = validate(&config).unwrap_err().to_string();
         assert!(err.contains("completion_route.state must equal verification.trigger_state"));
 
         // A non-clean route may not equal the trigger state either.
-        let yaml = verification_yaml(valid_verification_commands()).replace(
-            "    state: Implementation",
-            "    state: Verification",
-        );
+        let yaml = verification_yaml(valid_verification_commands())
+            .replace("    state: Implementation", "    state: Verification");
         let value: Value = serde_yaml::from_str(&yaml).unwrap();
         let config = from_workflow(&value).unwrap();
         let err = validate(&config).unwrap_err().to_string();

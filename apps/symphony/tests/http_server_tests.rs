@@ -2117,12 +2117,14 @@ fn sample_verification_run() -> symphony::http_server::FactoryRunHttpResponse {
             sha256: "digest-1".to_string(),
             bytes_len: 42,
         }],
-        publication: Some(symphony::http_server::FactoryRunVerificationPublicationHttp {
-            intent_id: "verification-intent-1".to_string(),
-            kind: "preview".to_string(),
-            status: "applied".to_string(),
-            comment_id: Some("comment-1".to_string()),
-        }),
+        publication: Some(
+            symphony::http_server::FactoryRunVerificationPublicationHttp {
+                intent_id: "verification-intent-1".to_string(),
+                kind: "preview".to_string(),
+                status: "applied".to_string(),
+                comment_id: Some("comment-1".to_string()),
+            },
+        ),
     });
     run
 }
@@ -2149,7 +2151,10 @@ async fn test_verification_run_by_id_404_and_200() {
         .expect("response");
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     let missing_payload = body_json(missing).await;
-    assert_eq!(missing_payload["error"]["code"], "verification_run_not_found");
+    assert_eq!(
+        missing_payload["error"]["code"],
+        "verification_run_not_found"
+    );
 
     let found = app
         .oneshot(
@@ -2165,14 +2170,20 @@ async fn test_verification_run_by_id_404_and_200() {
     assert_eq!(payload["run_id"], "run-1");
     assert_eq!(payload["verification"]["status"], "completed");
     assert_eq!(payload["verification"]["reviewed_head_sha"], "head-sha");
-    assert_eq!(payload["verification"]["commands"][0]["name"], "affected-validation");
+    assert_eq!(
+        payload["verification"]["commands"][0]["name"],
+        "affected-validation"
+    );
     assert_eq!(payload["verification"]["gate"]["status"], "passed");
     assert_eq!(
         payload["verification"]["publication"]["comment_id"],
         "comment-1"
     );
     // Evidence is metadata only: no blob bytes are ever served.
-    assert_eq!(payload["evidence"][0]["relative_path"], "reports/summary.json");
+    assert_eq!(
+        payload["evidence"][0]["relative_path"],
+        "reports/summary.json"
+    );
     assert_eq!(payload["evidence"][0]["sha256"], "digest-1");
     assert!(payload["evidence"][0].get("bytes").is_none());
 }
