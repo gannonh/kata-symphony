@@ -4,6 +4,7 @@ Setup and operational how-tos for Kata products and agent workflows.
 
 # Setup
 
+* [Vercel Sandbox workspaces for Orca](vercel-sandbox-workspaces.md) - build and operate disposable Codex-authenticated Orca workspaces
 * [Slack channel setup](slack-setup.md) - connect a Slack workspace to Kata Agents
 
 # Agent skill configuration

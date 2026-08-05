@@ -1,5 +1,8 @@
 # Docs Update Log
 
+## 2026-08-05
+* **Vercel Sandbox workspaces**: Added the [Orca workspace guide](/guides/vercel-sandbox-workspaces.md) for the reusable base/auth snapshots, live recipe validation, Linux Xvfb launcher, lifecycle scripts, and credential boundaries.
+
 ## 2026-08-02
 * **OKF frontmatter repaired**: Quoted colon-bearing titles and descriptions in the issue-tracker guide, active Wave 4 plan, and retained historical Superpowers plans/specs. Both standard and strict-link OKF validation now pass.
 
