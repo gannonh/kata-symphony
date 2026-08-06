@@ -28,6 +28,7 @@ pub struct PreviewCommentContext<'a> {
     pub attempt_id: &'a str,
     pub pr_number: u64,
     pub reviewed_head_sha: &'a str,
+    pub base_sha: &'a str,
     pub gate: &'a VerificationGateRecord,
     pub commands: &'a [VerificationCommandRunRecord],
     pub evidence: &'a [VerificationEvidenceRecord],
@@ -41,6 +42,7 @@ pub fn render_verification_preview_comment(context: &PreviewCommentContext<'_>) 
         attempt_id,
         pr_number,
         reviewed_head_sha,
+        base_sha,
         gate,
         commands,
         evidence,
@@ -111,7 +113,7 @@ pub fn render_verification_preview_comment(context: &PreviewCommentContext<'_>) 
     }
     lines.push(String::new());
     lines.push(format!(
-        "Run `{run_id}` attempt `{attempt_id}` reviewed head `{reviewed_head_sha}` (PR #{pr_number})."
+        "Run `{run_id}` attempt `{attempt_id}` reviewed head `{reviewed_head_sha}` base `{base_sha}` (PR #{pr_number})."
     ));
     lines.push(format!(
         "State: `/api/v1/verification/runs/{run_id}` · Evidence metadata: `/api/v1/verification/runs/{run_id}/evidence`"
@@ -261,6 +263,7 @@ mod tests {
             attempt_id: "attempt-1",
             pr_number: 42,
             reviewed_head_sha: "head-sha",
+            base_sha: "base-sha",
             gate: &gate(),
             commands: &commands(),
             evidence: &[],

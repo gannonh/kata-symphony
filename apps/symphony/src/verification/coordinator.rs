@@ -804,6 +804,7 @@ where
                     attempt_id: &attempt_id,
                     pr_number: candidate.pr_number,
                     reviewed_head_sha: &pull.head.sha,
+                    base_sha: &pull.base.sha,
                     gate: &gate,
                     commands: &command_runs,
                     evidence: &evidence_records,

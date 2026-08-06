@@ -211,6 +211,17 @@ pub fn validate_manifest(
                 criterion.index
             )));
         }
+        // Evidence references are validated for every criterion status: a
+        // `not_proven` criterion must not smuggle a reference to evidence
+        // outside the attempt either.
+        for reference in &criterion.evidence {
+            if !valid_evidence_paths.contains(reference.as_str()) {
+                return Err(SymphonyError::TriageError(format!(
+                    "verifier manifest criterion {} references evidence '{}' outside the attempt",
+                    criterion.index, reference
+                )));
+            }
+        }
         match criterion.status {
             VerifierCriterionStatus::Pass | VerifierCriterionStatus::Fail => {
                 if criterion.evidence.is_empty() {
@@ -219,14 +230,6 @@ pub fn validate_manifest(
                         criterion.index,
                         criterion.status.as_str()
                     )));
-                }
-                for reference in &criterion.evidence {
-                    if !valid_evidence_paths.contains(reference.as_str()) {
-                        return Err(SymphonyError::TriageError(format!(
-                            "verifier manifest criterion {} references evidence '{}' outside the attempt",
-                            criterion.index, reference
-                        )));
-                    }
                 }
             }
             VerifierCriterionStatus::NotProven => {}

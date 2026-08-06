@@ -272,7 +272,11 @@ async fn execute_local(
         // return when the child closes its pipes.
         let outcome = process_identity::terminate_process_group(&identity).await;
         match outcome {
-            TerminationOutcome::Terminated => {}
+            TerminationOutcome::Terminated => {
+                // Verified termination: reap the supervisor so no zombie
+                // survives, then drain whatever output was produced.
+                let _ = child.wait().await;
+            }
             TerminationOutcome::NoLongerSignalable(reason) => {
                 return Err(CommandRunFailure::NotSignalable(format!(
                     "command timed out and its recorded identity became unsignalable: {reason}"

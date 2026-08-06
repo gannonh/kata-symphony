@@ -346,6 +346,21 @@ pub fn store_blob_atomic(
                     path.display()
                 )));
             }
+            let staged_len = fs::metadata(&staged)
+                .map_err(|error| {
+                    SymphonyError::StorageError(format!(
+                        "failed stating staged evidence {}: {error}",
+                        staged.display()
+                    ))
+                })?
+                .len();
+            if staged_len != intended_bytes_len {
+                let _ = fs::remove_file(&staged);
+                return Err(SymphonyError::StorageError(format!(
+                    "evidence {} staged size {staged_len} does not match intended size {intended_bytes_len}",
+                    path.display()
+                )));
+            }
             (intended_sha256.clone(), intended_bytes_len, staged)
         }
     };
