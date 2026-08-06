@@ -56,8 +56,6 @@ pub struct SharedFactoryStore {
 }
 
 impl SharedFactoryStore {
-    /// Test-only helper: disable foreign keys so fixtures can use placeholder
-    /// artifact ids from other stages.
     /// Test-only helper: run a raw SQL batch against the store, panicking on
     /// failure so fixtures cannot silently mis-seed.
     #[cfg(test)]
@@ -71,6 +69,8 @@ impl SharedFactoryStore {
         .expect("fixture SQL batch must succeed");
     }
 
+    /// Test-only helper: disable foreign keys so fixtures can use placeholder
+    /// artifact ids from other stages.
     #[cfg(test)]
     pub fn disable_foreign_keys_for_test(&self) {
         let _ = self.with_store_mut(|store| {
@@ -2117,10 +2117,17 @@ impl TriageRuntime {
         // unrelated triage/spec/review-only startup is never blocked by
         // verification workspace configuration.
         let verification_needed = config.verification.enabled
-            || store
-                .list_running_verification_attempts()
-                .map(|attempts| !attempts.is_empty())
-                .unwrap_or(false);
+            || match store.list_running_verification_attempts() {
+                Ok(attempts) => !attempts.is_empty(),
+                Err(error) => {
+                    tracing::warn!(
+                        event = "verification_recovery_probe_failed",
+                        error = %error,
+                        "could not read running verification attempts; skipping A5 recovery"
+                    );
+                    false
+                }
+            };
         let verification_coordinator = if verification_needed {
             let workspace_root = crate::verification::coordinator::resolve_workspace_root(config)?;
             let mut coordinator = crate::verification::coordinator::VerificationCoordinator::new(

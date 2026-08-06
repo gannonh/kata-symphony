@@ -300,7 +300,24 @@ pub fn store_blob_atomic(
                     "staged blob digest {staged_sha} differs from source digest {sha256}; source mutated while copying"
                 )));
             }
-            (sha256, bytes_len, staged)
+            // Validate the exact staged length: the source may have grown
+            // between the initial stat and the copy, so the staged size is
+            // the authoritative one to bound and report.
+            let staged_len = fs::metadata(&staged)
+                .map_err(|error| {
+                    SymphonyError::StorageError(format!(
+                        "failed stating staged blob {}: {error}",
+                        staged.display()
+                    ))
+                })?
+                .len();
+            if staged_len > max_bytes {
+                let _ = fs::remove_file(&staged);
+                return Err(SymphonyError::StorageError(format!(
+                    "bundle is {staged_len} bytes; max_bundle_bytes is {max_bytes}"
+                )));
+            }
+            (sha256, staged_len, staged)
         }
         BlobSource::PathVerified {
             path,

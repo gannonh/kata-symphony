@@ -8269,7 +8269,6 @@ mod tests {
 
         // Two interrupted attempts leave the run eligible once more...
         for index in 1..=2u32 {
-            let _ = index;
             let stage = store
                 .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
                 .unwrap();
@@ -8361,46 +8360,62 @@ mod tests {
                 .is_empty(),
             "a blocked attempt must consume the retry budget"
         );
-        return;
-        // ...but the third interrupted attempt exhausts max_attempts=3.
-        let stage = store
-            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
-            .unwrap();
+    }
+
+    #[test]
+    fn third_interrupted_attempt_exhausts_the_retry_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
         store
-            .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
-                attempt_id: "verification-attempt-3".to_string(),
-                stage_run_id: stage.stage_run_id.clone(),
-                pr_number: 42,
-                reviewed_head_sha: "head-sha".to_string(),
-                base_sha: "base-sha".to_string(),
-                spec_artifact_id: "spec-artifact".to_string(),
-                implementation_artifact_id: "implementation-artifact".to_string(),
-                review_artifact_id: "review-artifact".to_string(),
-                configuration_revision: "cfg-rev".to_string(),
-                execution_profile: "local".to_string(),
-            })
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
             .unwrap();
-        store
-            .interrupt_verification_stage_run(
-                &stage.stage_run_id,
-                &FactoryError::new(
-                    "verification_attempt_interrupted",
-                    "test",
-                    "crashed".to_string(),
-                    true,
-                    None,
-                ),
-            )
-            .unwrap();
-        store
-            .update_verification_attempt(UpdateVerificationAttemptRequest {
-                attempt_id: "verification-attempt-3",
-                status: Some("interrupted"),
-                workspace_path: None,
-                evidence_dir: None,
-                error: None,
-            })
-            .unwrap();
+        seed_eligible_a5_run(&store);
+
+        // Two interrupted attempts keep the run eligible; the third exhausts
+        // max_attempts=3, so a repeatedly crashing fixture cannot reclaim the
+        // same revision pair indefinitely.
+        for index in 1..=3u32 {
+            let stage = store
+                .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+                .unwrap();
+            store
+                .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                    attempt_id: format!("verification-attempt-{index}"),
+                    stage_run_id: stage.stage_run_id.clone(),
+                    pr_number: 42,
+                    reviewed_head_sha: "head-sha".to_string(),
+                    base_sha: "base-sha".to_string(),
+                    spec_artifact_id: "spec-artifact".to_string(),
+                    implementation_artifact_id: "implementation-artifact".to_string(),
+                    review_artifact_id: "review-artifact".to_string(),
+                    configuration_revision: "cfg-rev".to_string(),
+                    execution_profile: "local".to_string(),
+                })
+                .unwrap();
+            store
+                .interrupt_verification_stage_run(
+                    &stage.stage_run_id,
+                    &FactoryError::new(
+                        "verification_attempt_interrupted",
+                        "test",
+                        "crashed".to_string(),
+                        true,
+                        None,
+                    ),
+                )
+                .unwrap();
+            store
+                .update_verification_attempt(UpdateVerificationAttemptRequest {
+                    attempt_id: &format!("verification-attempt-{index}"),
+                    status: Some("interrupted"),
+                    workspace_path: None,
+                    evidence_dir: None,
+                    error: None,
+                })
+                .unwrap();
+        }
         assert!(
             store
                 .list_a5_eligible_verification_runs(3)

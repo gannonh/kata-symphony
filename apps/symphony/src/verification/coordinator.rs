@@ -698,8 +698,8 @@ where
                     &attempt_id,
                     "verification_verifier_failed",
                     format!(
-                        "verifier exhausted {} attempts: {}",
-                        service.verification.max_attempts,
+                        "verifier exhausted {} invocations: {}",
+                        service.verification.max_reprompts.saturating_add(1),
                         last_error.unwrap_or_else(|| "unknown verifier failure".to_string())
                     ),
                     &workspace,
@@ -1819,11 +1819,6 @@ mod tests {
     fn seed_full_pipeline_run(store: &SharedFactoryStore, head: &str, base: &str) {
         let now = Utc::now().to_rfc3339();
         store.disable_foreign_keys_for_test();
-        let run = |sql: &str, params: Vec<&str>| {
-            let _ = store.execute_batch_for_test(sql);
-            let _ = params;
-        };
-        let _ = run;
         let spec_json = serde_json::json!({
             "schema_version": 1,
             "product_behavior": "add a heading",
@@ -1832,8 +1827,6 @@ mod tests {
             "open_decisions": [],
         })
         .to_string();
-        let mut sql = String::new();
-        let _ = &mut sql;
         store.execute_batch_for_test(&format!(
             "INSERT INTO factory_runs (run_id, forge_host, repository, issue_id, issue_identifier, issue_revision, status, current_stage, created_at, updated_at)
              VALUES ('run-review', 'github.com', 'owner/repo', '63', '#63', 'issue-rev', 'running', 'review', '{now}', '{now}');
@@ -1988,9 +1981,9 @@ mod tests {
                     crate::verification::domain::VerificationCommandConfig {
                         name: "affected-validation".to_string(),
                         kind: crate::verification::domain::VerificationCommandKind::Test,
-                        command: format!(
+                        command:
                             "test -f README.md && printf 'ok\n' > \"$SYMPHONY_EVIDENCE_DIR/repo-smoke.txt\""
-                        ),
+                                .to_string(),
                         timeout_ms: 60_000,
                     },
                     crate::verification::domain::VerificationCommandConfig {

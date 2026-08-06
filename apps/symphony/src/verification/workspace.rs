@@ -177,6 +177,11 @@ pub async fn prepare_verification_workspace(
 
 /// Verify the reviewed head, committed tree, and tracked files are unchanged
 /// from the pinned revision after commands ran.
+///
+/// All integrity checks run with `-c core.filemode=true` so a configured
+/// command cannot disable filemode detection: with `core.filemode=false` a
+/// tracked file flipped to executable leaves `status --porcelain` empty even
+/// though the working tree differs from the pinned tree.
 pub fn verify_workspace_unchanged(workspace: &Path, expected_head: &str) -> Result<()> {
     let head = git_stdout(workspace, &["rev-parse", "HEAD"])?;
     if head != expected_head {
@@ -184,16 +189,24 @@ pub fn verify_workspace_unchanged(workspace: &Path, expected_head: &str) -> Resu
             "workspace HEAD {head} changed; expected {expected_head}"
         )));
     }
-    let tree = git_stdout(workspace, &["rev-parse", "HEAD^{tree}"])?;
     let status = git_stdout(
         workspace,
-        &["status", "--porcelain", "--untracked-files=normal"],
+        &[
+            "-c",
+            "core.filemode=true",
+            "status",
+            "--porcelain",
+            "--untracked-files=normal",
+        ],
     )?;
     if !status.trim().is_empty() {
         return Err(SymphonyError::TriageError(format!(
             "workspace is not clean after verification commands:\n{status}"
         )));
     }
+    // The worktree and index must match the pinned tree exactly, including
+    // file modes; `--porcelain` above compares worktree, index, and HEAD with
+    // filemode detection forced on.
     let tracked = git_stdout(workspace, &["ls-files"])?;
     let tracked_count = tracked
         .lines()
@@ -220,7 +233,6 @@ pub fn verify_workspace_unchanged(workspace: &Path, expected_head: &str) -> Resu
             }
         }
     }
-    let _ = tree;
     Ok(())
 }
 
@@ -485,5 +497,31 @@ mod tests {
             .success());
         let error = verify_workspace_unchanged(repo.path(), &head).unwrap_err();
         assert!(error.to_string().contains("changed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_mode_changes_hidden_by_core_filemode_false() {
+        use std::os::unix::fs::PermissionsExt;
+        let (repo, head) = init_repo();
+        // A configured verification command can disable filemode checking and
+        // flip a tracked file to executable; `git status --porcelain` then
+        // stays empty even though the worktree differs from the pinned tree.
+        assert!(Command::new("git")
+            .args(["config", "core.filemode", "false"])
+            .current_dir(repo.path())
+            .status()
+            .unwrap()
+            .success());
+        fs::set_permissions(
+            repo.path().join("README.md"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let error = verify_workspace_unchanged(repo.path(), &head).unwrap_err();
+        assert!(
+            error.to_string().contains("not clean"),
+            "mode-only worktree changes hidden by core.filemode=false must fail attestation: {error}"
+        );
     }
 }

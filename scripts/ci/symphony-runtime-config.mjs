@@ -76,7 +76,9 @@ function createdGithubRepositories(evidence) {
   const issues = githubCreatedIssues(evidence);
   const repositories = new Map();
   for (const issue of issues) {
-    const url = issue.url ?? issue.html_url;
+    // GitHub REST issue records carry an api.github.com `url` and a browser
+    // `html_url`; only the latter resolves to a canonical github.com issue URL.
+    const url = issue.html_url ?? issue.url;
     const parsed = parseGithubIssueRepository(url);
     if (!parsed) {
       throw new Error("Every created GitHub issue must have a canonical github.com issue URL");
@@ -128,7 +130,7 @@ export function resolveGithubCleanupConfig({ args = {}, evidence }) {
 
 export function validateGithubCleanupTargets({ evidence, config }) {
   return githubCreatedIssues(evidence).map((issue) => {
-    const parsed = parseGithubIssueRepository(issue.url ?? issue.html_url);
+    const parsed = parseGithubIssueRepository(issue.html_url ?? issue.url);
     if (!parsed) {
       throw new Error("Every created GitHub issue must have a canonical github.com issue URL");
     }

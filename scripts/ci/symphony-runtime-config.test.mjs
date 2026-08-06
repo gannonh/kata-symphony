@@ -9,7 +9,10 @@ import {
 const githubIssue = (owner, repo, number) => ({
   number,
   title: `Symphony Backend UAT 20260725190000 #${number}`,
-  url: `https://github.com/${owner}/${repo}/issues/${number}`,
+  // GitHub REST issue records: `url` points at api.github.com and `html_url`
+  // at the browser issue page. Cleanup resolution must prefer `html_url`.
+  url: `https://api.github.com/repos/${owner}/${repo}/issues/${number}`,
+  html_url: `https://github.com/${owner}/${repo}/issues/${number}`,
 });
 
 test("sanitized GitHub evidence records coordinates and token env name only", () => {
