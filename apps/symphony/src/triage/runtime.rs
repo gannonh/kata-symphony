@@ -56,6 +56,18 @@ pub struct SharedFactoryStore {
 }
 
 impl SharedFactoryStore {
+    /// Test-only helper: disable foreign keys so fixtures can use placeholder
+    /// artifact ids from other stages.
+    #[cfg(test)]
+    pub fn disable_foreign_keys_for_test(&self) {
+        let _ = self.with_store_mut(|store| {
+            store
+                .connection_for_test()
+                .execute_batch("PRAGMA foreign_keys = OFF")
+                .map_err(|error| SymphonyError::StorageError(error.to_string()))
+        });
+    }
+
     pub fn open(path: &Path, busy_timeout_ms: u64) -> Result<Self> {
         let store = SqliteFactoryStore::acquire_lock_and_migrate(path, busy_timeout_ms)?;
         Ok(Self {

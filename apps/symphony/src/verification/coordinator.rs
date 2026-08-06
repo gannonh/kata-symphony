@@ -1261,6 +1261,153 @@ enum ProcessOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::github::client::GithubIssueComment;
+    use crate::verification::worker::VerificationWorkerResult;
+    use async_trait::async_trait;
+
+    fn open_store(path: &std::path::Path) -> SharedFactoryStore {
+        SharedFactoryStore::open(path, 5_000).unwrap()
+    }
+
+    fn claim_request(issue_revision: &str, configuration_revision: &str) -> ClaimAttemptRequest {
+        ClaimAttemptRequest {
+            forge_host: "github.com".to_string(),
+            repository: "owner/repo".to_string(),
+            issue_id: "123".to_string(),
+            issue_identifier: "#123".to_string(),
+            issue_revision: issue_revision.to_string(),
+            configuration_revision: configuration_revision.to_string(),
+            owner_instance: "owner-1".to_string(),
+            harness: "pi".to_string(),
+            model: Some("model-a".to_string()),
+            workspace_path: None,
+            output_path: None,
+            pid: None,
+            process_group_id: None,
+            process_start_token: None,
+            executable_identity: None,
+        }
+    }
+
+    /// Fake comment port mirroring the review publisher's fixture.
+    struct FakeComments {
+        login: String,
+        comments: std::sync::Mutex<std::collections::HashMap<u64, GithubIssueComment>>,
+        next_id: std::sync::Mutex<u64>,
+        create_count: std::sync::Mutex<u32>,
+        update_count: std::sync::Mutex<u32>,
+    }
+
+    impl FakeComments {
+        fn new(login: &str) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                login: login.to_string(),
+                comments: std::sync::Mutex::new(std::collections::HashMap::new()),
+                next_id: std::sync::Mutex::new(700),
+                create_count: std::sync::Mutex::new(0),
+                update_count: std::sync::Mutex::new(0),
+            })
+        }
+
+        fn comment(&self, id: u64) -> Option<GithubIssueComment> {
+            self.comments.lock().unwrap().get(&id).cloned()
+        }
+
+        fn counts(&self) -> (u32, u32) {
+            (
+                *self.create_count.lock().unwrap(),
+                *self.update_count.lock().unwrap(),
+            )
+        }
+
+        fn seed_owned_marker(&self, marker: &str, body: &str) -> u64 {
+            let mut comments = self.comments.lock().unwrap();
+            let id = *self.next_id.lock().unwrap();
+            *self.next_id.lock().unwrap() += 1;
+            comments.insert(
+                id,
+                GithubIssueComment {
+                    id,
+                    user: Some(crate::github::client::GithubUser {
+                        login: self.login.clone(),
+                    }),
+                    body: Some(format!("{body}\n{marker}")),
+                    html_url: None,
+                    created_at: None,
+                    updated_at: None,
+                },
+            );
+            id
+        }
+    }
+
+    #[async_trait]
+    impl TriageCommentPort for std::sync::Arc<FakeComments> {
+        async fn authenticated_login(&self) -> Result<String> {
+            Ok(self.login.clone())
+        }
+
+        async fn list_comments(
+            &self,
+            _issue_number: u64,
+            _max_pages: u32,
+        ) -> Result<Vec<GithubIssueComment>> {
+            Ok(self.comments.lock().unwrap().values().cloned().collect())
+        }
+
+        async fn get_comment(&self, comment_id: u64) -> Result<GithubIssueComment> {
+            self.comment(comment_id)
+                .ok_or_else(|| SymphonyError::GithubApiRequest("missing comment".to_string()))
+        }
+
+        async fn create_comment(
+            &self,
+            _issue_number: u64,
+            body: &str,
+        ) -> Result<GithubIssueComment> {
+            let mut comments = self.comments.lock().unwrap();
+            let id = *self.next_id.lock().unwrap();
+            *self.next_id.lock().unwrap() += 1;
+            *self.create_count.lock().unwrap() += 1;
+            let comment = GithubIssueComment {
+                id,
+                user: Some(crate::github::client::GithubUser {
+                    login: self.login.clone(),
+                }),
+                body: Some(body.to_string()),
+                html_url: None,
+                created_at: None,
+                updated_at: None,
+            };
+            comments.insert(id, comment.clone());
+            Ok(comment)
+        }
+
+        async fn update_comment(&self, comment_id: u64, body: &str) -> Result<GithubIssueComment> {
+            let mut comments = self.comments.lock().unwrap();
+            *self.update_count.lock().unwrap() += 1;
+            let mut comment = comments
+                .get(&comment_id)
+                .cloned()
+                .ok_or_else(|| SymphonyError::GithubApiRequest("missing comment".to_string()))?;
+            comment.body = Some(body.to_string());
+            comments.insert(comment_id, comment.clone());
+            Ok(comment)
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeWorker;
+
+    #[async_trait]
+    impl VerificationWorker for FakeWorker {
+        async fn run(
+            &self,
+            _request: &VerificationWorkerRequest,
+        ) -> Result<VerificationWorkerResult> {
+            Err(SymphonyError::TriageError("fake worker".to_string()))
+        }
+    }
 
     #[test]
     fn config_revision_changes_with_commands() {
@@ -1317,5 +1464,282 @@ mod tests {
             "att-1",
         )
         .is_some());
+    }
+
+    #[test]
+    fn recovery_interrupts_abandoned_attempts_and_keeps_unsignalable_ones() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = open_store(&temp.path().join("factory.db"));
+        store.disable_foreign_keys_for_test();
+        let config = VerificationCoordinatorConfig {
+            forge_host: "github.com".to_string(),
+            repository: "owner/repo".to_string(),
+            owner_instance: "owner-1".to_string(),
+            workflow_dir: temp.path().to_path_buf(),
+            project_owner: "owner".to_string(),
+            project_number: 16,
+            max_pages: 5,
+            workspace_root: temp.path().join("workspaces"),
+        };
+        let comments = FakeComments::new("symphony-bot");
+        let mut coordinator = VerificationCoordinator::new(
+            store.clone(),
+            comments,
+            GithubClient::with_base_url(
+                "token".to_string(),
+                "owner".to_string(),
+                "repo".to_string(),
+                "symphony".to_string(),
+                "https://api.github.com",
+            ),
+            ProjectsV2Client::new(GithubClient::with_base_url(
+                "token".to_string(),
+                "owner".to_string(),
+                "repo".to_string(),
+                "symphony".to_string(),
+                "https://api.github.com",
+            )),
+            FakeWorker,
+            config,
+        );
+
+        // An abandoned attempt with a recorded but dead process identity.
+        let stage = store
+            .claim_verification_attempt(claim_request("rev", "cfg"))
+            .unwrap();
+        store
+            .store_verification_attempt_inputs(
+                crate::triage::store::StoreVerificationAttemptRequest {
+                    attempt_id: "attempt-dead".to_string(),
+                    stage_run_id: stage.stage_run_id.clone(),
+                    pr_number: 42,
+                    reviewed_head_sha: "head-sha".to_string(),
+                    base_sha: "base-sha".to_string(),
+                    spec_artifact_id: "spec".to_string(),
+                    implementation_artifact_id: "implementation".to_string(),
+                    review_artifact_id: "review".to_string(),
+                    configuration_revision: "cfg-rev".to_string(),
+                    execution_profile: "local".to_string(),
+                },
+            )
+            .unwrap();
+        let command_run_id = store
+            .record_verification_command_launch(
+                crate::triage::store::RecordVerificationCommandLaunchRequest {
+                    run_id: &stage.run_id,
+                    attempt_id: "attempt-dead",
+                    ordinal: 1,
+                    name: "unit",
+                    kind: crate::verification::domain::VerificationCommandKind::Test,
+                    configuration_revision: "cfg-rev",
+                    command_sha256: "sha",
+                    execution_profile: "local",
+                    launch_nonce: "nonce",
+                },
+            )
+            .unwrap();
+        let identity = crate::triage::process_identity::ProcessIdentity {
+            pid: 4_200_000_000,
+            process_group_id: 4_200_000_000,
+            start_token: Some("token".to_string()),
+            executable: Some("/bin/sh".to_string()),
+        };
+        store
+            .cas_verification_launch_identity(&command_run_id, "nonce", &identity)
+            .unwrap();
+        store
+            .update_verification_attempt(crate::triage::store::UpdateVerificationAttemptRequest {
+                attempt_id: "attempt-dead",
+                status: None,
+                workspace_path: Some(
+                    temp.path()
+                        .join("workspaces/verification-attempt-dead/workspace")
+                        .to_str()
+                        .unwrap(),
+                ),
+                evidence_dir: None,
+                error: None,
+            })
+            .unwrap();
+
+        // Disabled verification still runs recovery. The recorded identity is
+        // not signalable (invalid pid), so the attempt stays RUNNING and the
+        // stage pin holds: no new claim can race the surviving process.
+        let summary = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(coordinator.poll_once(&ServiceConfig::default()))
+            .unwrap();
+        assert_eq!(summary.verification_enabled, false);
+        assert_eq!(summary.recovered, 1);
+        let attempt = store
+            .get_verification_attempt("attempt-dead")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            attempt.status, "running",
+            "an unsignalable process must keep the attempt running"
+        );
+        let runs = store
+            .list_verification_command_runs("attempt-dead")
+            .unwrap();
+        assert_eq!(runs[0].status, "interrupted");
+        assert_eq!(
+            runs[0].termination_reason.as_deref(),
+            Some("restart_recovery")
+        );
+    }
+
+    #[tokio::test]
+    async fn preview_publication_creates_once_and_adopts_the_owned_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = open_store(&temp.path().join("factory.db"));
+        store.disable_foreign_keys_for_test();
+        let comments = FakeComments::new("symphony-bot");
+        let gate = crate::verification::gate::compute_gate(
+            &crate::verification::domain::VerifierManifest {
+                schema_version: 1,
+                spec_artifact_id: "spec".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                review_artifact_id: "review".to_string(),
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                summary: "verified".to_string(),
+                criteria: vec![],
+            },
+            &GateIdentity {
+                spec_artifact_id: "spec",
+                implementation_artifact_id: "implementation",
+                review_artifact_id: "review",
+                reviewed_head_sha: "head-sha",
+                base_sha: "base-sha",
+                criterion_count: 0,
+            },
+            &[],
+            &[],
+        )
+        .unwrap();
+        let gate = VerificationGateRecord {
+            gate_id: "gate-1".to_string(),
+            run_id: "run-1".to_string(),
+            attempt_id: "attempt-1".to_string(),
+            status: if gate.passed { "passed" } else { "failed" }.to_string(),
+            verifier_manifest: None,
+            command_summary: Some(serde_json::json!({"reasons": gate.reasons})),
+            computed_at: Some(Utc::now()),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let intent = store
+            .create_verification_publication_intent("run-1", "attempt-1", "preview")
+            .unwrap();
+        let context = crate::verification::publisher::PreviewCommentContext {
+            intent_id: &intent.intent_id,
+            run_id: "run-1",
+            attempt_id: "attempt-1",
+            pr_number: 42,
+            reviewed_head_sha: "head-sha",
+            base_sha: "base-sha",
+            spec_artifact_id: "spec",
+            implementation_artifact_id: "implementation",
+            review_artifact_id: "review",
+            gate: &gate,
+            commands: &[],
+            evidence: &[],
+        };
+
+        // First publication creates exactly one comment.
+        let first = publish_preview_comment(&comments, &store, &intent, &context, 5)
+            .await
+            .unwrap();
+        let (creates, updates) = comments.counts();
+        assert_eq!(creates, 1);
+        assert_eq!(updates, 0);
+        assert!(comments.comment(first.parse().unwrap()).is_some());
+
+        // A second publication for the same intent updates the owned marker
+        // comment in place instead of creating a duplicate.
+        let again = publish_preview_comment(&comments, &store, &intent, &context, 5)
+            .await
+            .unwrap();
+        assert_eq!(again, first);
+        let (creates, updates) = comments.counts();
+        assert_eq!(creates, 1);
+        assert_eq!(updates, 1);
+
+        // A foreign marker comment is never adopted: the publisher login is
+        // symphony-bot but the marker comment belongs to another author.
+        let intent2 = store
+            .create_verification_publication_intent("run-1", "attempt-2", "preview")
+            .unwrap();
+        let foreign = FakeComments::new("symphony-bot");
+        let foreign_owned = {
+            let mut comments = foreign.comments.lock().unwrap();
+            let id = *foreign.next_id.lock().unwrap();
+            *foreign.next_id.lock().unwrap() += 1;
+            comments.insert(
+                id,
+                GithubIssueComment {
+                    id,
+                    user: Some(crate::github::client::GithubUser {
+                        login: "intruder".to_string(),
+                    }),
+                    body: Some(format!(
+                        "foreign body\n{}",
+                        crate::verification::publisher::verification_marker(&intent2.intent_id)
+                    )),
+                    html_url: None,
+                    created_at: None,
+                    updated_at: None,
+                },
+            );
+            id
+        };
+        let context2 = crate::verification::publisher::PreviewCommentContext {
+            intent_id: &intent2.intent_id,
+            run_id: "run-1",
+            attempt_id: "attempt-2",
+            pr_number: 42,
+            reviewed_head_sha: "head-sha",
+            base_sha: "base-sha",
+            spec_artifact_id: "spec",
+            implementation_artifact_id: "implementation",
+            review_artifact_id: "review",
+            gate: &gate,
+            commands: &[],
+            evidence: &[],
+        };
+        let error = publish_preview_comment(&foreign, &store, &intent2, &context2, 5)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("owned by another GitHub login"));
+        assert!(foreign.comment(foreign_owned).is_some());
+    }
+
+    #[test]
+    fn prompt_and_path_resolution_helpers_fail_actionably() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = VerificationConfig::default();
+        let service = ServiceConfig {
+            verification: config.clone(),
+            ..ServiceConfig::default()
+        };
+        // Missing prompt file errors with the resolved path.
+        let error = load_verification_prompt(temp.path(), &service).unwrap_err();
+        assert!(error.to_string().contains("could not be read"));
+
+        // workspace.repo must resolve; workspace.root must exist.
+        let missing_root = temp.path().join("does-not-exist");
+        let service = ServiceConfig {
+            verification: config,
+            workspace: crate::domain::WorkspaceConfig {
+                root: missing_root.display().to_string(),
+                ..crate::domain::WorkspaceConfig::default()
+            },
+            ..ServiceConfig::default()
+        };
+        let error = resolve_repo_path(&service).unwrap_err();
+        assert!(error.to_string().contains("workspace.repo"));
+        let error = resolve_workspace_root(&service).unwrap_err();
+        assert!(error.to_string().contains("workspace.root"));
     }
 }

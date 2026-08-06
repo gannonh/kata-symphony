@@ -39,9 +39,17 @@ run_segment \
   --test github_adapter_tests \
   --test github_execution_contract_tests
 
-run_segment \
-  "Symphony UAT evidence cleanup contracts (node test)" \
-  node --test \
-  .agents/skills/uat-evidence/scripts/symphony-runtime-config.test.mjs
+UAT_EVIDENCE_TEST=.agents/skills/uat-evidence/scripts/symphony-runtime-config.test.mjs
+if [ -f "$UAT_EVIDENCE_TEST" ]; then
+  run_segment \
+    "Symphony UAT evidence cleanup contracts (node test)" \
+    node --test \
+    "$UAT_EVIDENCE_TEST"
+else
+  echo "::group::Symphony UAT evidence cleanup contracts (node test)"
+  echo "⚠️  Skipped: the uat-evidence skill test file is not installed in this checkout ($UAT_EVIDENCE_TEST)."
+  echo "    Install the uat-evidence skill locally and rerun this lane to exercise the contracts."
+  echo "::endgroup::"
+fi
 
 echo "GitHub backend validation lane completed successfully."

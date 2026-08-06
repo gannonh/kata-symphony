@@ -817,6 +817,44 @@ mod tests {
         assert!(!tail.contains("user:password@"));
     }
 
+    #[tokio::test]
+    async fn docker_profile_without_docker_config_fails_actionably() {
+        let dir = tempdir().unwrap();
+        let request = CommandExecutionRequest {
+            attempt_id: "attempt-1".to_string(),
+            command_name: "docker-command".to_string(),
+            workspace_path: dir.path().join("workspace"),
+            evidence_dir: dir.path().join("evidence"),
+            home_dir: dir.path().join("home"),
+            command: "true".to_string(),
+            timeout_ms: 30_000,
+            execution_profile: ExecutionProfile::Docker,
+            docker: None,
+        };
+        let error = execute_command(&request, |_| Ok(())).await.unwrap_err();
+        assert!(error.to_string().contains("workspace.docker"));
+    }
+
+    #[tokio::test]
+    async fn zero_timeout_is_rejected_before_spawn() {
+        let dir = tempdir().unwrap();
+        let request = CommandExecutionRequest {
+            attempt_id: "attempt-1".to_string(),
+            command_name: "local-command".to_string(),
+            workspace_path: dir.path().join("workspace"),
+            evidence_dir: dir.path().join("evidence"),
+            home_dir: dir.path().join("home"),
+            command: "true".to_string(),
+            timeout_ms: 0,
+            execution_profile: ExecutionProfile::Local,
+            docker: None,
+        };
+        let error = execute_command(&request, |_| Ok(())).await.unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("timeout must be greater than zero"));
+    }
+
     #[test]
     fn command_sha256_is_stable() {
         let a = command_sha256("pnpm run test");

@@ -116,3 +116,56 @@ pub fn command_for_review(service: &ServiceConfig) -> Result<Vec<String>> {
     }
     Ok(command)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_selection_prefers_stage_then_agent_defaults() {
+        let service = ServiceConfig {
+            review: crate::review::domain::ReviewConfig {
+                model: Some("review-model".to_string()),
+                ..crate::review::domain::ReviewConfig::default()
+            },
+            pi_agent: crate::domain::PiAgentConfig {
+                model: Some("agent-model".to_string()),
+                ..crate::domain::PiAgentConfig::default()
+            },
+            ..ServiceConfig::default()
+        };
+        assert_eq!(model_for_review(&service).as_deref(), Some("review-model"));
+        assert_eq!(harness_for_service(&service), TriageHarness::Pi);
+
+        let service = ServiceConfig {
+            review: crate::review::domain::ReviewConfig::default(),
+            pi_agent: crate::domain::PiAgentConfig {
+                model: Some("agent-model".to_string()),
+                ..crate::domain::PiAgentConfig::default()
+            },
+            ..ServiceConfig::default()
+        };
+        assert_eq!(model_for_review(&service).as_deref(), Some("agent-model"));
+
+        let service = ServiceConfig {
+            agent_backend: AgentBackend::Codex,
+            codex: crate::domain::CodexConfig {
+                command: vec!["codex".to_string()],
+                ..crate::domain::CodexConfig::default()
+            },
+            ..ServiceConfig::default()
+        };
+        assert_eq!(model_for_review(&service), None);
+        assert_eq!(harness_for_service(&service), TriageHarness::Codex);
+        assert!(command_for_review(&service).is_ok());
+
+        let service = ServiceConfig {
+            pi_agent: crate::domain::PiAgentConfig {
+                command: vec![],
+                ..crate::domain::PiAgentConfig::default()
+            },
+            ..ServiceConfig::default()
+        };
+        assert!(command_for_review(&service).is_err());
+    }
+}
