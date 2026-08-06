@@ -494,12 +494,7 @@ pub fn docker_credential_isolated_env(
     if let Some(path) = parent_env.get("PATH") {
         env.push(("PATH".to_string(), path.clone()));
     }
-    for key in [
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "CLAUDE_API_KEY",
-        "HYPER_API_KEY",
-    ] {
+    for key in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "CLAUDE_API_KEY"] {
         if let Some(value) = parent_env.get(key) {
             env.push((key.to_string(), value.clone()));
         }
@@ -810,7 +805,6 @@ mod tests {
         let dir = tempdir().unwrap();
         // Ensure parent has GH_TOKEN; builder must not forward it.
         std::env::set_var("GH_TOKEN", "secret-should-not-leak");
-        std::env::set_var("HYPER_API_KEY", "model-auth-only");
         let stage_input = dir.path().join("stage-input");
         let env = isolated_env_omits_forge_credentials(
             dir.path(),
@@ -819,12 +813,6 @@ mod tests {
         );
         assert!(!env.contains_key("GH_TOKEN"));
         assert!(!env.contains_key("GITHUB_TOKEN"));
-        // Model-provider auth passes through; forge credentials never do.
-        assert_eq!(
-            env.get("HYPER_API_KEY").map(String::as_str),
-            Some("model-auth-only")
-        );
-        std::env::remove_var("HYPER_API_KEY");
         assert_eq!(
             env.get("HOME").map(String::as_str),
             Some(dir.path().to_str().unwrap())

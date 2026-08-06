@@ -1342,7 +1342,7 @@ pub(crate) fn build_isolated_env(
         }
         if matches!(
             key.as_str(),
-            "ANTHROPIC_API_KEY" | "OPENAI_API_KEY" | "CLAUDE_API_KEY" | "HYPER_API_KEY"
+            "ANTHROPIC_API_KEY" | "OPENAI_API_KEY" | "CLAUDE_API_KEY"
         ) {
             env.insert(key.clone(), value.clone());
         }
