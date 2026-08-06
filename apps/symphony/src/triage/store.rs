@@ -28,17 +28,25 @@ use crate::triage::domain::{
 };
 use crate::triage::process_identity::ProcessIdentity;
 use crate::triage::storage_path::lock_path_for_storage;
+use crate::verification::domain::{
+    VerificationAttemptRecord, VerificationCommandKind, VerificationCommandRunRecord,
+    VerificationEvidenceRecord, VerificationGateRecord, VerificationMetricsAggregate,
+    VerificationPublicationIntent, VERIFICATION_STAGE_NAME,
+};
 use chrono::{DateTime, Duration, Utc};
 use fs2::FileExt;
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs::{File, OpenOptions};
 use std::path::Path;
 use std::time::Duration as StdDuration;
 use uuid::Uuid;
 
-/// Embedded migrations, applied in order while the exclusive store lock is held.
-const MIGRATIONS: [&str; 8] = [
+/// Embedded migrations, applied in order while the exclusive store lock is
+/// held. `009_*` is applied separately behind a Rust-side idempotency guard
+/// because it rebuilds tables (see [`acquire_lock_and_migrate`]).
+const MIGRATIONS: [&str; 9] = [
     include_str!("migrations/001_init.sql"),
     include_str!("migrations/002_route_observations.sql"),
     include_str!("migrations/003_spec_stage.sql"),
@@ -47,7 +55,13 @@ const MIGRATIONS: [&str; 8] = [
     include_str!("migrations/006_review_stage.sql"),
     include_str!("migrations/007_review_publication.sql"),
     include_str!("migrations/008_review_publication_lease.sql"),
+    include_str!("migrations/010_verification_stage.sql"),
 ];
+
+/// The A4 head/base identity rebuild (#617). Not in [`MIGRATIONS`]: it is
+/// applied only while the review unique key still lacks `base_sha`.
+const REVIEW_HEAD_BASE_IDENTITY_MIGRATION: &str =
+    include_str!("migrations/009_a4_review_head_base_identity.sql");
 
 #[derive(Debug, Clone)]
 pub struct ClaimAttemptRequest {
@@ -510,6 +524,12 @@ impl SqliteFactoryStore {
             .map_err(storage_error)?;
         for migration in MIGRATIONS {
             apply_migration(&conn, migration).map_err(storage_error)?;
+        }
+        // A4 review-cycle identity: rebuild the review tables with the
+        // head/base key exactly once, preserving existing artifacts, findings,
+        // and publication references.
+        if !review_identity_is_head_base(&conn).map_err(storage_error)? {
+            apply_migration(&conn, REVIEW_HEAD_BASE_IDENTITY_MIGRATION).map_err(storage_error)?;
         }
 
         Ok(Self {
@@ -3656,19 +3676,20 @@ impl SqliteFactoryStore {
     }
 
     /// Count review attempts that consume the retry budget for one live PR
-    /// head. Interrupted attempts count as failed work so repeated crashes
-    /// cannot reclaim the same head indefinitely.
+    /// head/base pair. Interrupted attempts count as failed work so repeated
+    /// crashes cannot reclaim the same revision pair indefinitely.
     pub fn count_review_attempt_failures_for_head(
         &self,
         run_id: &str,
         reviewed_head_sha: &str,
+        base_sha: &str,
     ) -> Result<u32> {
         self.conn
             .query_row(
                 "SELECT COUNT(*) FROM review_attempts
-                 WHERE run_id = ?1 AND reviewed_head_sha = ?2
+                 WHERE run_id = ?1 AND reviewed_head_sha = ?2 AND base_sha = ?3
                    AND status IN ('failed', 'blocked', 'interrupted')",
-                params![run_id, reviewed_head_sha],
+                params![run_id, reviewed_head_sha, base_sha],
                 |row| row.get(0),
             )
             .map_err(storage_error)
@@ -3875,11 +3896,11 @@ impl SqliteFactoryStore {
             tx.execute(
                 "INSERT INTO review_finding_records (
                     finding_record_id, run_id, artifact_id, finding_id, identity_key,
-                    reviewed_head_sha, severity, category, path, line, end_line,
+                    reviewed_head_sha, base_sha, severity, category, path, line, end_line,
                     claim, rationale, remediation, acceptance_criterion, confidence,
                     lifecycle_state, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-                    ?13, ?14, ?15, ?16, ?17, ?18, ?18)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
+                    ?14, ?15, ?16, ?17, ?18, ?19, ?19)",
                 params![
                     new_id(),
                     stage.run_id,
@@ -3887,6 +3908,7 @@ impl SqliteFactoryStore {
                     finding.finding_id,
                     identity_key,
                     request.reviewed_head_sha,
+                    request.base_sha,
                     severity,
                     category,
                     finding.path,
@@ -3985,24 +4007,32 @@ impl SqliteFactoryStore {
         Ok(record)
     }
 
-    pub fn review_artifact_exists_for_head(&self, run_id: &str, head_sha: &str) -> Result<bool> {
+    /// Whether a completed review artifact exists for one live head/base pair.
+    pub fn review_artifact_exists(
+        &self,
+        run_id: &str,
+        head_sha: &str,
+        base_sha: &str,
+    ) -> Result<bool> {
         self.conn
             .query_row(
                 "SELECT EXISTS(
                     SELECT 1 FROM review_findings_artifacts
-                    WHERE run_id = ?1 AND reviewed_head_sha = ?2
+                    WHERE run_id = ?1 AND reviewed_head_sha = ?2 AND base_sha = ?3
                 )",
-                params![run_id, head_sha],
+                params![run_id, head_sha, base_sha],
                 |row| row.get(0),
             )
             .map_err(storage_error)
     }
 
-    /// Find a completed artifact whose publication intent was never persisted.
-    pub fn get_orphaned_review_artifact_for_head(
+    /// Find a completed artifact for one head/base pair whose publication
+    /// intent was never persisted.
+    pub fn get_orphaned_review_artifact(
         &self,
         run_id: &str,
         head_sha: &str,
+        base_sha: &str,
     ) -> Result<Option<ReviewFindingsArtifactRecord>> {
         self.conn
             .query_row(
@@ -4011,14 +4041,14 @@ impl SqliteFactoryStore {
                     a.schema_version, a.reviewed_head_sha, a.base_sha, a.manifest_json,
                     a.no_findings, a.finding_count, a.received_at, a.bytes_len
                  FROM review_findings_artifacts a
-                 WHERE a.run_id = ?1 AND a.reviewed_head_sha = ?2
+                 WHERE a.run_id = ?1 AND a.reviewed_head_sha = ?2 AND a.base_sha = ?3
                    AND NOT EXISTS (
                        SELECT 1 FROM review_publication_intents i
                        WHERE i.artifact_id = a.artifact_id
                    )
                  ORDER BY a.received_at DESC
                  LIMIT 1",
-                params![run_id, head_sha],
+                params![run_id, head_sha, base_sha],
                 review_artifact_from_row,
             )
             .optional()
@@ -4051,7 +4081,7 @@ impl SqliteFactoryStore {
             .conn
             .prepare(
                 "SELECT finding_record_id, run_id, artifact_id, finding_id, identity_key,
-                    reviewed_head_sha, severity, category, path, line, end_line,
+                    reviewed_head_sha, base_sha, severity, category, path, line, end_line,
                     claim, rationale, remediation, acceptance_criterion, confidence,
                     lifecycle_state, created_at, updated_at
                  FROM review_finding_records
@@ -5210,6 +5240,926 @@ impl SqliteFactoryStore {
     }
 }
 
+// ── A5 verification stage ────────────────────────────────────────────────────
+
+/// A factory run whose durable A4 review cycle produced an applied automatic
+/// publication. The coordinator additionally requires the live pull head/base
+/// to equal the reviewed revision, the publication route to equal
+/// `verification.trigger_state`, and the tracker item to be in that state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct A5EligibleVerificationRun {
+    pub run_id: String,
+    pub forge_host: String,
+    pub repository: String,
+    pub issue_id: String,
+    pub issue_identifier: String,
+    pub pr_number: u64,
+    pub pr_url: String,
+    pub head: String,
+    pub base: String,
+    pub head_sha: String,
+    pub review_artifact_id: String,
+    pub reviewed_head_sha: String,
+    pub reviewed_base_sha: String,
+    pub spec_artifact_id: String,
+    pub implementation_artifact_id: String,
+    pub route_state: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StoreVerificationAttemptRequest {
+    pub attempt_id: String,
+    pub stage_run_id: String,
+    pub pr_number: u64,
+    pub reviewed_head_sha: String,
+    pub base_sha: String,
+    pub spec_artifact_id: String,
+    pub implementation_artifact_id: String,
+    pub review_artifact_id: String,
+    pub configuration_revision: String,
+    pub execution_profile: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UpdateVerificationAttemptRequest<'a> {
+    pub attempt_id: &'a str,
+    pub status: Option<&'a str>,
+    pub workspace_path: Option<&'a str>,
+    pub evidence_dir: Option<&'a str>,
+    pub error: Option<&'a FactoryError>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RecordVerificationCommandLaunchRequest<'a> {
+    pub run_id: &'a str,
+    pub attempt_id: &'a str,
+    pub ordinal: u32,
+    pub name: &'a str,
+    pub kind: VerificationCommandKind,
+    pub configuration_revision: &'a str,
+    pub command_sha256: &'a str,
+    pub execution_profile: &'a str,
+    pub launch_nonce: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompleteVerificationCommandRequest<'a> {
+    pub command_run_id: &'a str,
+    pub status: &'a str,
+    pub exit_code: Option<i32>,
+    pub termination_reason: Option<&'a str>,
+    pub passed: Option<bool>,
+    pub output_tail: Option<&'a str>,
+    pub output_sha256: Option<&'a str>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: DateTime<Utc>,
+    pub duration_ms: u64,
+}
+
+impl SqliteFactoryStore {
+    pub fn store_verification_attempt_inputs(
+        &mut self,
+        request: StoreVerificationAttemptRequest,
+    ) -> Result<VerificationAttemptRecord> {
+        let stage = select_stage_run(&self.conn, &request.stage_run_id)?;
+        if stage.stage != VERIFICATION_STAGE_NAME || stage.status != StageStatus::Running {
+            return Err(SymphonyError::StorageError(format!(
+                "stage run {} is not a running verification attempt",
+                request.stage_run_id
+            )));
+        }
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO verification_attempts (
+                    attempt_id, run_id, stage_run_id, pr_number,
+                    reviewed_head_sha, base_sha, spec_artifact_id,
+                    implementation_artifact_id, review_artifact_id,
+                    configuration_revision, execution_profile, status,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'running', ?12, ?12)",
+                params![
+                    request.attempt_id,
+                    stage.run_id,
+                    request.stage_run_id,
+                    request.pr_number as i64,
+                    request.reviewed_head_sha,
+                    request.base_sha,
+                    request.spec_artifact_id,
+                    request.implementation_artifact_id,
+                    request.review_artifact_id,
+                    request.configuration_revision,
+                    request.execution_profile,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        self.get_verification_attempt(&request.attempt_id)?
+            .ok_or_else(|| {
+                SymphonyError::StorageError("created verification attempt is missing".to_string())
+            })
+    }
+
+    pub fn get_verification_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<VerificationAttemptRecord>> {
+        self.conn
+            .query_row(
+                "SELECT attempt_id, run_id, stage_run_id, pr_number,
+                    reviewed_head_sha, base_sha, spec_artifact_id,
+                    implementation_artifact_id, review_artifact_id,
+                    configuration_revision, execution_profile, status,
+                    workspace_path, evidence_dir, error_json,
+                    verifier_pid, verifier_process_group_id, verifier_start_token,
+                    verifier_executable, created_at, updated_at
+                 FROM verification_attempts WHERE attempt_id = ?1",
+                params![attempt_id],
+                verification_attempt_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn list_verification_attempts(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<VerificationAttemptRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT attempt_id, run_id, stage_run_id, pr_number,
+                    reviewed_head_sha, base_sha, spec_artifact_id,
+                    implementation_artifact_id, review_artifact_id,
+                    configuration_revision, execution_profile, status,
+                    workspace_path, evidence_dir, error_json,
+                    verifier_pid, verifier_process_group_id, verifier_start_token,
+                    verifier_executable, created_at, updated_at
+                 FROM verification_attempts WHERE run_id = ?1 ORDER BY created_at DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], verification_attempt_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    /// Every attempt that was still running when the process stopped.
+    pub fn list_running_verification_attempts(&self) -> Result<Vec<VerificationAttemptRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT attempt_id, run_id, stage_run_id, pr_number,
+                    reviewed_head_sha, base_sha, spec_artifact_id,
+                    implementation_artifact_id, review_artifact_id,
+                    configuration_revision, execution_profile, status,
+                    workspace_path, evidence_dir, error_json,
+                    verifier_pid, verifier_process_group_id, verifier_start_token,
+                    verifier_executable, created_at, updated_at
+                 FROM verification_attempts WHERE status = 'running' ORDER BY created_at",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map([], verification_attempt_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn update_verification_attempt(
+        &mut self,
+        request: UpdateVerificationAttemptRequest<'_>,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_attempts SET
+                    status = COALESCE(?1, status),
+                    workspace_path = COALESCE(?2, workspace_path),
+                    evidence_dir = COALESCE(?3, evidence_dir),
+                    error_json = ?4,
+                    updated_at = ?5
+                 WHERE attempt_id = ?6",
+                params![
+                    request.status,
+                    request.workspace_path,
+                    request.evidence_dir,
+                    request.error.map(bounded_json).transpose()?,
+                    ts(Self::now()),
+                    request.attempt_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification attempt {} not found",
+                request.attempt_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Candidates for A5: a durable A4 findings artifact whose automatic
+    /// publication was applied. Route equality with `verification.trigger_state`
+    /// and live head/base equality are checked by the coordinator.
+    pub fn list_a5_eligible_verification_runs(
+        &self,
+        max_attempts: u32,
+    ) -> Result<Vec<A5EligibleVerificationRun>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT DISTINCT r.run_id, r.forge_host, r.repository, r.issue_id,
+                    r.issue_identifier, d.number, d.url, d.head, d.base, d.head_sha,
+                    a.artifact_id, a.reviewed_head_sha, a.base_sha,
+                    a.spec_artifact_id, a.implementation_artifact_id,
+                    p.route_state
+                 FROM factory_runs r
+                 JOIN review_findings_artifacts a ON a.run_id = r.run_id
+                 JOIN review_publication_intents p
+                    ON p.artifact_id = a.artifact_id
+                    AND p.kind = 'automatic'
+                    AND p.status = 'applied'
+                 JOIN implementation_draft_pr_artifacts d
+                    ON d.artifact_id = a.draft_pr_artifact_id
+                    AND d.draft = 1
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM stage_runs sr
+                     WHERE sr.run_id = r.run_id AND sr.stage = ?1
+                       AND sr.status IN ('pending', 'running')
+                 )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM verification_attempts va
+                     JOIN stage_runs vrs ON vrs.stage_run_id = va.stage_run_id
+                     WHERE va.run_id = r.run_id
+                       AND va.reviewed_head_sha = a.reviewed_head_sha
+                       AND va.base_sha = a.base_sha
+                       AND vrs.status = 'completed'
+                   )
+                   AND (
+                     SELECT COUNT(*) FROM verification_attempts va2
+                     WHERE va2.run_id = r.run_id
+                       AND va2.reviewed_head_sha = a.reviewed_head_sha
+                       AND va2.base_sha = a.base_sha
+                       AND va2.status IN ('failed', 'interrupted', 'blocked')
+                   ) < ?2
+                 ORDER BY r.updated_at ASC, a.received_at DESC",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(
+                params![VERIFICATION_STAGE_NAME, max_attempts as i64],
+                |row| {
+                    Ok(A5EligibleVerificationRun {
+                        run_id: row.get(0)?,
+                        forge_host: row.get(1)?,
+                        repository: row.get(2)?,
+                        issue_id: row.get(3)?,
+                        issue_identifier: row.get(4)?,
+                        pr_number: row.get::<_, i64>(5)? as u64,
+                        pr_url: row.get(6)?,
+                        head: row.get(7)?,
+                        base: row.get(8)?,
+                        head_sha: row.get(9)?,
+                        review_artifact_id: row.get(10)?,
+                        reviewed_head_sha: row.get(11)?,
+                        reviewed_base_sha: row.get(12)?,
+                        spec_artifact_id: row.get(13)?,
+                        implementation_artifact_id: row.get(14)?,
+                        route_state: row.get(15)?,
+                    })
+                },
+            )
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    /// Persist the `launching` record and nonce before any spawn. The returned
+    /// command_run_id is the CAS target for the identity record.
+    pub fn record_verification_command_launch(
+        &mut self,
+        request: RecordVerificationCommandLaunchRequest<'_>,
+    ) -> Result<String> {
+        let command_run_id = new_id();
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO verification_command_runs (
+                    command_run_id, run_id, attempt_id, ordinal, name, kind,
+                    configuration_revision, command_sha256, status, launch_nonce,
+                    execution_profile, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'launching', ?9, ?10, ?11, ?11)",
+                params![
+                    command_run_id,
+                    request.run_id,
+                    request.attempt_id,
+                    request.ordinal as i64,
+                    request.name,
+                    request.kind.as_str(),
+                    request.configuration_revision,
+                    request.command_sha256,
+                    request.launch_nonce,
+                    request.execution_profile,
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(command_run_id)
+    }
+
+    /// CAS-transition a launching command to running with its captured local
+    /// process identity. Fails when the record is not still `launching` with
+    /// the same nonce — a stale or foreign writer cannot claim the launch.
+    pub fn cas_verification_launch_identity(
+        &mut self,
+        command_run_id: &str,
+        launch_nonce: &str,
+        identity: &crate::triage::process_identity::ProcessIdentity,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_command_runs SET
+                    status = 'running',
+                    pid = ?1,
+                    process_group_id = ?2,
+                    process_start_token = ?3,
+                    executable_identity = ?4,
+                    started_at = ?5,
+                    updated_at = ?5
+                 WHERE command_run_id = ?6 AND launch_nonce = ?7 AND status = 'launching'",
+                params![
+                    identity.pid,
+                    identity.process_group_id,
+                    identity.start_token,
+                    identity.executable,
+                    ts(Self::now()),
+                    command_run_id,
+                    launch_nonce,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "launch CAS failed for command run {command_run_id}: not launching or nonce mismatch"
+            )));
+        }
+        Ok(())
+    }
+
+    /// CAS-record the container ID before `docker start` releases the payload.
+    pub fn cas_verification_container(
+        &mut self,
+        command_run_id: &str,
+        launch_nonce: &str,
+        container_id: &str,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_command_runs SET
+                    status = 'running',
+                    container_id = ?1,
+                    started_at = ?2,
+                    updated_at = ?2
+                 WHERE command_run_id = ?3 AND launch_nonce = ?4 AND status = 'launching'",
+                params![container_id, ts(Self::now()), command_run_id, launch_nonce],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "container CAS failed for command run {command_run_id}: not launching or nonce mismatch"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn complete_verification_command(
+        &mut self,
+        request: CompleteVerificationCommandRequest<'_>,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_command_runs SET
+                    status = ?1,
+                    exit_code = ?2,
+                    termination_reason = ?3,
+                    passed = ?4,
+                    output_tail = ?5,
+                    output_sha256 = ?6,
+                    completed_at = ?7,
+                    duration_ms = ?8,
+                    updated_at = ?7
+                 WHERE command_run_id = ?9",
+                params![
+                    request.status,
+                    request.exit_code,
+                    request.termination_reason,
+                    request.passed.map(|value| if value { 1 } else { 0 }),
+                    request.output_tail,
+                    request.output_sha256,
+                    ts(request.completed_at),
+                    request.duration_ms as i64,
+                    request.command_run_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification command run {} not found",
+                request.command_run_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// A required command that was never invoked because an earlier command
+    /// failed. The gate treats it as an unexecuted required command.
+    pub fn mark_verification_command_not_run(&mut self, command_run_id: &str) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_command_runs SET status = 'not_run',
+                    updated_at = ?1 WHERE command_run_id = ?2",
+                params![ts(Self::now()), command_run_id],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification command run {command_run_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn list_verification_command_runs(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<VerificationCommandRunRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT command_run_id, run_id, attempt_id, ordinal, name, kind,
+                    configuration_revision, command_sha256, status, launch_nonce,
+                    pid, process_group_id, process_start_token, executable_identity,
+                    container_id, started_at, completed_at, duration_ms, exit_code,
+                    termination_reason, passed, output_tail, output_sha256,
+                    execution_profile, created_at, updated_at
+                 FROM verification_command_runs WHERE attempt_id = ?1 ORDER BY ordinal",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![attempt_id], verification_command_run_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn store_verification_evidence(
+        &mut self,
+        records: &[VerificationEvidenceRecord],
+    ) -> Result<()> {
+        let now_s = ts(Self::now());
+        for record in records {
+            self.conn
+                .execute(
+                    "INSERT INTO verification_evidence (
+                        evidence_id, run_id, attempt_id, relative_path,
+                        sha256, bytes_len, collected_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                     ON CONFLICT(attempt_id, relative_path) DO UPDATE SET
+                        sha256 = excluded.sha256,
+                        bytes_len = excluded.bytes_len,
+                        collected_at = excluded.collected_at",
+                    params![
+                        record.evidence_id,
+                        record.run_id,
+                        record.attempt_id,
+                        record.relative_path,
+                        record.sha256,
+                        record.bytes_len as i64,
+                        now_s,
+                    ],
+                )
+                .map_err(storage_error)?;
+        }
+        Ok(())
+    }
+
+    pub fn list_verification_evidence(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<VerificationEvidenceRecord>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT evidence_id, run_id, attempt_id, relative_path,
+                    sha256, bytes_len, collected_at
+                 FROM verification_evidence WHERE attempt_id = ?1 ORDER BY collected_at",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![attempt_id], verification_evidence_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn store_verification_gate(&mut self, record: &VerificationGateRecord) -> Result<()> {
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO verification_gates (
+                    gate_id, run_id, attempt_id, status,
+                    verifier_manifest_json, command_summary_json, computed_at,
+                    created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+                 ON CONFLICT(attempt_id) DO UPDATE SET
+                    status = excluded.status,
+                    verifier_manifest_json = excluded.verifier_manifest_json,
+                    command_summary_json = excluded.command_summary_json,
+                    computed_at = excluded.computed_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    record.gate_id,
+                    record.run_id,
+                    record.attempt_id,
+                    record.status,
+                    record
+                        .verifier_manifest
+                        .as_ref()
+                        .map(bounded_json)
+                        .transpose()?,
+                    record
+                        .command_summary
+                        .as_ref()
+                        .map(bounded_json)
+                        .transpose()?,
+                    record.computed_at.map(ts),
+                    now_s,
+                ],
+            )
+            .map_err(storage_error)?;
+        Ok(())
+    }
+
+    pub fn get_verification_gate(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<VerificationGateRecord>> {
+        self.conn
+            .query_row(
+                "SELECT gate_id, run_id, attempt_id, status,
+                    verifier_manifest_json, command_summary_json, computed_at,
+                    created_at, updated_at
+                 FROM verification_gates WHERE attempt_id = ?1",
+                params![attempt_id],
+                verification_gate_from_row,
+            )
+            .optional()
+            .map_err(storage_error)
+    }
+
+    pub fn create_verification_publication_intent(
+        &mut self,
+        run_id: &str,
+        attempt_id: &str,
+        kind: &str,
+    ) -> Result<VerificationPublicationIntent> {
+        // Reuse an existing pending intent for the same run and kind so a
+        // retried attempt keeps the same durable intent (mirrors
+        // `create_review_publication_intent`). Applied intents are never
+        // reused: a fresh head opens a fresh preview intent.
+        if let Some(existing) = self
+            .list_verification_publications_for_run(run_id)?
+            .into_iter()
+            .find(|intent| intent.kind == kind && intent.status == PublicationStatus::Pending)
+        {
+            return Ok(existing);
+        }
+        let intent_id = new_id();
+        let now_s = ts(Self::now());
+        self.conn
+            .execute(
+                "INSERT INTO verification_publication_intents (
+                    intent_id, run_id, attempt_id, kind, status,
+                    completed_steps_json, retry_count, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'pending', '[]', 0, ?5, ?5)",
+                params![intent_id, run_id, attempt_id, kind, now_s],
+            )
+            .map_err(storage_error)?;
+        self.list_verification_publications_for_run(run_id)?
+            .into_iter()
+            .find(|intent| intent.intent_id == intent_id)
+            .ok_or_else(|| {
+                SymphonyError::StorageError("created verification intent is missing".to_string())
+            })
+    }
+
+    pub fn list_verification_publications_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<VerificationPublicationIntent>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT intent_id, run_id, attempt_id, kind, status,
+                    completed_steps_json, retry_count, last_error_json, comment_id,
+                    created_at, updated_at
+                 FROM verification_publication_intents WHERE run_id = ?1 ORDER BY created_at",
+            )
+            .map_err(storage_error)?;
+        let rows = stmt
+            .query_map(params![run_id], verification_publication_from_row)
+            .map_err(storage_error)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)
+    }
+
+    pub fn mark_verification_publication_applied(
+        &mut self,
+        intent_id: &str,
+        comment_id: &str,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_publication_intents SET status = 'applied',
+                    comment_id = ?1, updated_at = ?2 WHERE intent_id = ?3",
+                params![comment_id, ts(Self::now()), intent_id],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification intent {intent_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Complete a running verification stage run with usage accounting.
+    pub fn complete_verification_stage_run(
+        &mut self,
+        stage_run_id: &str,
+        usage: StageUsage,
+    ) -> Result<()> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE stage_runs SET status = 'completed', completed_at = ?1,
+                    input_tokens = ?2, output_tokens = ?3, total_tokens = ?4, updated_at = ?1
+                 WHERE stage_run_id = ?5 AND status = 'running'",
+                params![
+                    now_s,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.total_tokens,
+                    stage_run_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification stage run {stage_run_id} is not running"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Durably record the read-only verifier's process identity once spawned.
+    pub fn record_verifier_identity(
+        &mut self,
+        attempt_id: &str,
+        identity: &crate::triage::process_identity::ProcessIdentity,
+    ) -> Result<()> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE verification_attempts SET
+                    verifier_pid = ?1,
+                    verifier_process_group_id = ?2,
+                    verifier_start_token = ?3,
+                    verifier_executable = ?4,
+                    updated_at = ?5
+                 WHERE attempt_id = ?6",
+                params![
+                    identity.pid,
+                    identity.process_group_id,
+                    identity.start_token,
+                    identity.executable,
+                    ts(Self::now()),
+                    attempt_id,
+                ],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification attempt {attempt_id} not found"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Mark a running verification stage run interrupted (restart recovery).
+    pub fn interrupt_verification_stage_run(
+        &mut self,
+        stage_run_id: &str,
+        error: &FactoryError,
+    ) -> Result<()> {
+        let now_s = ts(Self::now());
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE stage_runs SET status = 'interrupted', completed_at = ?1,
+                    error_json = ?2, updated_at = ?1
+                 WHERE stage_run_id = ?3 AND status IN ('running', 'pending')",
+                params![now_s, bounded_json(error)?, stage_run_id],
+            )
+            .map_err(storage_error)?;
+        if changed == 0 {
+            return Err(SymphonyError::StorageError(format!(
+                "verification stage run {stage_run_id} is not running or pending"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn verification_metrics(&self) -> Result<VerificationMetricsAggregate> {
+        let (total, completed, failed, interrupted, superseded, blocked): (
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+        ) = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status = 'interrupted' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status = 'superseded' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END), 0)
+                     FROM verification_attempts",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .map_err(storage_error)?;
+        let commands_run = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_command_runs WHERE status != 'not_run'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let commands_passed = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_command_runs WHERE passed = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let commands_failed = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_command_runs WHERE passed = 0",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let gates_passed = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_gates WHERE status = 'passed'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let gates_failed = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_gates WHERE status = 'failed'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let evidence_files = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM verification_evidence", [], |row| {
+                row.get(0)
+            })
+            .map_err(storage_error)?;
+        let preview_publications = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM verification_publication_intents WHERE kind = 'preview' AND status = 'applied'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let evidence_bytes = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(bytes_len), 0) FROM verification_evidence",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let command_duration_avg_ms: u64 = self
+            .conn
+            .query_row(
+                "SELECT CAST(COALESCE(ROUND(AVG(duration_ms)), 0) AS INTEGER)
+                 FROM verification_command_runs
+                 WHERE duration_ms IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let max_same_head_attempts: u64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(c), 0) FROM (
+                    SELECT COUNT(*) AS c FROM verification_attempts
+                    GROUP BY run_id, reviewed_head_sha, base_sha
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let (input_tokens, output_tokens, total_tokens): (u64, u64, u64) = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(total_tokens), 0)
+                 FROM stage_runs WHERE stage = ?1",
+                params![VERIFICATION_STAGE_NAME],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(storage_error)?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT harness, model, SUM(input_tokens), SUM(output_tokens), SUM(total_tokens)
+                 FROM stage_runs WHERE stage = ?1
+                 GROUP BY harness, model ORDER BY SUM(total_tokens) DESC",
+            )
+            .map_err(storage_error)?;
+        let model_rows = stmt
+            .query_map(params![VERIFICATION_STAGE_NAME], |row| {
+                Ok(serde_json::json!({
+                    "harness": row.get::<_, String>(0)?,
+                    "model": row.get::<_, Option<String>>(1)?,
+                    "input_tokens": row.get::<_, u64>(2)?,
+                    "output_tokens": row.get::<_, u64>(3)?,
+                    "total_tokens": row.get::<_, u64>(4)?,
+                }))
+            })
+            .map_err(storage_error)?;
+        let model_usage = model_rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)?;
+        Ok(VerificationMetricsAggregate {
+            total_attempts: total,
+            completed_attempts: completed,
+            failed_attempts: failed,
+            interrupted_attempts: interrupted,
+            superseded_attempts: superseded,
+            blocked_attempts: blocked,
+            commands_run,
+            commands_passed,
+            commands_failed,
+            gates_passed,
+            gates_failed,
+            evidence_files,
+            evidence_bytes,
+            preview_publications,
+            command_duration_avg_ms,
+            max_same_head_attempts,
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            model_usage,
+            base: crate::triage::domain::TriageMetricsAggregate::default(),
+        })
+    }
+}
+
 const SPEC_ARTIFACT_SELECT: &str =
     "SELECT artifact_id, run_id, stage_run_id, issue_revision, configuration_revision,
         version, artifact_json, review_cycles, unresolved_findings_json, received_at, bytes_len
@@ -5285,8 +6235,8 @@ fn review_attempt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewAt
 fn review_finding_record_from_row(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<ReviewFindingRecord> {
-    let severity: String = row.get(6)?;
-    let category: String = row.get(7)?;
+    let severity: String = row.get(7)?;
+    let category: String = row.get(8)?;
     Ok(ReviewFindingRecord {
         finding_record_id: row.get(0)?,
         run_id: row.get(1)?,
@@ -5294,19 +6244,20 @@ fn review_finding_record_from_row(
         finding_id: row.get(3)?,
         identity_key: row.get(4)?,
         reviewed_head_sha: row.get(5)?,
+        base_sha: row.get(6)?,
         severity: serde_json::from_value(serde_json::Value::String(severity)).map_err(row_error)?,
         category: serde_json::from_value(serde_json::Value::String(category)).map_err(row_error)?,
-        path: row.get(8)?,
-        line: row.get(9)?,
-        end_line: row.get(10)?,
-        claim: row.get(11)?,
-        rationale: row.get(12)?,
-        remediation: row.get(13)?,
-        acceptance_criterion: row.get(14)?,
-        confidence: row.get(15)?,
-        lifecycle_state: row.get(16)?,
-        created_at: parse_ts_row(row.get::<_, String>(17)?)?,
-        updated_at: parse_ts_row(row.get::<_, String>(18)?)?,
+        path: row.get(9)?,
+        line: row.get(10)?,
+        end_line: row.get(11)?,
+        claim: row.get(12)?,
+        rationale: row.get(13)?,
+        remediation: row.get(14)?,
+        acceptance_criterion: row.get(15)?,
+        confidence: row.get(16)?,
+        lifecycle_state: row.get(17)?,
+        created_at: parse_ts_row(row.get::<_, String>(18)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(19)?)?,
     })
 }
 
@@ -5333,14 +6284,133 @@ fn review_artifact_from_row(
     })
 }
 
+fn verification_attempt_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<VerificationAttemptRecord> {
+    Ok(VerificationAttemptRecord {
+        attempt_id: row.get(0)?,
+        run_id: row.get(1)?,
+        stage_run_id: row.get(2)?,
+        pr_number: row.get::<_, i64>(3)? as u64,
+        reviewed_head_sha: row.get(4)?,
+        base_sha: row.get(5)?,
+        spec_artifact_id: row.get(6)?,
+        implementation_artifact_id: row.get(7)?,
+        review_artifact_id: row.get(8)?,
+        configuration_revision: row.get(9)?,
+        execution_profile: row.get(10)?,
+        status: row.get(11)?,
+        workspace_path: row.get(12)?,
+        evidence_dir: row.get(13)?,
+        error: optional_from_json(row.get::<_, Option<String>>(14)?)?,
+        verifier_pid: row.get(15)?,
+        verifier_process_group_id: row.get(16)?,
+        verifier_start_token: row.get(17)?,
+        verifier_executable: row.get(18)?,
+        created_at: parse_ts_row(row.get::<_, String>(19)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(20)?)?,
+    })
+}
+
+fn verification_command_run_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<VerificationCommandRunRecord> {
+    let kind: String = row.get(5)?;
+    let passed: Option<i64> = row.get(20)?;
+    Ok(VerificationCommandRunRecord {
+        command_run_id: row.get(0)?,
+        run_id: row.get(1)?,
+        attempt_id: row.get(2)?,
+        ordinal: row.get::<_, i64>(3)? as u32,
+        name: row.get(4)?,
+        kind: serde_json::from_value(serde_json::Value::String(kind)).map_err(row_error)?,
+        configuration_revision: row.get(6)?,
+        command_sha256: row.get(7)?,
+        status: row.get(8)?,
+        launch_nonce: row.get(9)?,
+        pid: row.get(10)?,
+        process_group_id: row.get(11)?,
+        process_start_token: row.get(12)?,
+        executable_identity: row.get(13)?,
+        container_id: row.get(14)?,
+        started_at: parse_optional_ts_row(row.get::<_, Option<String>>(15)?)?,
+        completed_at: parse_optional_ts_row(row.get::<_, Option<String>>(16)?)?,
+        duration_ms: row.get(17)?,
+        exit_code: row.get(18)?,
+        termination_reason: row.get(19)?,
+        passed: passed.map(|value| value != 0),
+        output_tail: row.get(21)?,
+        output_sha256: row.get(22)?,
+        execution_profile: row.get(23)?,
+        created_at: parse_ts_row(row.get::<_, String>(24)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(25)?)?,
+    })
+}
+
+fn verification_evidence_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<VerificationEvidenceRecord> {
+    Ok(VerificationEvidenceRecord {
+        evidence_id: row.get(0)?,
+        run_id: row.get(1)?,
+        attempt_id: row.get(2)?,
+        relative_path: row.get(3)?,
+        sha256: row.get(4)?,
+        bytes_len: row.get::<_, i64>(5)? as u64,
+        collected_at: parse_ts_row(row.get::<_, String>(6)?)?,
+    })
+}
+
+fn verification_gate_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<VerificationGateRecord> {
+    Ok(VerificationGateRecord {
+        gate_id: row.get(0)?,
+        run_id: row.get(1)?,
+        attempt_id: row.get(2)?,
+        status: row.get(3)?,
+        verifier_manifest: optional_from_json(row.get::<_, Option<String>>(4)?)?,
+        command_summary: optional_from_json(row.get::<_, Option<String>>(5)?)?,
+        computed_at: parse_optional_ts_row(row.get::<_, Option<String>>(6)?)?,
+        created_at: parse_ts_row(row.get::<_, String>(7)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(8)?)?,
+    })
+}
+
+fn verification_publication_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<VerificationPublicationIntent> {
+    Ok(VerificationPublicationIntent {
+        intent_id: row.get(0)?,
+        run_id: row.get(1)?,
+        attempt_id: row.get(2)?,
+        kind: row.get(3)?,
+        status: parse_publication_status(&row.get::<_, String>(4)?).map_err(row_error)?,
+        completed_steps: serde_json::from_str(&row.get::<_, String>(5)?).map_err(row_error)?,
+        retry_count: row.get::<_, i64>(6)? as u32,
+        last_error: optional_from_json(row.get::<_, Option<String>>(7)?)?,
+        comment_id: row.get(8)?,
+        created_at: parse_ts_row(row.get::<_, String>(9)?)?,
+        updated_at: parse_ts_row(row.get::<_, String>(10)?)?,
+    })
+}
+
 fn apply_migration(conn: &Connection, migration: &str) -> rusqlite::Result<()> {
     let statements = migration
         .lines()
         .filter(|line| !line.trim_start().starts_with("--"))
         .collect::<Vec<_>>()
         .join("\n");
-    if !statements.to_ascii_uppercase().contains("ALTER TABLE") {
-        return conn.execute_batch(migration);
+    // Only `ALTER TABLE ... ADD COLUMN` needs per-statement idempotency
+    // checks. Everything else — including trigger bodies and table rebuilds —
+    // runs as one batch so internal statement separators are preserved.
+    if !statements.split(';').any(|statement| {
+        let tokens: Vec<&str> = statement.split_whitespace().collect();
+        tokens.len() >= 6
+            && tokens[0].eq_ignore_ascii_case("ALTER")
+            && tokens[1].eq_ignore_ascii_case("TABLE")
+            && tokens[3].eq_ignore_ascii_case("ADD")
+            && tokens[4].eq_ignore_ascii_case("COLUMN")
+    }) {
+        return conn.execute_batch(&statements);
     }
     for statement in statements
         .split(';')
@@ -5369,6 +6439,40 @@ fn apply_migration(conn: &Connection, migration: &str) -> rusqlite::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether the review-findings identity already covers `base_sha` — the
+/// post-#617 identity. The rebuild is skipped only when BOTH rebuilt tables
+/// carry the head/base identity: validating just the artifacts unique key
+/// would let a partially migrated store (artifacts rebuilt, finding records
+/// not) skip the finding-record rebuild forever.
+fn review_identity_is_head_base(conn: &Connection) -> rusqlite::Result<bool> {
+    let has_base_sha_column = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('review_finding_records') WHERE name = 'base_sha')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !has_base_sha_column {
+        return Ok(false);
+    }
+    let mut stmt = conn.prepare("PRAGMA index_list('review_findings_artifacts')")?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(1)?, row.get::<_, String>(3)?))
+    })?;
+    for row in rows {
+        let (name, origin) = row?;
+        if origin != "u" {
+            continue;
+        }
+        let mut info = conn.prepare(&format!("PRAGMA index_info('{name}')"))?;
+        let columns: Vec<String> = info
+            .query_map([], |row| row.get::<_, String>(2))?
+            .collect::<std::result::Result<_, _>>()?;
+        if columns == ["run_id", "reviewed_head_sha", "base_sha"] {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn review_publication_from_row(
@@ -6047,10 +7151,18 @@ mod tests {
     }
 
     fn review_manifest(head: &str, findings: Vec<ReviewFinding>) -> ReviewFindingsManifest {
+        review_manifest_with_base(head, "base", findings)
+    }
+
+    fn review_manifest_with_base(
+        head: &str,
+        base: &str,
+        findings: Vec<ReviewFinding>,
+    ) -> ReviewFindingsManifest {
         ReviewFindingsManifest {
             schema_version: 1,
             reviewed_head_sha: head.to_string(),
-            base_sha: "base".to_string(),
+            base_sha: base.to_string(),
             spec_conformance_summary: "Conforms".to_string(),
             no_findings: findings.is_empty(),
             findings,
@@ -6318,9 +7430,1106 @@ mod tests {
         // Interrupted attempts consume the retry ceiling as well, preventing
         // repeated worker crashes from reclaiming the same head indefinitely.
         let counted = store
-            .count_review_attempt_failures_for_head("run-review", "head-1")
+            .count_review_attempt_failures_for_head("run-review", "head-1", "base-1")
             .unwrap();
         assert_eq!(counted, 3);
+    }
+
+    #[test]
+    fn base_only_change_opens_new_review_cycle() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        // Linked A2/A3 artifacts are represented by placeholder IDs because
+        // those stages are out of scope for this test.
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+
+        // Cycle A: (run, head-1, base-A).
+        let stage_a = store
+            .claim_stage_attempt(REVIEW_STAGE_NAME, claim_request("rev-1", "cfg"))
+            .unwrap();
+        let run_id = stage_a.run_id.clone();
+        store
+            .store_review_attempt_inputs(StoreReviewAttemptRequest {
+                attempt_id: "attempt-a".to_string(),
+                stage_run_id: stage_a.stage_run_id.clone(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                pr_number: 42,
+                reviewed_head_sha: "head-1".to_string(),
+                base_sha: "base-A".to_string(),
+            })
+            .unwrap();
+        let artifact_a = store
+            .store_review_artifact(StoreReviewArtifactRequest {
+                stage_run_id: stage_a.stage_run_id,
+                attempt_id: "attempt-a".to_string(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                reviewed_head_sha: "head-1".to_string(),
+                base_sha: "base-A".to_string(),
+                manifest: review_manifest_with_base(
+                    "head-1",
+                    "base-A",
+                    vec![review_finding("f-a", "src/a.rs", 10, "a")],
+                ),
+                bytes_len: 1,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+
+        // Cycle B: same head, base-only change opens a fresh cycle.
+        let stage_b = store
+            .claim_stage_attempt(REVIEW_STAGE_NAME, claim_request("rev-2", "cfg"))
+            .unwrap();
+        store
+            .store_review_attempt_inputs(StoreReviewAttemptRequest {
+                attempt_id: "attempt-b".to_string(),
+                stage_run_id: stage_b.stage_run_id.clone(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                pr_number: 42,
+                reviewed_head_sha: "head-1".to_string(),
+                base_sha: "base-B".to_string(),
+            })
+            .unwrap();
+        let artifact_b = store
+            .store_review_artifact(StoreReviewArtifactRequest {
+                stage_run_id: stage_b.stage_run_id,
+                attempt_id: "attempt-b".to_string(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                reviewed_head_sha: "head-1".to_string(),
+                base_sha: "base-B".to_string(),
+                manifest: review_manifest_with_base(
+                    "head-1",
+                    "base-B",
+                    vec![review_finding("f-b", "src/b.rs", 20, "b")],
+                ),
+                bytes_len: 1,
+                usage: StageUsage::default(),
+            })
+            .unwrap();
+
+        assert_ne!(artifact_a.artifact_id, artifact_b.artifact_id);
+        assert_eq!(
+            store.list_review_artifacts(&run_id).unwrap().len(),
+            2,
+            "both review cycles must be preserved"
+        );
+
+        assert!(store
+            .review_artifact_exists(&run_id, "head-1", "base-A")
+            .unwrap());
+        assert!(store
+            .review_artifact_exists(&run_id, "head-1", "base-B")
+            .unwrap());
+        assert!(!store
+            .review_artifact_exists(&run_id, "head-1", "base-C")
+            .unwrap());
+
+        // Finding records carry the base of their owning cycle.
+        let records_a = store
+            .list_review_finding_records_for_artifact(&artifact_a.artifact_id)
+            .unwrap();
+        let records_b = store
+            .list_review_finding_records_for_artifact(&artifact_b.artifact_id)
+            .unwrap();
+        assert_eq!(records_a.len(), 1);
+        assert_eq!(records_a[0].base_sha, "base-A");
+        assert_eq!(records_b[0].base_sha, "base-B");
+
+        // At most one completed artifact per (run, head, base): a duplicate
+        // cycle for base-A is rejected by the unique constraint.
+        let stage_dup = store
+            .claim_stage_attempt(REVIEW_STAGE_NAME, claim_request("rev-3", "cfg"))
+            .unwrap();
+        store
+            .store_review_attempt_inputs(StoreReviewAttemptRequest {
+                attempt_id: "attempt-dup".to_string(),
+                stage_run_id: stage_dup.stage_run_id.clone(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                pr_number: 42,
+                reviewed_head_sha: "head-1".to_string(),
+                base_sha: "base-A".to_string(),
+            })
+            .unwrap();
+        let dup_error = store
+            .store_review_artifact(StoreReviewArtifactRequest {
+                stage_run_id: stage_dup.stage_run_id,
+                attempt_id: "attempt-dup".to_string(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                reviewed_head_sha: "head-1".to_string(),
+                base_sha: "base-A".to_string(),
+                manifest: review_manifest_with_base("head-1", "base-A", vec![]),
+                bytes_len: 1,
+                usage: StageUsage::default(),
+            })
+            .unwrap_err();
+        assert!(
+            dup_error.to_string().contains("UNIQUE"),
+            "duplicate completed artifact for (run, head, base) must fail: {dup_error}"
+        );
+    }
+
+    #[test]
+    fn review_migration_preserves_artifacts_findings_and_publications() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let migrations_dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/triage/migrations");
+        let now = Utc::now().to_rfc3339();
+
+        // Build a pre-009 database: migrations 001..008 only, then a complete
+        // A4 fixture under the old (run, head) identity schema.
+        {
+            let conn = Connection::open(&path).unwrap();
+            let mut files: Vec<_> = std::fs::read_dir(&migrations_dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .collect();
+            files.sort();
+            for file in files {
+                let name = file.file_name().unwrap().to_string_lossy().to_string();
+                if name.starts_with("009_") {
+                    continue;
+                }
+                let sql = std::fs::read_to_string(&file).unwrap();
+                apply_migration(&conn, &sql).unwrap();
+            }
+            // Placeholder A2/A3 artifact references; foreign keys are
+            // disabled for the fixture inserts.
+            conn.execute_batch("PRAGMA foreign_keys = OFF").unwrap();
+            conn.execute(
+                "INSERT INTO factory_runs (
+                    run_id, forge_host, repository, issue_id, issue_identifier,
+                    issue_revision, status, current_stage, created_at, updated_at
+                 ) VALUES ('run-review', 'github.com', 'owner/repo', '123', '#123',
+                    'issue-rev', 'running', 'review', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO stage_runs (
+                    stage_run_id, run_id, stage, issue_revision, configuration_revision,
+                    attempt, owner_instance, status, harness, started_at, created_at, updated_at
+                 ) VALUES ('review-stage', 'run-review', 'review', 'issue-rev', 'cfg', 1,
+                    'owner-1', 'completed', 'pi', ?1, ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO review_attempts (
+                    attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                    implementation_artifact_id, spec_artifact_id, pr_number,
+                    reviewed_head_sha, base_sha, status, created_at, updated_at
+                 ) VALUES ('review-attempt', 'run-review', 'review-stage', 'draft',
+                    'implementation', 'spec', 42, 'head-sha', 'base-sha', 'completed', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO review_findings_artifacts (
+                    artifact_id, run_id, stage_run_id, attempt_id,
+                    draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                    schema_version, reviewed_head_sha, base_sha, manifest_json,
+                    no_findings, finding_count, received_at, bytes_len
+                 ) VALUES ('review-artifact', 'run-review', 'review-stage', 'review-attempt',
+                    'draft', 'implementation', 'spec', 1, 'head-sha', 'base-sha', ?1, 0, 1,
+                    ?2, 2)",
+                params![
+                    serde_json::json!({"schema_version":1,"reviewed_head_sha":"head-sha","base_sha":"base-sha","spec_conformance_summary":"none","no_findings":false,"findings":[{"finding_id":"f-1","severity":"major","category":"correctness","path":"src/a.rs","line":1,"claim":"c","rationale":"r","remediation":"m","confidence":0.9}]}).to_string(),
+                    now,
+                ],
+            )
+            .unwrap();
+            // Old-schema finding record: no base_sha column yet.
+            conn.execute(
+                "INSERT INTO review_finding_records (
+                    finding_record_id, run_id, artifact_id, finding_id, identity_key,
+                    reviewed_head_sha, severity, category, path, line, claim, rationale,
+                    remediation, confidence, lifecycle_state, created_at, updated_at
+                 ) VALUES ('finding-1', 'run-review', 'review-artifact', 'f-1', 'key-1',
+                    'head-sha', 'major', 'correctness', 'src/a.rs', 1, 'c', 'r', 'm', 0.9,
+                    'new', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, desired_effects_json,
+                    observed_baseline_json, expected_projection_json, created_at, updated_at
+                 ) VALUES ('review-intent', 'run-review', 'review-artifact', 'automatic',
+                    'applied', '[]', 0, '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        }
+
+        // Reopen: 009 rebuilds the review tables with the head/base identity.
+        let store = store(&path);
+        let artifact = store
+            .get_review_artifact("review-artifact")
+            .unwrap()
+            .expect("artifact must survive the migration");
+        assert_eq!(artifact.reviewed_head_sha, "head-sha");
+        assert_eq!(artifact.base_sha, "base-sha");
+
+        let findings = store
+            .list_review_finding_records_for_artifact("review-artifact")
+            .unwrap();
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].base_sha, "base-sha",
+            "finding base_sha must be backfilled from the artifact"
+        );
+
+        let intents = store
+            .list_review_publications_for_run("run-review")
+            .unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].status.as_str(), "applied");
+
+        // The rebuilt unique key is in force.
+        assert!(store
+            .review_artifact_exists("run-review", "head-sha", "base-sha")
+            .unwrap());
+        assert!(!store
+            .review_artifact_exists("run-review", "head-sha", "other-base")
+            .unwrap());
+    }
+
+    #[test]
+    fn verification_attempt_launch_cas_and_completion_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        let attempt = store
+            .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                attempt_id: "verification-attempt-1".to_string(),
+                stage_run_id: stage.stage_run_id.clone(),
+                pr_number: 42,
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                review_artifact_id: "review".to_string(),
+                configuration_revision: "cfg-rev".to_string(),
+                execution_profile: "local".to_string(),
+            })
+            .unwrap();
+        assert_eq!(attempt.status, "running");
+        assert_eq!(attempt.run_id, stage.run_id);
+
+        // Launching record + nonce, then a CAS identity transition.
+        let run_id = stage.run_id.clone();
+        let command_run_id = store
+            .record_verification_command_launch(RecordVerificationCommandLaunchRequest {
+                run_id: &run_id,
+                attempt_id: "verification-attempt-1",
+                ordinal: 1,
+                name: "affected-validation",
+                kind: VerificationCommandKind::Test,
+                configuration_revision: "cfg-rev",
+                command_sha256: "sha256-command",
+                execution_profile: "local",
+                launch_nonce: "nonce-1",
+            })
+            .unwrap();
+        let identity = ProcessIdentity {
+            pid: 4242,
+            process_group_id: 4242,
+            start_token: Some("token-1".to_string()),
+            executable: Some("/bin/sh".to_string()),
+        };
+        store
+            .cas_verification_launch_identity(&command_run_id, "nonce-1", &identity)
+            .unwrap();
+        // A stale nonce or already-transitioned record cannot claim the launch.
+        let stale = store.cas_verification_launch_identity(&command_run_id, "nonce-1", &identity);
+        assert!(stale.is_err(), "second CAS must fail");
+        let wrong_nonce =
+            store.cas_verification_launch_identity(&command_run_id, "nonce-2", &identity);
+        assert!(wrong_nonce.is_err(), "nonce mismatch must fail");
+
+        let runs = store
+            .list_verification_command_runs("verification-attempt-1")
+            .unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].status, "running");
+        assert_eq!(runs[0].pid, Some(4242));
+        assert_eq!(runs[0].process_group_id, Some(4242));
+        assert_eq!(runs[0].launch_nonce.as_deref(), Some("nonce-1"));
+
+        store
+            .complete_verification_command(CompleteVerificationCommandRequest {
+                command_run_id: &command_run_id,
+                status: "completed",
+                exit_code: Some(0),
+                termination_reason: None,
+                passed: Some(true),
+                output_tail: Some("ok"),
+                output_sha256: Some("out-digest"),
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                duration_ms: 12,
+            })
+            .unwrap();
+        let runs = store
+            .list_verification_command_runs("verification-attempt-1")
+            .unwrap();
+        assert_eq!(runs[0].status, "completed");
+        assert_eq!(runs[0].passed, Some(true));
+        assert_eq!(runs[0].duration_ms, Some(12));
+        assert_eq!(runs[0].output_sha256.as_deref(), Some("out-digest"));
+
+        // Not-run marking for commands skipped after a failure.
+        let skipped_id = store
+            .record_verification_command_launch(RecordVerificationCommandLaunchRequest {
+                run_id: &run_id,
+                attempt_id: "verification-attempt-1",
+                ordinal: 2,
+                name: "product-acceptance",
+                kind: VerificationCommandKind::Acceptance,
+                configuration_revision: "cfg-rev",
+                command_sha256: "sha256-acceptance",
+                execution_profile: "local",
+                launch_nonce: "nonce-2",
+            })
+            .unwrap();
+        store
+            .mark_verification_command_not_run(&skipped_id)
+            .unwrap();
+        let runs = store
+            .list_verification_command_runs("verification-attempt-1")
+            .unwrap();
+        assert_eq!(runs[1].status, "not_run");
+    }
+
+    #[test]
+    fn verification_metrics_aggregate_stage_activity() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        store
+            .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                attempt_id: "verification-attempt-1".to_string(),
+                stage_run_id: stage.stage_run_id.clone(),
+                pr_number: 42,
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                review_artifact_id: "review".to_string(),
+                configuration_revision: "cfg-rev".to_string(),
+                execution_profile: "local".to_string(),
+            })
+            .unwrap();
+        store
+            .complete_verification_stage_run(&stage.stage_run_id, StageUsage::default())
+            .unwrap();
+        store
+            .update_verification_attempt(UpdateVerificationAttemptRequest {
+                attempt_id: "verification-attempt-1",
+                status: Some("completed"),
+                workspace_path: None,
+                evidence_dir: None,
+                error: None,
+            })
+            .unwrap();
+        store
+            .store_verification_gate(&VerificationGateRecord {
+                gate_id: "gate-1".to_string(),
+                run_id: stage.run_id.clone(),
+                attempt_id: "verification-attempt-1".to_string(),
+                status: "passed".to_string(),
+                verifier_manifest: None,
+                command_summary: None,
+                computed_at: Some(Utc::now()),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        store
+            .store_verification_evidence(&[VerificationEvidenceRecord {
+                evidence_id: "evidence-1".to_string(),
+                run_id: stage.run_id.clone(),
+                attempt_id: "verification-attempt-1".to_string(),
+                relative_path: "reports/ok.json".to_string(),
+                sha256: "digest-1".to_string(),
+                bytes_len: 3,
+                collected_at: Utc::now(),
+            }])
+            .unwrap();
+        store
+            .record_verification_command_launch(RecordVerificationCommandLaunchRequest {
+                run_id: &stage.run_id,
+                attempt_id: "verification-attempt-1",
+                ordinal: 1,
+                name: "unit",
+                kind: VerificationCommandKind::Test,
+                configuration_revision: "cfg-rev",
+                command_sha256: "sha",
+                execution_profile: "local",
+                launch_nonce: "nonce",
+            })
+            .unwrap();
+        store
+            .complete_verification_command(CompleteVerificationCommandRequest {
+                command_run_id: &store
+                    .list_verification_command_runs("verification-attempt-1")
+                    .unwrap()[0]
+                    .command_run_id,
+                status: "completed",
+                exit_code: Some(0),
+                termination_reason: None,
+                passed: Some(true),
+                output_tail: Some("ok"),
+                output_sha256: Some("out"),
+                started_at: Utc::now(),
+                completed_at: Utc::now(),
+                duration_ms: 5,
+            })
+            .unwrap();
+
+        let metrics = store.verification_metrics().unwrap();
+        assert_eq!(metrics.total_attempts, 1);
+        assert_eq!(metrics.completed_attempts, 1);
+        assert_eq!(metrics.commands_run, 1);
+        assert_eq!(metrics.commands_passed, 1);
+        assert_eq!(metrics.gates_passed, 1);
+        assert_eq!(metrics.evidence_files, 1);
+    }
+
+    #[test]
+    fn verification_evidence_gate_and_publication_persist_durably() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        let run_id = stage.run_id.clone();
+        store
+            .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                attempt_id: "verification-attempt-1".to_string(),
+                stage_run_id: stage.stage_run_id.clone(),
+                pr_number: 42,
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                spec_artifact_id: "spec".to_string(),
+                implementation_artifact_id: "implementation".to_string(),
+                review_artifact_id: "review".to_string(),
+                configuration_revision: "cfg-rev".to_string(),
+                execution_profile: "local".to_string(),
+            })
+            .unwrap();
+
+        store
+            .store_verification_evidence(&[VerificationEvidenceRecord {
+                evidence_id: "evidence-1".to_string(),
+                run_id: run_id.clone(),
+                attempt_id: "verification-attempt-1".to_string(),
+                relative_path: "reports/summary.json".to_string(),
+                sha256: "digest-1".to_string(),
+                bytes_len: 42,
+                collected_at: Utc::now(),
+            }])
+            .unwrap();
+        let evidence = store
+            .list_verification_evidence("verification-attempt-1")
+            .unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].relative_path, "reports/summary.json");
+        assert_eq!(evidence[0].sha256, "digest-1");
+
+        store
+            .store_verification_gate(&VerificationGateRecord {
+                gate_id: "gate-1".to_string(),
+                run_id: run_id.clone(),
+                attempt_id: "verification-attempt-1".to_string(),
+                status: "passed".to_string(),
+                verifier_manifest: None,
+                command_summary: None,
+                computed_at: Some(Utc::now()),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        let gate = store
+            .get_verification_gate("verification-attempt-1")
+            .unwrap()
+            .expect("gate must persist");
+        assert_eq!(gate.status, "passed");
+
+        let intent = store
+            .create_verification_publication_intent(&run_id, "verification-attempt-1", "preview")
+            .unwrap();
+        store
+            .mark_verification_publication_applied(&intent.intent_id, "comment-99")
+            .unwrap();
+        let intents = store
+            .list_verification_publications_for_run(&run_id)
+            .unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].status.as_str(), "applied");
+        assert_eq!(intents[0].comment_id.as_deref(), Some("comment-99"));
+
+        // A retried attempt reuses a pending intent for the same run and kind
+        // instead of inserting another row, while an applied intent is never
+        // reused so a fresh head still opens a fresh publication.
+        let retry = store
+            .create_verification_publication_intent(&run_id, "verification-attempt-2", "preview")
+            .unwrap();
+        assert_ne!(retry.intent_id, intent.intent_id);
+        let fresh = store
+            .create_verification_publication_intent(&run_id, "verification-attempt-3", "preview")
+            .unwrap();
+        assert_eq!(fresh.intent_id, retry.intent_id);
+        assert_eq!(
+            store
+                .list_verification_publications_for_run(&run_id)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a5_eligibility_requires_applied_automatic_review_publication() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute(
+                "INSERT INTO factory_runs (
+                    run_id, forge_host, repository, issue_id, issue_identifier,
+                    issue_revision, status, current_stage, created_at, updated_at
+                 ) VALUES ('run-review', 'github.com', 'owner/repo', '123', '#123',
+                    'issue-rev', 'running', 'review', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO spec_run_state (
+                    run_id, approved_artifact_id, approved_version, decision, updated_at
+                 ) VALUES ('run-review', 'spec-artifact', 1, 'approved', ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_artifacts (
+                    artifact_id, run_id, stage_run_id, approved_artifact_id,
+                    approved_version, issue_revision, configuration_revision,
+                    schema_version, manifest_json, base_commit, approved_spec_path,
+                    validation_cycles, execution_profile, received_at, bytes_len
+                 ) VALUES ('implementation-artifact', 'run-review', 'implementation-stage',
+                    'spec-artifact', 1, 'issue-rev', 'config-rev', 1, '{}', 'base',
+                    'spec.md', 1, 'default', ?1, 1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('implementation-intent', 'run-review',
+                    'implementation-artifact', 'draft_pr', 'applied', '[]', '{}', '{}',
+                    '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_draft_pr_artifacts (
+                    artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 ) VALUES ('draft-artifact', 'run-review', 'implementation-artifact',
+                    'implementation-intent', 42, 'https://github.com/owner/repo/pull/42',
+                    1, 'feature', 'main', 'head-sha', 'marker', ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_attempts (
+                    attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                    implementation_artifact_id, spec_artifact_id, pr_number,
+                    reviewed_head_sha, base_sha, status, created_at, updated_at
+                 ) VALUES ('review-attempt', 'run-review', 'review-stage', 'draft-artifact',
+                    'implementation-artifact', 'spec-artifact', 42, 'head-sha', 'base-sha',
+                    'completed', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_findings_artifacts (
+                    artifact_id, run_id, stage_run_id, attempt_id,
+                    draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                    schema_version, reviewed_head_sha, base_sha, manifest_json,
+                    no_findings, finding_count, received_at, bytes_len
+                 ) VALUES ('review-artifact', 'run-review', 'review-stage', 'review-attempt',
+                    'draft-artifact', 'implementation-artifact', 'spec-artifact',
+                    1, 'head-sha', 'base-sha', ?1, 1, 0, ?2, 2)",
+                params![
+                    serde_json::json!({"schema_version":1,"reviewed_head_sha":"head-sha","base_sha":"base-sha","spec_conformance_summary":"none","no_findings":true,"findings":[]}).to_string(),
+                    now,
+                ],
+            )
+            .unwrap();
+
+        // No applied automatic publication yet: not eligible.
+        assert!(store
+            .list_a5_eligible_verification_runs(3)
+            .unwrap()
+            .is_empty());
+
+        // A preview publication is never sufficient.
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, route_state,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('preview-intent', 'run-review', 'review-artifact', 'preview',
+                    'applied', '[]', 0, 'Verification', '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        assert!(
+            store
+                .list_a5_eligible_verification_runs(3)
+                .unwrap()
+                .is_empty(),
+            "A4 preview publication must never feed A5"
+        );
+
+        // The applied automatic publication routes into the trigger state.
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, route_state,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('automatic-intent', 'run-review', 'review-artifact', 'automatic',
+                    'applied', '[]', 0, 'Verification', '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        let eligible = store.list_a5_eligible_verification_runs(3).unwrap();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].run_id, "run-review");
+        assert_eq!(eligible[0].review_artifact_id, "review-artifact");
+        assert_eq!(eligible[0].reviewed_head_sha, "head-sha");
+        assert_eq!(eligible[0].reviewed_base_sha, "base-sha");
+        assert_eq!(eligible[0].route_state.as_deref(), Some("Verification"));
+        assert_eq!(eligible[0].spec_artifact_id, "spec-artifact");
+        assert_eq!(
+            eligible[0].implementation_artifact_id,
+            "implementation-artifact"
+        );
+
+        // A nonterminal verification stage run removes the run from the queue.
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        assert_eq!(stage.stage, VERIFICATION_STAGE_NAME);
+        assert!(store
+            .list_a5_eligible_verification_runs(3)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn completed_verification_attempts_never_reopen_the_queue() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        seed_eligible_a5_run(&store);
+
+        // A completed attempt with a FAILED gate is expected product evidence
+        // and must hold: it never reopens the queue and never auto-retries.
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        store
+            .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                attempt_id: "verification-attempt-1".to_string(),
+                stage_run_id: stage.stage_run_id.clone(),
+                pr_number: 42,
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                spec_artifact_id: "spec-artifact".to_string(),
+                implementation_artifact_id: "implementation-artifact".to_string(),
+                review_artifact_id: "review-artifact".to_string(),
+                configuration_revision: "cfg-rev".to_string(),
+                execution_profile: "local".to_string(),
+            })
+            .unwrap();
+        store
+            .complete_verification_stage_run(&stage.stage_run_id, StageUsage::default())
+            .unwrap();
+        store
+            .store_verification_gate(&VerificationGateRecord {
+                gate_id: "gate-failed".to_string(),
+                run_id: stage.run_id.clone(),
+                attempt_id: "verification-attempt-1".to_string(),
+                status: "failed".to_string(),
+                verifier_manifest: None,
+                command_summary: None,
+                computed_at: Some(Utc::now()),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .unwrap();
+        store
+            .update_verification_attempt(UpdateVerificationAttemptRequest {
+                attempt_id: "verification-attempt-1",
+                status: Some("completed"),
+                workspace_path: None,
+                evidence_dir: None,
+                error: None,
+            })
+            .unwrap();
+        assert!(
+            store
+                .list_a5_eligible_verification_runs(3)
+                .unwrap()
+                .is_empty(),
+            "a completed failed gate must hold and never auto-retry"
+        );
+    }
+
+    #[test]
+    fn interrupted_verification_attempts_consume_the_retry_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        seed_eligible_a5_run(&store);
+
+        // Two interrupted attempts leave the run eligible once more...
+        for index in 1..=2u32 {
+            let stage = store
+                .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+                .unwrap();
+            store
+                .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                    attempt_id: format!("verification-attempt-{index}"),
+                    stage_run_id: stage.stage_run_id.clone(),
+                    pr_number: 42,
+                    reviewed_head_sha: "head-sha".to_string(),
+                    base_sha: "base-sha".to_string(),
+                    spec_artifact_id: "spec-artifact".to_string(),
+                    implementation_artifact_id: "implementation-artifact".to_string(),
+                    review_artifact_id: "review-artifact".to_string(),
+                    configuration_revision: "cfg-rev".to_string(),
+                    execution_profile: "local".to_string(),
+                })
+                .unwrap();
+            store
+                .interrupt_verification_stage_run(
+                    &stage.stage_run_id,
+                    &FactoryError::new(
+                        "verification_attempt_interrupted",
+                        "test",
+                        "crashed".to_string(),
+                        true,
+                        None,
+                    ),
+                )
+                .unwrap();
+            store
+                .update_verification_attempt(UpdateVerificationAttemptRequest {
+                    attempt_id: &format!("verification-attempt-{index}"),
+                    status: Some("interrupted"),
+                    workspace_path: None,
+                    evidence_dir: None,
+                    error: None,
+                })
+                .unwrap();
+        }
+        assert_eq!(
+            store.list_a5_eligible_verification_runs(3).unwrap().len(),
+            1
+        );
+        // ...but the third attempt exhausts max_attempts=3. Blocked attempts
+        // (configuration/infrastructure failures) consume the same budget so
+        // a broken fixture cannot reclaim the revision pair indefinitely.
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        store
+            .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                attempt_id: "verification-attempt-blocked".to_string(),
+                stage_run_id: stage.stage_run_id.clone(),
+                pr_number: 42,
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                spec_artifact_id: "spec-artifact".to_string(),
+                implementation_artifact_id: "implementation-artifact".to_string(),
+                review_artifact_id: "review-artifact".to_string(),
+                configuration_revision: "cfg-rev".to_string(),
+                execution_profile: "local".to_string(),
+            })
+            .unwrap();
+        store
+            .fail_attempt(
+                &stage.stage_run_id,
+                FactoryError::new(
+                    "verification_verifier_failed",
+                    "verification_coordinator",
+                    "blocked fixture".to_string(),
+                    false,
+                    None,
+                ),
+            )
+            .unwrap();
+        store
+            .update_verification_attempt(UpdateVerificationAttemptRequest {
+                attempt_id: "verification-attempt-blocked",
+                status: Some("blocked"),
+                workspace_path: None,
+                evidence_dir: None,
+                error: None,
+            })
+            .unwrap();
+        assert!(
+            store
+                .list_a5_eligible_verification_runs(3)
+                .unwrap()
+                .is_empty(),
+            "a blocked attempt must consume the retry budget"
+        );
+    }
+
+    #[test]
+    fn third_interrupted_attempt_exhausts_the_retry_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state.db");
+        let mut store = store(&path);
+        store
+            .conn
+            .execute_batch("PRAGMA foreign_keys = OFF")
+            .unwrap();
+        seed_eligible_a5_run(&store);
+
+        // Two interrupted attempts keep the run eligible; the third exhausts
+        // max_attempts=3, so a repeatedly crashing fixture cannot reclaim the
+        // same revision pair indefinitely.
+        for index in 1..=3u32 {
+            let stage = store
+                .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+                .unwrap();
+            store
+                .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                    attempt_id: format!("verification-attempt-{index}"),
+                    stage_run_id: stage.stage_run_id.clone(),
+                    pr_number: 42,
+                    reviewed_head_sha: "head-sha".to_string(),
+                    base_sha: "base-sha".to_string(),
+                    spec_artifact_id: "spec-artifact".to_string(),
+                    implementation_artifact_id: "implementation-artifact".to_string(),
+                    review_artifact_id: "review-artifact".to_string(),
+                    configuration_revision: "cfg-rev".to_string(),
+                    execution_profile: "local".to_string(),
+                })
+                .unwrap();
+            store
+                .interrupt_verification_stage_run(
+                    &stage.stage_run_id,
+                    &FactoryError::new(
+                        "verification_attempt_interrupted",
+                        "test",
+                        "crashed".to_string(),
+                        true,
+                        None,
+                    ),
+                )
+                .unwrap();
+            store
+                .update_verification_attempt(UpdateVerificationAttemptRequest {
+                    attempt_id: &format!("verification-attempt-{index}"),
+                    status: Some("interrupted"),
+                    workspace_path: None,
+                    evidence_dir: None,
+                    error: None,
+                })
+                .unwrap();
+        }
+        assert!(
+            store
+                .list_a5_eligible_verification_runs(3)
+                .unwrap()
+                .is_empty(),
+            "repeated crashes must not reclaim the same revision pair indefinitely"
+        );
+    }
+
+    /// Seed the full A2/A3/A4 fixture used by the eligibility tests.
+    fn seed_eligible_a5_run(store: &SqliteFactoryStore) {
+        let now = Utc::now().to_rfc3339();
+        store
+            .conn
+            .execute(
+                "INSERT INTO factory_runs (
+                    run_id, forge_host, repository, issue_id, issue_identifier,
+                    issue_revision, status, current_stage, created_at, updated_at
+                 ) VALUES ('run-review', 'github.com', 'owner/repo', '123', '#123',
+                    'issue-rev', 'running', 'review', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO spec_run_state (
+                    run_id, approved_artifact_id, approved_version, decision, updated_at
+                 ) VALUES ('run-review', 'spec-artifact', 1, 'approved', ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_artifacts (
+                    artifact_id, run_id, stage_run_id, approved_artifact_id,
+                    approved_version, issue_revision, configuration_revision,
+                    schema_version, manifest_json, base_commit, approved_spec_path,
+                    validation_cycles, execution_profile, received_at, bytes_len
+                 ) VALUES ('implementation-artifact', 'run-review', 'implementation-stage',
+                    'spec-artifact', 1, 'issue-rev', 'config-rev', 1, '{}', 'base',
+                    'spec.md', 1, 'default', ?1, 1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('implementation-intent', 'run-review',
+                    'implementation-artifact', 'draft_pr', 'applied', '[]', '{}', '{}',
+                    '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO implementation_draft_pr_artifacts (
+                    artifact_id, run_id, implementation_artifact_id, intent_id,
+                    number, url, draft, head, base, head_sha, marker, created_at
+                 ) VALUES ('draft-artifact', 'run-review', 'implementation-artifact',
+                    'implementation-intent', 42, 'https://github.com/owner/repo/pull/42',
+                    1, 'feature', 'main', 'head-sha', 'marker', ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_attempts (
+                    attempt_id, run_id, stage_run_id, draft_pr_artifact_id,
+                    implementation_artifact_id, spec_artifact_id, pr_number,
+                    reviewed_head_sha, base_sha, status, created_at, updated_at
+                 ) VALUES ('review-attempt', 'run-review', 'review-stage', 'draft-artifact',
+                    'implementation-artifact', 'spec-artifact', 42, 'head-sha', 'base-sha',
+                    'completed', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_findings_artifacts (
+                    artifact_id, run_id, stage_run_id, attempt_id,
+                    draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id,
+                    schema_version, reviewed_head_sha, base_sha, manifest_json,
+                    no_findings, finding_count, received_at, bytes_len
+                 ) VALUES ('review-artifact', 'run-review', 'review-stage', 'review-attempt',
+                    'draft-artifact', 'implementation-artifact', 'spec-artifact',
+                    1, 'head-sha', 'base-sha', ?1, 1, 0, ?2, 2)",
+                params![
+                    serde_json::json!({"schema_version":1,"reviewed_head_sha":"head-sha","base_sha":"base-sha","spec_conformance_summary":"none","no_findings":true,"findings":[]}).to_string(),
+                    now,
+                ],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO review_publication_intents (
+                    intent_id, run_id, artifact_id, kind, status,
+                    completed_steps_json, retry_count, route_state,
+                    desired_effects_json, observed_baseline_json,
+                    expected_projection_json, created_at, updated_at
+                 ) VALUES ('automatic-intent', 'run-review', 'review-artifact', 'automatic',
+                    'applied', '[]', 0, 'Verification', '{}', '{}', '{}', ?1, ?1)",
+                params![now],
+            )
+            .unwrap();
     }
 
     #[test]
@@ -6460,13 +8669,13 @@ mod tests {
         assert_eq!(candidates[0].head_sha, "old-head");
         assert_eq!(
             store
-                .count_review_attempt_failures_for_head("run-review", "old-head")
+                .count_review_attempt_failures_for_head("run-review", "old-head", "base")
                 .unwrap(),
             2
         );
         assert_eq!(
             store
-                .count_review_attempt_failures_for_head("run-review", "new-head")
+                .count_review_attempt_failures_for_head("run-review", "new-head", "base")
                 .unwrap(),
             0,
             "the live/new head starts with a fresh retry budget"
@@ -7981,7 +10190,7 @@ mod tests {
             .unwrap();
 
         let orphan = store
-            .get_orphaned_review_artifact_for_head(&run_id, "head-sha")
+            .get_orphaned_review_artifact(&run_id, "head-sha", "base-sha")
             .unwrap()
             .expect("artifact without an intent is recoverable");
         assert_eq!(orphan.artifact_id, "review-artifact");
@@ -7994,7 +10203,7 @@ mod tests {
             )
             .unwrap();
         assert!(store
-            .get_orphaned_review_artifact_for_head(&run_id, "head-sha")
+            .get_orphaned_review_artifact(&run_id, "head-sha", "base-sha")
             .unwrap()
             .is_none());
 

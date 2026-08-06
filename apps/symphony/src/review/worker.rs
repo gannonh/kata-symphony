@@ -59,7 +59,7 @@ impl ReviewWorker for LiveReviewWorker {
             "implementation_manifest": &request.implementation_manifest,
         });
         let prompt = format!(
-            "{}\n\nA4 worker contract: read only the JSON context in the stage-input directory and the cloned repository. Write one strict JSON review findings manifest to $SYMPHONY_STAGE_OUTPUT. Do not modify the repository, invoke forge or tracker APIs, push, approve, merge, or emit prose outside the output file.",
+            "{}\n\nA4 worker contract: read only the JSON context in the stage-input directory and the cloned repository. Use your file-write tool to write one strict JSON review findings manifest to the exact path in $SYMPHONY_STAGE_OUTPUT (do not merely print it in your reply). Do not modify the repository, invoke forge or tracker APIs, push, approve, merge, or emit prose outside the output file.",
             request.prompt
         );
         let raw_request = TriageRunnerRequest {
@@ -115,4 +115,57 @@ pub fn command_for_review(service: &ServiceConfig) -> Result<Vec<String>> {
         ));
     }
     Ok(command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_selection_prefers_stage_then_agent_defaults() {
+        let service = ServiceConfig {
+            review: crate::review::domain::ReviewConfig {
+                model: Some("review-model".to_string()),
+                ..crate::review::domain::ReviewConfig::default()
+            },
+            pi_agent: crate::domain::PiAgentConfig {
+                model: Some("agent-model".to_string()),
+                ..crate::domain::PiAgentConfig::default()
+            },
+            ..ServiceConfig::default()
+        };
+        assert_eq!(model_for_review(&service).as_deref(), Some("review-model"));
+        assert_eq!(harness_for_service(&service), TriageHarness::Pi);
+
+        let service = ServiceConfig {
+            review: crate::review::domain::ReviewConfig::default(),
+            pi_agent: crate::domain::PiAgentConfig {
+                model: Some("agent-model".to_string()),
+                ..crate::domain::PiAgentConfig::default()
+            },
+            ..ServiceConfig::default()
+        };
+        assert_eq!(model_for_review(&service).as_deref(), Some("agent-model"));
+
+        let service = ServiceConfig {
+            agent_backend: AgentBackend::Codex,
+            codex: crate::domain::CodexConfig {
+                command: vec!["codex".to_string()],
+                ..crate::domain::CodexConfig::default()
+            },
+            ..ServiceConfig::default()
+        };
+        assert_eq!(model_for_review(&service), None);
+        assert_eq!(harness_for_service(&service), TriageHarness::Codex);
+        assert!(command_for_review(&service).is_ok());
+
+        let service = ServiceConfig {
+            pi_agent: crate::domain::PiAgentConfig {
+                command: vec![],
+                ..crate::domain::PiAgentConfig::default()
+            },
+            ..ServiceConfig::default()
+        };
+        assert!(command_for_review(&service).is_err());
+    }
 }

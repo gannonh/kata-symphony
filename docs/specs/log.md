@@ -1,5 +1,13 @@
 # Specs Update Log
 
+## 2026-08-06
+
+- Verified #617 (A5.1 reviewed PR verification evidence preview): all 35 acceptance criteria pass with evidence. Live UAT on gannonh/uat-symphony + Project #16 exercised the full A2→A5 pipeline (passing gate), a deterministic acceptance failure (failed gate holds, no auto-retry), a kill -9 crash window with same-group descendant termination and restart recovery, the Docker command profile, HTTP/evidence-metadata read-back, and cleanup; credential scan clean. Evidence: `uat-evidence/a5-preview-20260805-151931/` and the sanitized bundle gist. Sign-off pending user acceptance.
+
+## 2026-08-05
+
+**A5.1 reviewed PR verification evidence preview (#617) built.** Implemented the A4 head/base review-cycle identity (migration 009), stage-neutral verification foundations (launch barrier, Docker create-before-start, staged blob hardening), the evidence pipeline (exact-head commands, bounded evidence, read-only verifier, deterministic gate), and the preview surfaces (owned comment, HTTP/evidence metadata, metrics, doctor, starter config). Added [ADR-0006](../adrs/0006-a5-verification-evidence-and-gate.md) for exact-head verification evidence, deterministic gate authority, and failed-gate hold semantics.
+
 ## 2026-08-04
 
 **A4 residual verification accepted for #615.** Formal worker credential isolation, bounded Docker execution, a fixture-controlled real Pi worker changed-head re-review, and live HTTP foreign-review recovery passed. #615 is verified and closed. The full Symphony suite has five implementation-branch git-bundle failures. Evidence: `uat-evidence/mixed-20260804-202303/` and the [final Verify report](https://github.com/gannonh/kata-symphony/issues/615#issuecomment-5184771982).

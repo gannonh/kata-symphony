@@ -74,6 +74,10 @@ pub const STARTER_ASSETS: &[StarterAsset] = &[
         contents: include_str!("../prompts/implementation-repair.md"),
     },
     StarterAsset {
+        path: ".symphony/prompts/verification.md",
+        contents: include_str!("../prompts/verification.md"),
+    },
+    StarterAsset {
         path: ".symphony/docs/WORKFLOW-REFERENCE.md",
         contents: include_str!("../docs/WORKFLOW-REFERENCE.md"),
     },

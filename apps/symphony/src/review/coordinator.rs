@@ -187,12 +187,13 @@ where
         }
         if self
             .store
-            .review_artifact_exists_for_head(&candidate.run_id, &pull.head.sha)?
+            .review_artifact_exists(&candidate.run_id, &pull.head.sha, &pull.base.sha)?
         {
-            if let Some(artifact) = self
-                .store
-                .get_orphaned_review_artifact_for_head(&candidate.run_id, &pull.head.sha)?
-            {
+            if let Some(artifact) = self.store.get_orphaned_review_artifact(
+                &candidate.run_id,
+                &pull.head.sha,
+                &pull.base.sha,
+            )? {
                 let spec = self
                     .store
                     .get_spec_artifact(&candidate.approved_artifact_id)?
@@ -241,9 +242,11 @@ where
             // publication. Reconciliation owns pending intents.
             return Ok(ProcessOutcome::Waiting);
         }
-        let failed_attempts = self
-            .store
-            .count_review_attempt_failures_for_head(&candidate.run_id, &pull.head.sha)?;
+        let failed_attempts = self.store.count_review_attempt_failures_for_head(
+            &candidate.run_id,
+            &pull.head.sha,
+            &pull.base.sha,
+        )?;
         if failed_attempts >= service.review.max_attempts.max(1) {
             return Ok(ProcessOutcome::Waiting);
         }
@@ -772,10 +775,11 @@ where
             let error_message = error.to_string();
             let cycle_reopened =
                 error_message.contains("review cycle reopened while worker was running");
-            let retry_exhausted = match self
-                .store
-                .count_review_attempt_failures_for_head(&candidate.run_id, &pull.head.sha)
-            {
+            let retry_exhausted = match self.store.count_review_attempt_failures_for_head(
+                &candidate.run_id,
+                &pull.head.sha,
+                &pull.base.sha,
+            ) {
                 Ok(failed_attempts) => {
                     review_attempt_retry_exhausted(failed_attempts, service.review.max_attempts)
                 }
@@ -784,6 +788,7 @@ where
                         event = "review_attempt_retry_count_failed",
                         run_id = %candidate.run_id,
                         reviewed_head_sha = %pull.head.sha,
+                        base_sha = %pull.base.sha,
                         error = %count_error,
                         "could not determine review attempt retry ceiling"
                     );
@@ -1607,9 +1612,13 @@ enum ReviewPublicationResult {
 mod tests {
     use super::{
         pull_revision_changed, resolve_review_path, review_attempt_retry_exhausted,
-        review_publication_pr_number,
+        review_publication_effects, review_publication_pr_number, review_route_state,
     };
+    use crate::domain::ServiceConfig;
     use crate::github::client::{GithubPullRequest, GithubPullRequestRef};
+    use crate::review::domain::ReviewFindingsArtifactRecord;
+    use crate::review::manifest::{ReviewFinding, ReviewFindingsManifest};
+    use chrono::Utc;
 
     #[test]
     fn review_attempt_retry_ceiling_resets_for_a_new_head() {
@@ -1632,6 +1641,26 @@ mod tests {
         );
     }
 
+    fn review_artifact(manifest: ReviewFindingsManifest) -> ReviewFindingsArtifactRecord {
+        ReviewFindingsArtifactRecord {
+            artifact_id: "review-artifact".to_string(),
+            run_id: "run".to_string(),
+            stage_run_id: "stage".to_string(),
+            attempt_id: "attempt".to_string(),
+            draft_pr_artifact_id: "draft".to_string(),
+            implementation_artifact_id: "impl".to_string(),
+            spec_artifact_id: "spec".to_string(),
+            schema_version: 1,
+            reviewed_head_sha: manifest.reviewed_head_sha.clone(),
+            base_sha: manifest.base_sha.clone(),
+            manifest,
+            no_findings: false,
+            finding_count: 0,
+            received_at: Utc::now(),
+            bytes_len: 1,
+        }
+    }
+
     fn pull(head: &str, base: &str) -> GithubPullRequest {
         GithubPullRequest {
             number: 1,
@@ -1650,6 +1679,85 @@ mod tests {
             user: None,
             body: None,
         }
+    }
+
+    #[test]
+    fn clean_reviews_route_to_completion_and_blocking_findings_to_changes() {
+        let service = ServiceConfig {
+            review: crate::review::domain::ReviewConfig {
+                blocking_severity: crate::review::manifest::ReviewSeverity::Blocking,
+                completion_route: Some(crate::review::domain::ReviewRoute {
+                    state: "Human Review".to_string(),
+                }),
+                changes_requested_route: Some(crate::review::domain::ReviewRoute {
+                    state: "Rework".to_string(),
+                }),
+                ..crate::review::domain::ReviewConfig::default()
+            },
+            ..ServiceConfig::default()
+        };
+        let clean = review_artifact(ReviewFindingsManifest {
+            schema_version: 1,
+            reviewed_head_sha: "head-1".to_string(),
+            base_sha: "base-1".to_string(),
+            spec_conformance_summary: "none".to_string(),
+            no_findings: true,
+            findings: vec![],
+        });
+        assert_eq!(
+            review_route_state(&clean, &service).as_deref(),
+            Some("Human Review")
+        );
+        let blocking = review_artifact(ReviewFindingsManifest {
+            schema_version: 1,
+            reviewed_head_sha: "head-1".to_string(),
+            base_sha: "base-1".to_string(),
+            spec_conformance_summary: "none".to_string(),
+            no_findings: false,
+            findings: vec![ReviewFinding {
+                finding_id: "f".to_string(),
+                severity: crate::review::manifest::ReviewSeverity::Blocking,
+                category: crate::review::manifest::ReviewFindingCategory::SpecConformance,
+                path: "src/a.rs".to_string(),
+                line: 1,
+                end_line: None,
+                claim: "c".to_string(),
+                rationale: "r".to_string(),
+                remediation: "m".to_string(),
+                acceptance_criterion: None,
+                confidence: 0.9,
+            }],
+        });
+        assert_eq!(
+            review_route_state(&blocking, &service).as_deref(),
+            Some("Rework")
+        );
+        let effects = review_publication_effects(
+            63,
+            &crate::triage::store::A4EligibleReviewRun {
+                run_id: "run".to_string(),
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                issue_id: "63".to_string(),
+                issue_identifier: "#63".to_string(),
+                draft_pr_artifact_id: "draft".to_string(),
+                implementation_artifact_id: "impl".to_string(),
+                approved_artifact_id: "spec".to_string(),
+                pr_number: 63,
+                pr_url: "url".to_string(),
+                draft: true,
+                head: "feature".to_string(),
+                base: "main".to_string(),
+                head_sha: "head-sha".to_string(),
+            },
+            &pull("head-1", "base-1"),
+            &service,
+            Some("Human Review".to_string()),
+            2,
+        );
+        assert_eq!(effects["pr_number"], 63);
+        assert_eq!(effects["route_state"], "Human Review");
+        assert_eq!(effects["approved_spec_version"], 2);
     }
 
     #[test]

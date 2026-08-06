@@ -11,6 +11,7 @@ When `/domain-modeling` or architecture work records a decision, place it under 
 * [ADR-0003 A2 spec-stage artifacts and human gates](0003-a2-spec-stage-artifacts-and-gates.md) - stage-scoped attempts, isolated review turns, immutable versions, tracker decisions, pinned implementation handoff
 * [ADR-0004 A3 implementation durability and bundles](0004-a3-implementation-durability-and-bundles.md) - stage-scoped A3 records, content-addressed Git bundles, credential-isolated local execution, preview-only publication
 * [ADR-0005 A4 durable review publication fencing](0005-a4-review-publication-fencing.md) - active lease CAS fencing, heartbeat renewal, changed-head supersession, and explicit operator recovery
+* [ADR-0006 A5 verification evidence and gate](0006-a5-verification-evidence-and-gate.md) - head/base review identity, exact-head bundle execution, pre-release launch barriers, digest-addressed evidence, verifier-proof deterministic gate, failed-gate hold
 
 # Proposed
 

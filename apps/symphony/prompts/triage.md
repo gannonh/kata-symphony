@@ -21,7 +21,7 @@ Choose exactly one canonical route and write a schema-version-1 triage artifact.
 
 ## Output contract
 
-Write UTF-8 JSON (at most 64 KiB) to the path in `SYMPHONY_STAGE_OUTPUT`. Symphony validates the file; unknown fields are rejected.
+Use your file-write tool to write UTF-8 JSON (at most 64 KiB) to the exact path in `SYMPHONY_STAGE_OUTPUT` (do not merely print it in your reply). Symphony validates the file; unknown fields are rejected.
 
 ```json
 {

@@ -4,6 +4,6 @@ Read `$SYMPHONY_STAGE_INPUT` for allowlisted files (`issue.json`, `approved-spec
 
 First run `pwd` and `git rev-parse --show-toplevel`. Use only the checkout reported by those commands for file and Git operations. Never use `git -C` or paths that point outside that checkout.
 
-Write only the schema-version-1 JSON implementation manifest to `$SYMPHONY_STAGE_OUTPUT` with the same completed/blocked contract as the initial implementation turn. Include a fresh `head_commit` for completed repairs.
+Use your file-write tool to write only the schema-version-1 JSON implementation manifest to the exact path in `$SYMPHONY_STAGE_OUTPUT` with the same completed/blocked contract as the initial implementation turn (do not merely print it in your reply). Include a fresh `head_commit` for completed repairs.
 
 Do not push, create pull requests, or mutate tracker state. Do not add unknown JSON fields.

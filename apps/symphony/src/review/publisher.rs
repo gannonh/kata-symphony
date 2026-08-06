@@ -1064,6 +1064,7 @@ mod tests {
                 finding_id: "persisting".to_string(),
                 identity_key: "src/lib.rs:10:10:keep in summary".to_string(),
                 reviewed_head_sha: "head".to_string(),
+                base_sha: "base".to_string(),
                 severity: ReviewSeverity::Major,
                 category: ReviewFindingCategory::Correctness,
                 path: "src/lib.rs".to_string(),
@@ -1085,6 +1086,7 @@ mod tests {
                 finding_id: "new".to_string(),
                 identity_key: "src/lib.rs:10:10:fresh".to_string(),
                 reviewed_head_sha: "head".to_string(),
+                base_sha: "base".to_string(),
                 severity: ReviewSeverity::Major,
                 category: ReviewFindingCategory::Correctness,
                 path: "src/lib.rs".to_string(),
@@ -1115,10 +1117,13 @@ mod tests {
         let (artifact, _intent) = setup_preview_fixture(&store).await;
 
         assert!(store
-            .review_artifact_exists_for_head(&artifact.run_id, "head")
+            .review_artifact_exists(&artifact.run_id, "head", "base")
             .unwrap());
         assert!(!store
-            .review_artifact_exists_for_head(&artifact.run_id, "new-head")
+            .review_artifact_exists(&artifact.run_id, "new-head", "base")
+            .unwrap());
+        assert!(!store
+            .review_artifact_exists(&artifact.run_id, "head", "other-base")
             .unwrap());
     }
 

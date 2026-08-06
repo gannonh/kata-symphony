@@ -76,6 +76,21 @@ pub trait FactoryRunQuery: Send + Sync {
     fn review_metrics(&self) -> Result<ReviewRunMetricsHttpResponse, String> {
         Err("review metrics are not available".to_string())
     }
+    fn verification_metrics(&self) -> Result<VerificationRunMetricsHttpResponse, String> {
+        Err("verification metrics are not available".to_string())
+    }
+    fn get_verification_run(
+        &self,
+        _run_id: &str,
+    ) -> Result<Option<VerificationRunHttpResponse>, String> {
+        Err("verification runs are not available".to_string())
+    }
+    fn get_verification_evidence(
+        &self,
+        _run_id: &str,
+    ) -> Result<Option<Vec<VerificationEvidenceHttp>>, String> {
+        Err("verification evidence is not available".to_string())
+    }
     fn get_artifact(
         &self,
         _run_id: &str,
@@ -489,6 +504,8 @@ pub struct FactoryRunHttpResponse {
     pub implementation: Option<FactoryRunImplementationHttp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<FactoryRunReviewHttp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<FactoryRunVerificationHttp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -732,6 +749,7 @@ pub fn factory_run_http_response(
         spec: None,
         implementation: None,
         review: None,
+        verification: None,
     }
 }
 
@@ -973,6 +991,134 @@ pub fn attach_review_http_response(
     attach_review_http_response_with_attempts(response, artifact, publication, &[]);
 }
 
+/// Verification-stage run surface: attempt, command results, gate, evidence
+/// metadata (digests only — never blob bytes), and the preview publication.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactoryRunVerificationHttp {
+    pub attempt_id: String,
+    pub pr_number: u64,
+    pub reviewed_head_sha: String,
+    pub base_sha: String,
+    pub status: String,
+    pub configuration_revision: String,
+    pub execution_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<crate::triage::domain::FactoryError>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<VerificationCommandHttp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate: Option<VerificationGateHttp>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<VerificationEvidenceHttp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publication: Option<FactoryRunVerificationPublicationHttp>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VerificationCommandHttp {
+    pub ordinal: u32,
+    pub name: String,
+    pub kind: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_sha256: Option<String>,
+    pub execution_profile: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VerificationGateHttp {
+    pub gate_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub computed_at: Option<chrono::DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_summary: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VerificationEvidenceHttp {
+    pub evidence_id: String,
+    pub relative_path: String,
+    pub sha256: String,
+    pub bytes_len: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FactoryRunVerificationPublicationHttp {
+    pub intent_id: String,
+    pub kind: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment_id: Option<String>,
+}
+
+pub fn attach_verification_http_response(
+    response: &mut FactoryRunHttpResponse,
+    attempt: Option<&crate::verification::domain::VerificationAttemptRecord>,
+    commands: &[crate::verification::domain::VerificationCommandRunRecord],
+    gate: Option<&crate::verification::domain::VerificationGateRecord>,
+    evidence: &[crate::verification::domain::VerificationEvidenceRecord],
+    publication: Option<&crate::verification::domain::VerificationPublicationIntent>,
+) {
+    let Some(attempt) = attempt else {
+        return;
+    };
+    response.verification = Some(FactoryRunVerificationHttp {
+        attempt_id: attempt.attempt_id.clone(),
+        pr_number: attempt.pr_number,
+        reviewed_head_sha: attempt.reviewed_head_sha.clone(),
+        base_sha: attempt.base_sha.clone(),
+        status: attempt.status.clone(),
+        configuration_revision: attempt.configuration_revision.clone(),
+        execution_profile: attempt.execution_profile.clone(),
+        error: attempt.error.clone(),
+        commands: commands
+            .iter()
+            .map(|command| VerificationCommandHttp {
+                ordinal: command.ordinal,
+                name: command.name.clone(),
+                kind: command.kind.as_str().to_string(),
+                status: command.status.clone(),
+                exit_code: command.exit_code,
+                passed: command.passed,
+                termination_reason: command.termination_reason.clone(),
+                duration_ms: command.duration_ms,
+                output_sha256: command.output_sha256.clone(),
+                execution_profile: command.execution_profile.clone(),
+            })
+            .collect(),
+        gate: gate.map(|gate| VerificationGateHttp {
+            gate_id: gate.gate_id.clone(),
+            status: gate.status.clone(),
+            computed_at: gate.computed_at,
+            command_summary: gate.command_summary.clone(),
+        }),
+        evidence: evidence
+            .iter()
+            .map(|record| VerificationEvidenceHttp {
+                evidence_id: record.evidence_id.clone(),
+                relative_path: record.relative_path.clone(),
+                sha256: record.sha256.clone(),
+                bytes_len: record.bytes_len,
+            })
+            .collect(),
+        publication: publication.map(|intent| FactoryRunVerificationPublicationHttp {
+            intent_id: intent.intent_id.clone(),
+            kind: intent.kind.clone(),
+            status: intent.status.as_str().to_string(),
+            comment_id: intent.comment_id.clone(),
+        }),
+    });
+}
+
 pub fn attach_review_http_response_with_attempts(
     response: &mut FactoryRunHttpResponse,
     artifact: Option<&crate::review::domain::ReviewFindingsArtifactRecord>,
@@ -1120,6 +1266,61 @@ pub fn review_run_metrics_http_response(
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct VerificationRunMetricsHttpResponse {
+    #[serde(flatten)]
+    pub base: FactoryRunMetricsHttpResponse,
+    pub interrupted_attempts: u64,
+    pub superseded_attempts: u64,
+    pub blocked_attempts: u64,
+    pub commands_run: u64,
+    pub commands_passed: u64,
+    pub commands_failed: u64,
+    pub gates_passed: u64,
+    pub gates_failed: u64,
+    pub evidence_files: u64,
+    pub evidence_bytes: u64,
+    pub preview_publications: u64,
+    pub command_duration_avg_ms: u64,
+    pub max_same_head_attempts: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub model_usage: Vec<serde_json::Value>,
+}
+
+pub fn verification_run_metrics_http_response(
+    metrics: crate::verification::domain::VerificationMetricsAggregate,
+) -> VerificationRunMetricsHttpResponse {
+    let mut base = factory_run_metrics_http_response(metrics.base);
+    base.stage = crate::verification::domain::VERIFICATION_STAGE_NAME.to_string();
+    // The shared attempt counters are reused: verification reports its own
+    // attempt counts through the base keys so no JSON keys are duplicated.
+    base.total_attempts = metrics.total_attempts;
+    base.completed_attempts = metrics.completed_attempts;
+    base.failed_attempts = metrics.failed_attempts;
+    VerificationRunMetricsHttpResponse {
+        base,
+        interrupted_attempts: metrics.interrupted_attempts,
+        superseded_attempts: metrics.superseded_attempts,
+        blocked_attempts: metrics.blocked_attempts,
+        commands_run: metrics.commands_run,
+        commands_passed: metrics.commands_passed,
+        commands_failed: metrics.commands_failed,
+        gates_passed: metrics.gates_passed,
+        gates_failed: metrics.gates_failed,
+        evidence_files: metrics.evidence_files,
+        evidence_bytes: metrics.evidence_bytes,
+        preview_publications: metrics.preview_publications,
+        command_duration_avg_ms: metrics.command_duration_avg_ms,
+        max_same_head_attempts: metrics.max_same_head_attempts,
+        input_tokens: metrics.input_tokens,
+        output_tokens: metrics.output_tokens,
+        total_tokens: metrics.total_tokens,
+        model_usage: metrics.model_usage,
+    }
+}
+
 pub fn implementation_run_metrics_http_response(
     metrics: crate::implementation::domain::ImplementationMetricsAggregate,
 ) -> ImplementationRunMetricsHttpResponse {
@@ -1234,6 +1435,14 @@ pub fn build_router(state: HttpServerState) -> Router {
             get(get_factory_artifact),
         )
         .route("/api/v1/factory-runs/{run_id}", get(get_factory_run_by_id))
+        .route(
+            "/api/v1/verification/runs/{run_id}",
+            get(get_verification_run_by_id),
+        )
+        .route(
+            "/api/v1/verification/runs/{run_id}/evidence",
+            get(get_verification_run_evidence),
+        )
         .route("/api/v1/factory-runs", get(get_factory_runs))
         .route("/api/v1/{issue_identifier}", get(get_issue))
         .route("/api/v1/refresh", post(post_refresh))
@@ -2751,6 +2960,71 @@ fn parse_severity_filter(raw: Option<&str>) -> Result<BTreeSet<EventSeverity>, E
     Ok(severities)
 }
 
+/// Run-scoped verification view: attempt, commands, gate, and evidence
+/// metadata. Blob bytes are never served over the unauthenticated API.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct VerificationRunHttpResponse {
+    pub run_id: String,
+    pub forge_host: String,
+    pub repository: String,
+    pub issue_identifier: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<FactoryRunVerificationHttp>,
+    pub evidence: Vec<VerificationEvidenceHttp>,
+}
+
+async fn get_verification_run_by_id(
+    State(state): State<HttpServerState>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let Some(query) = state.factory_run_query.as_ref() else {
+        return factory_store_unavailable().into_response();
+    };
+
+    match query.get_verification_run(run_id.trim()) {
+        Ok(Some(run)) => Json(run).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorEnvelope {
+                error: ApiError {
+                    code: "verification_run_not_found",
+                    message: format!("Verification run '{run_id}' was not found"),
+                    status: StatusCode::NOT_FOUND.as_u16(),
+                    details: None,
+                },
+            }),
+        )
+            .into_response(),
+        Err(message) => factory_query_failed(&message).into_response(),
+    }
+}
+
+async fn get_verification_run_evidence(
+    State(state): State<HttpServerState>,
+    Path(run_id): Path<String>,
+) -> impl IntoResponse {
+    let Some(query) = state.factory_run_query.as_ref() else {
+        return factory_store_unavailable().into_response();
+    };
+
+    match query.get_verification_evidence(run_id.trim()) {
+        Ok(Some(evidence)) => Json(evidence).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorEnvelope {
+                error: ApiError {
+                    code: "verification_run_not_found",
+                    message: format!("Verification run '{run_id}' was not found"),
+                    status: StatusCode::NOT_FOUND.as_u16(),
+                    details: None,
+                },
+            }),
+        )
+            .into_response(),
+        Err(message) => factory_query_failed(&message).into_response(),
+    }
+}
+
 async fn get_factory_run_by_id(
     State(state): State<HttpServerState>,
     Path(run_id): Path<String>,
@@ -2879,13 +3153,17 @@ async fn get_factory_run_metrics(
             Ok(metrics) => Json(metrics).into_response(),
             Err(message) => factory_query_failed(&message).into_response(),
         },
+        crate::verification::domain::VERIFICATION_STAGE_NAME => match query.verification_metrics() {
+            Ok(metrics) => Json(metrics).into_response(),
+            Err(message) => factory_query_failed(&message).into_response(),
+        },
         _ => (
             StatusCode::BAD_REQUEST,
             Json(ApiErrorEnvelope {
                 error: ApiError {
                     code: "invalid_query",
                     message:
-                        "Query parameter 'stage' must be 'triage', 'spec', 'implementation', or 'review'"
+                        "Query parameter 'stage' must be 'triage', 'spec', 'implementation', 'review', or 'verification'"
                             .to_string(),
                     status: StatusCode::BAD_REQUEST.as_u16(),
                     details: Some(serde_json::json!({

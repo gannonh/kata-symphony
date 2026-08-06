@@ -42,6 +42,6 @@ run_segment \
 run_segment \
   "Symphony UAT evidence cleanup contracts (node test)" \
   node --test \
-  .agents/skills/uat-evidence/scripts/symphony-runtime-config.test.mjs
+  scripts/ci/symphony-runtime-config.test.mjs
 
 echo "GitHub backend validation lane completed successfully."

@@ -216,6 +216,95 @@ pub fn render_formal_review_body_with_records(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::review::manifest::{ReviewFindingCategory, ReviewFindingsManifest};
+
+    fn artifact_with(findings: Vec<ReviewFinding>) -> ReviewFindingsArtifactRecord {
+        let count = findings.len() as u32;
+        ReviewFindingsArtifactRecord {
+            artifact_id: "artifact".to_string(),
+            run_id: "run".to_string(),
+            stage_run_id: "stage".to_string(),
+            attempt_id: "attempt".to_string(),
+            draft_pr_artifact_id: "draft".to_string(),
+            implementation_artifact_id: "impl".to_string(),
+            spec_artifact_id: "spec".to_string(),
+            schema_version: 1,
+            reviewed_head_sha: "head-sha".to_string(),
+            base_sha: "base-sha".to_string(),
+            manifest: ReviewFindingsManifest {
+                schema_version: 1,
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                spec_conformance_summary: "Conforms".to_string(),
+                no_findings: findings.is_empty(),
+                findings,
+            },
+            no_findings: count == 0,
+            finding_count: count,
+            received_at: chrono::Utc::now(),
+            bytes_len: 1,
+        }
+    }
+
+    fn finding(
+        id: &str,
+        severity: ReviewSeverity,
+        category: ReviewFindingCategory,
+        path: &str,
+        line: u32,
+    ) -> ReviewFinding {
+        ReviewFinding {
+            finding_id: id.to_string(),
+            severity,
+            category,
+            path: path.to_string(),
+            line,
+            end_line: None,
+            claim: "claim".to_string(),
+            rationale: "rationale".to_string(),
+            remediation: "remediation".to_string(),
+            acceptance_criterion: None,
+            confidence: 0.9,
+        }
+    }
+
+    #[test]
+    fn preview_comment_renders_finding_tables_and_no_findings_affirmation() {
+        let clean = artifact_with(vec![]);
+        let clean_body = render_preview_comment("intent-1", "run-1", &clean);
+        assert!(clean_body.contains("**No findings.**"));
+        assert!(clean_body.contains("reviewed head `head-sha` against base `base-sha`"));
+        assert!(clean_body.contains("preview only"));
+
+        let mut first = finding(
+            "f-1",
+            ReviewSeverity::Blocking,
+            ReviewFindingCategory::SpecConformance,
+            "src/a.rs",
+            10,
+        );
+        first.end_line = Some(12);
+        first.claim = "scope|drift".to_string();
+        let second = finding(
+            "f-2",
+            ReviewSeverity::Major,
+            ReviewFindingCategory::Correctness,
+            "src/b.rs",
+            3,
+        );
+        let with_findings = artifact_with(vec![first, second]);
+        let body = render_preview_comment("intent-1", "run-1", &with_findings);
+        assert!(body.contains("Findings: 2"));
+        assert!(body.contains("| blocking | 1 |"));
+        assert!(body.contains("| major | 1 |"));
+        assert!(body.contains("`f-1` | `blocking` | `spec-conformance` | `src/a.rs`:10-12"));
+        assert!(
+            body.contains("scope\\|drift"),
+            "pipe in claims must be escaped"
+        );
+        assert!(body.contains("`f-2` | `major` | `correctness` | `src/b.rs`:3"));
+        assert!(!body.contains("**No findings.**"));
+    }
 
     #[test]
     fn parses_hunk_ranges() {

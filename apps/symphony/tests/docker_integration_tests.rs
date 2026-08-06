@@ -186,6 +186,190 @@ async fn test_start_and_stop_container() {
     }
 }
 
+/// A5 verification command execution in Docker: create-before-start identity,
+/// credential-free env, timeout stop/remove, and stopped-orphan cleanup.
+#[tokio::test]
+#[serial]
+async fn test_verification_command_runs_in_docker_without_credentials() {
+    if !docker_tests_enabled() {
+        return;
+    }
+    if !docker::is_docker_available().await {
+        return;
+    }
+
+    let previous_api_key = std::env::var("OPENAI_API_KEY").ok();
+    std::env::set_var("OPENAI_API_KEY", "sk-test");
+    let previous_gh_token = std::env::var("GH_TOKEN").ok();
+    std::env::set_var("GH_TOKEN", "gh-secret-must-not-leak");
+
+    let dir = tempdir().expect("tempdir should create");
+    let workspace = dir.path().join("workspace");
+    let evidence = dir.path().join("evidence");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    std::fs::create_dir_all(&evidence).expect("evidence dir");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let request = symphony::verification::executor::CommandExecutionRequest {
+        attempt_id: unique_identifier("docker-verification-attempt"),
+        command_name: "docker-command".to_string(),
+        workspace_path: workspace.clone(),
+        evidence_dir: evidence.clone(),
+        home_dir: home,
+        command: "printf ok > /workspace/ran.txt; env".to_string(),
+        timeout_ms: 120_000,
+        execution_profile: symphony::implementation::domain::ExecutionProfile::Docker,
+        docker: Some(DockerConfig {
+            image: "alpine:3.20".to_string(),
+            codex_auth: DockerCodexAuth::Env,
+            ..DockerConfig::default()
+        }),
+    };
+
+    let mut recorded = None;
+    let result = symphony::verification::executor::execute_command(&request, |identity| {
+        match identity {
+            symphony::verification::executor::LaunchIdentity::Container { container_id } => {
+                assert!(!container_id.is_empty());
+                recorded = Some(container_id);
+            }
+            _ => panic!("expected container identity"),
+        }
+        Ok(())
+    })
+    .await
+    .expect("docker command should run");
+
+    assert!(result.passed, "command should pass: {:?}", result.output);
+    assert!(result.exit_code == Some(0));
+    assert!(
+        workspace.join("ran.txt").is_file(),
+        "workspace mount should work"
+    );
+    let env_output = format!("{}{}", result.output.stdout_tail, result.output.stderr_tail);
+    assert!(
+        !env_output.contains("gh-secret-must-not-leak"),
+        "docker command env must not carry forge credentials"
+    );
+    assert!(
+        !env_output.contains("GH_TOKEN"),
+        "docker command env must omit GH_TOKEN"
+    );
+    // The container was created, recorded, started, and removed.
+    assert!(recorded.is_some());
+    let inspect = Command::new("docker")
+        .args(["inspect", &recorded.expect("container id")])
+        .output()
+        .await
+        .expect("docker inspect should run");
+    assert!(
+        !inspect.status.success(),
+        "container should be removed after completion"
+    );
+
+    if let Some(value) = previous_api_key {
+        std::env::set_var("OPENAI_API_KEY", value);
+    } else {
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+    if let Some(value) = previous_gh_token {
+        std::env::set_var("GH_TOKEN", value);
+    } else {
+        std::env::remove_var("GH_TOKEN");
+    }
+}
+
+/// A timed-out Docker command is stopped and removed, and stopped label
+/// orphans left by a crash are removed by recovery cleanup.
+#[tokio::test]
+#[serial]
+async fn test_verification_docker_timeout_and_orphan_cleanup() {
+    if !docker_tests_enabled() {
+        return;
+    }
+    if !docker::is_docker_available().await {
+        return;
+    }
+
+    let previous_api_key = std::env::var("OPENAI_API_KEY").ok();
+    std::env::set_var("OPENAI_API_KEY", "sk-test");
+
+    let dir = tempdir().expect("tempdir should create");
+    let workspace = dir.path().join("workspace");
+    let evidence = dir.path().join("evidence");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&workspace).expect("workspace dir");
+    std::fs::create_dir_all(&evidence).expect("evidence dir");
+    std::fs::create_dir_all(&home).expect("home dir");
+
+    let request = symphony::verification::executor::CommandExecutionRequest {
+        attempt_id: unique_identifier("docker-timeout-attempt"),
+        command_name: "docker-timeout".to_string(),
+        workspace_path: workspace,
+        evidence_dir: evidence,
+        home_dir: home,
+        command: "sleep 60".to_string(),
+        timeout_ms: 3_000,
+        execution_profile: symphony::implementation::domain::ExecutionProfile::Docker,
+        docker: Some(DockerConfig {
+            image: "alpine:3.20".to_string(),
+            codex_auth: DockerCodexAuth::Env,
+            ..DockerConfig::default()
+        }),
+    };
+
+    let error = symphony::verification::executor::execute_command(&request, |_| Ok(()))
+        .await
+        .expect_err("timed-out command must fail");
+    assert!(
+        matches!(
+            error,
+            symphony::verification::executor::CommandRunFailure::TimedOut(_)
+        ),
+        "expected timeout, got {error}"
+    );
+
+    // A stopped label-matching orphan left by a crash (never started, never
+    // recorded) must be removed by recovery cleanup.
+    let orphan = Command::new("docker")
+        .args([
+            "create",
+            "--label",
+            "symphony.stage=verification",
+            "--label",
+            "symphony.attempt=crash-left-orphan",
+            "alpine:3.20",
+            "true",
+        ])
+        .output()
+        .await
+        .expect("docker create should run");
+    assert!(orphan.status.success(), "orphan fixture should be created");
+    let orphan_id = String::from_utf8_lossy(&orphan.stdout).trim().to_string();
+    assert!(!orphan_id.is_empty(), "orphan fixture needs an id");
+
+    let removed = symphony::verification::executor::cleanup_stopped_verification_containers()
+        .await
+        .expect("orphan cleanup should run");
+    assert!(removed >= 1, "the stopped orphan must be removed");
+    let inspect = Command::new("docker")
+        .args(["inspect", &orphan_id])
+        .output()
+        .await
+        .expect("docker inspect should run");
+    assert!(
+        !inspect.status.success(),
+        "the stopped orphan must no longer exist"
+    );
+
+    if let Some(value) = previous_api_key {
+        std::env::set_var("OPENAI_API_KEY", value);
+    } else {
+        std::env::remove_var("OPENAI_API_KEY");
+    }
+}
+
 #[tokio::test]
 #[serial]
 async fn test_exec_in_container() {

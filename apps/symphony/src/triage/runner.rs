@@ -333,7 +333,7 @@ pub async fn run_isolated_spec_turn(
         return Err(error);
     }
     let prompt = format!(
-        "{}\n\nSymphony stage contract: read only the allowlisted inputs in `{}`. Write the required JSON object to the exact path in {OUTPUT_ENV}. Do not modify the repository.",
+        "{}\n\nSymphony stage contract: read only the allowlisted inputs in `{}`. Use your file-write tool to write the required JSON object to the exact path in {OUTPUT_ENV} (do not merely print it in your reply). Do not modify the repository.",
         turn.prompt,
         layout.stage_input_path.display()
     );

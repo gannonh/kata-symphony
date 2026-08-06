@@ -9,6 +9,7 @@ dist
 
 # code coverage
 coverage
+coverage-*/
 *.lcov
 
 # Playwright e2e test artifacts

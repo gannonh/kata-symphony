@@ -14,11 +14,12 @@ use crate::github::client::GithubClient;
 use crate::github::projects_v2::ProjectsV2Client;
 use crate::http_server::{
     attach_implementation_http_response, attach_review_http_response_with_attempts,
-    attach_spec_http_response, factory_run_http_response, factory_run_metrics_http_response,
-    implementation_run_metrics_http_response, review_run_metrics_http_response,
-    spec_run_metrics_http_response, FactoryArtifactHttpResponse, FactoryRunHttpResponse,
-    FactoryRunMetricsHttpResponse, FactoryRunQuery, ImplementationRunMetricsHttpResponse,
-    ReviewRunMetricsHttpResponse, SpecRunMetricsHttpResponse,
+    attach_spec_http_response, attach_verification_http_response, factory_run_http_response,
+    factory_run_metrics_http_response, implementation_run_metrics_http_response,
+    review_run_metrics_http_response, spec_run_metrics_http_response, FactoryArtifactHttpResponse,
+    FactoryRunHttpResponse, FactoryRunMetricsHttpResponse, FactoryRunQuery,
+    ImplementationRunMetricsHttpResponse, ReviewRunMetricsHttpResponse, SpecRunMetricsHttpResponse,
+    VerificationRunHttpResponse,
 };
 use crate::implementation::coordinator::{
     ImplementationCoordinator, ImplementationCoordinatorConfig,
@@ -55,6 +56,31 @@ pub struct SharedFactoryStore {
 }
 
 impl SharedFactoryStore {
+    /// Test-only helper: run a raw SQL batch against the store, panicking on
+    /// failure so fixtures cannot silently mis-seed.
+    #[cfg(test)]
+    pub fn execute_batch_for_test(&self, sql: &str) {
+        self.with_store_mut(|store| {
+            store
+                .connection_for_test()
+                .execute_batch(sql)
+                .map_err(|error| SymphonyError::StorageError(error.to_string()))
+        })
+        .expect("fixture SQL batch must succeed");
+    }
+
+    /// Test-only helper: disable foreign keys so fixtures can use placeholder
+    /// artifact ids from other stages.
+    #[cfg(test)]
+    pub fn disable_foreign_keys_for_test(&self) {
+        let _ = self.with_store_mut(|store| {
+            store
+                .connection_for_test()
+                .execute_batch("PRAGMA foreign_keys = OFF")
+                .map_err(|error| SymphonyError::StorageError(error.to_string()))
+        });
+    }
+
     pub fn open(path: &Path, busy_timeout_ms: u64) -> Result<Self> {
         let store = SqliteFactoryStore::acquire_lock_and_migrate(path, busy_timeout_ms)?;
         Ok(Self {
@@ -502,24 +528,33 @@ impl SharedFactoryStore {
         self.with_store(|store| store.list_a4_eligible_review_runs(max_attempts))
     }
 
-    pub fn review_artifact_exists_for_head(&self, run_id: &str, head_sha: &str) -> Result<bool> {
-        self.with_store(|store| store.review_artifact_exists_for_head(run_id, head_sha))
+    pub fn review_artifact_exists(
+        &self,
+        run_id: &str,
+        head_sha: &str,
+        base_sha: &str,
+    ) -> Result<bool> {
+        self.with_store(|store| store.review_artifact_exists(run_id, head_sha, base_sha))
     }
 
     pub fn count_review_attempt_failures_for_head(
         &self,
         run_id: &str,
-        head_sha: &str,
+        reviewed_head_sha: &str,
+        base_sha: &str,
     ) -> Result<u32> {
-        self.with_store(|store| store.count_review_attempt_failures_for_head(run_id, head_sha))
+        self.with_store(|store| {
+            store.count_review_attempt_failures_for_head(run_id, reviewed_head_sha, base_sha)
+        })
     }
 
-    pub fn get_orphaned_review_artifact_for_head(
+    pub fn get_orphaned_review_artifact(
         &self,
         run_id: &str,
         head_sha: &str,
+        base_sha: &str,
     ) -> Result<Option<crate::review::domain::ReviewFindingsArtifactRecord>> {
-        self.with_store(|store| store.get_orphaned_review_artifact_for_head(run_id, head_sha))
+        self.with_store(|store| store.get_orphaned_review_artifact(run_id, head_sha, base_sha))
     }
 
     pub fn store_review_attempt_inputs(
@@ -553,6 +588,194 @@ impl SharedFactoryStore {
         artifact_id: &str,
     ) -> Result<Option<crate::review::domain::ReviewFindingsArtifactRecord>> {
         self.with_store(|store| store.get_review_artifact(artifact_id))
+    }
+
+    // ── A5 verification wrappers ──────────────────────────────────────────
+
+    pub fn claim_verification_attempt(
+        &self,
+        request: ClaimAttemptRequest,
+    ) -> Result<StageRunRecord> {
+        self.with_store_mut(|store| {
+            store.claim_stage_attempt(
+                crate::verification::domain::VERIFICATION_STAGE_NAME,
+                request,
+            )
+        })
+    }
+
+    pub fn list_a5_eligible_verification_runs(
+        &self,
+        max_attempts: u32,
+    ) -> Result<Vec<crate::triage::store::A5EligibleVerificationRun>> {
+        self.with_store(|store| store.list_a5_eligible_verification_runs(max_attempts))
+    }
+
+    pub fn store_verification_attempt_inputs(
+        &self,
+        request: crate::triage::store::StoreVerificationAttemptRequest,
+    ) -> Result<crate::verification::domain::VerificationAttemptRecord> {
+        self.with_store_mut(|store| store.store_verification_attempt_inputs(request))
+    }
+
+    pub fn get_verification_attempt(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<crate::verification::domain::VerificationAttemptRecord>> {
+        self.with_store(|store| store.get_verification_attempt(attempt_id))
+    }
+
+    pub fn list_verification_attempts(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::verification::domain::VerificationAttemptRecord>> {
+        self.with_store(|store| store.list_verification_attempts(run_id))
+    }
+
+    pub fn list_running_verification_attempts(
+        &self,
+    ) -> Result<Vec<crate::verification::domain::VerificationAttemptRecord>> {
+        self.with_store(|store| store.list_running_verification_attempts())
+    }
+
+    pub fn update_verification_attempt(
+        &self,
+        request: crate::triage::store::UpdateVerificationAttemptRequest<'_>,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.update_verification_attempt(request))
+    }
+
+    pub fn record_verification_command_launch(
+        &self,
+        request: crate::triage::store::RecordVerificationCommandLaunchRequest<'_>,
+    ) -> Result<String> {
+        self.with_store_mut(|store| store.record_verification_command_launch(request))
+    }
+
+    pub fn cas_verification_launch_identity(
+        &self,
+        command_run_id: &str,
+        launch_nonce: &str,
+        identity: &crate::triage::process_identity::ProcessIdentity,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.cas_verification_launch_identity(command_run_id, launch_nonce, identity)
+        })
+    }
+
+    pub fn cas_verification_container(
+        &self,
+        command_run_id: &str,
+        launch_nonce: &str,
+        container_id: &str,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.cas_verification_container(command_run_id, launch_nonce, container_id)
+        })
+    }
+
+    pub fn complete_verification_command(
+        &self,
+        request: crate::triage::store::CompleteVerificationCommandRequest<'_>,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.complete_verification_command(request))
+    }
+
+    pub fn mark_verification_command_not_run(&self, command_run_id: &str) -> Result<()> {
+        self.with_store_mut(|store| store.mark_verification_command_not_run(command_run_id))
+    }
+
+    pub fn list_verification_command_runs(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<crate::verification::domain::VerificationCommandRunRecord>> {
+        self.with_store(|store| store.list_verification_command_runs(attempt_id))
+    }
+
+    pub fn store_verification_evidence(
+        &self,
+        records: &[crate::verification::domain::VerificationEvidenceRecord],
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.store_verification_evidence(records))
+    }
+
+    pub fn list_verification_evidence(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Vec<crate::verification::domain::VerificationEvidenceRecord>> {
+        self.with_store(|store| store.list_verification_evidence(attempt_id))
+    }
+
+    pub fn store_verification_gate(
+        &self,
+        record: &crate::verification::domain::VerificationGateRecord,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.store_verification_gate(record))
+    }
+
+    pub fn get_verification_gate(
+        &self,
+        attempt_id: &str,
+    ) -> Result<Option<crate::verification::domain::VerificationGateRecord>> {
+        self.with_store(|store| store.get_verification_gate(attempt_id))
+    }
+
+    pub fn create_verification_publication_intent(
+        &self,
+        run_id: &str,
+        attempt_id: &str,
+        kind: &str,
+    ) -> Result<crate::verification::domain::VerificationPublicationIntent> {
+        self.with_store_mut(|store| {
+            store.create_verification_publication_intent(run_id, attempt_id, kind)
+        })
+    }
+
+    pub fn list_verification_publications_for_run(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<crate::verification::domain::VerificationPublicationIntent>> {
+        self.with_store(|store| store.list_verification_publications_for_run(run_id))
+    }
+
+    pub fn mark_verification_publication_applied(
+        &self,
+        intent_id: &str,
+        comment_id: &str,
+    ) -> Result<()> {
+        self.with_store_mut(|store| {
+            store.mark_verification_publication_applied(intent_id, comment_id)
+        })
+    }
+
+    pub fn record_verifier_identity(
+        &self,
+        attempt_id: &str,
+        identity: &crate::triage::process_identity::ProcessIdentity,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.record_verifier_identity(attempt_id, identity))
+    }
+
+    pub fn complete_verification_stage_run(
+        &self,
+        stage_run_id: &str,
+        usage: crate::triage::domain::StageUsage,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.complete_verification_stage_run(stage_run_id, usage))
+    }
+
+    pub fn interrupt_verification_stage_run(
+        &self,
+        stage_run_id: &str,
+        error: &FactoryError,
+    ) -> Result<()> {
+        self.with_store_mut(|store| store.interrupt_verification_stage_run(stage_run_id, error))
+    }
+
+    pub fn verification_metrics(
+        &self,
+    ) -> Result<crate::verification::domain::VerificationMetricsAggregate> {
+        self.with_store(|store| store.verification_metrics())
     }
 
     pub fn list_review_finding_records_for_artifact(
@@ -836,6 +1059,49 @@ impl SharedFactoryStore {
         f(&mut guard)
     }
 
+    fn load_verification_run_response(
+        &self,
+        run_id: &str,
+    ) -> std::result::Result<Option<VerificationRunHttpResponse>, String> {
+        self.with_store(|store| {
+            let Some(run) = store.get_run_by_id(run_id)? else {
+                return Ok(None);
+            };
+            let attempts = store.list_verification_attempts(&run.run_id)?;
+            let Some(attempt) = attempts.first().cloned() else {
+                return Ok(None);
+            };
+            let commands = store.list_verification_command_runs(&attempt.attempt_id)?;
+            let gate = store.get_verification_gate(&attempt.attempt_id)?;
+            let evidence = store.list_verification_evidence(&attempt.attempt_id)?;
+            let publication = store
+                .list_verification_publications_for_run(&run.run_id)?
+                .into_iter()
+                .next();
+            let mut response = factory_run_http_response(&run, &[], None, None);
+            attach_verification_http_response(
+                &mut response,
+                Some(&attempt),
+                &commands,
+                gate.as_ref(),
+                &evidence,
+                publication.as_ref(),
+            );
+            let verification = response.verification.clone();
+            Ok(Some(VerificationRunHttpResponse {
+                run_id: run.run_id.clone(),
+                forge_host: run.forge_host,
+                repository: run.repository,
+                issue_identifier: run.issue_identifier,
+                verification: verification.clone(),
+                evidence: verification
+                    .map(|verification| verification.evidence)
+                    .unwrap_or_default(),
+            }))
+        })
+        .map_err(|err| err.to_string())
+    }
+
     fn load_run_response(
         &self,
         lookup: impl FnOnce(&SqliteFactoryStore) -> Result<Option<FactoryRunRecord>>,
@@ -914,6 +1180,35 @@ impl SharedFactoryStore {
                 review_artifact,
                 review_publication.as_ref(),
                 &attempts,
+            );
+            let verification_attempts = store.list_verification_attempts(&run.run_id)?;
+            let verification_attempt = verification_attempts.first().cloned();
+            let verification_commands = verification_attempt
+                .as_ref()
+                .map(|attempt| store.list_verification_command_runs(&attempt.attempt_id))
+                .transpose()?
+                .unwrap_or_default();
+            let verification_gate = verification_attempt
+                .as_ref()
+                .map(|attempt| store.get_verification_gate(&attempt.attempt_id))
+                .transpose()?
+                .flatten();
+            let verification_evidence = verification_attempt
+                .as_ref()
+                .map(|attempt| store.list_verification_evidence(&attempt.attempt_id))
+                .transpose()?
+                .unwrap_or_default();
+            let verification_publication = store
+                .list_verification_publications_for_run(&run.run_id)?
+                .into_iter()
+                .next();
+            attach_verification_http_response(
+                &mut response,
+                verification_attempt.as_ref(),
+                &verification_commands,
+                verification_gate.as_ref(),
+                &verification_evidence,
+                verification_publication.as_ref(),
             );
             Ok(Some(response))
         })
@@ -1171,6 +1466,51 @@ impl FactoryRunQuery for SharedFactoryStore {
         self.with_store(|store| store.review_metrics())
             .map(review_run_metrics_http_response)
             .map_err(|err| err.to_string())
+    }
+
+    fn verification_metrics(
+        &self,
+    ) -> std::result::Result<crate::http_server::VerificationRunMetricsHttpResponse, String> {
+        self.with_store(|store| store.verification_metrics())
+            .map(crate::http_server::verification_run_metrics_http_response)
+            .map_err(|err| err.to_string())
+    }
+
+    fn get_verification_run(
+        &self,
+        run_id: &str,
+    ) -> std::result::Result<Option<crate::http_server::VerificationRunHttpResponse>, String> {
+        self.load_verification_run_response(run_id)
+    }
+
+    fn get_verification_evidence(
+        &self,
+        run_id: &str,
+    ) -> std::result::Result<Option<Vec<crate::http_server::VerificationEvidenceHttp>>, String>
+    {
+        self.with_store(|store| {
+            let run = store.get_run_by_id(run_id)?;
+            let Some(run) = run else {
+                return Ok(None);
+            };
+            let attempts = store.list_verification_attempts(&run.run_id)?;
+            let Some(attempt) = attempts.first() else {
+                return Ok(None);
+            };
+            let evidence = store.list_verification_evidence(&attempt.attempt_id)?;
+            Ok(Some(
+                evidence
+                    .iter()
+                    .map(|record| crate::http_server::VerificationEvidenceHttp {
+                        evidence_id: record.evidence_id.clone(),
+                        relative_path: record.relative_path.clone(),
+                        sha256: record.sha256.clone(),
+                        bytes_len: record.bytes_len,
+                    })
+                    .collect(),
+            ))
+        })
+        .map_err(|err| err.to_string())
     }
 
     fn blocked_publications(
@@ -1498,6 +1838,12 @@ pub struct TriageRuntime {
     implementation_coordinator:
         Option<ImplementationCoordinator<GithubClient, GithubClient, LiveImplementationHarness>>,
     review_coordinator: Option<ReviewCoordinator<GithubClient, LiveReviewWorker>>,
+    verification_coordinator: Option<
+        crate::verification::coordinator::VerificationCoordinator<
+            GithubClient,
+            crate::verification::worker::LiveVerificationWorker,
+        >,
+    >,
     store: SharedFactoryStore,
     sessions: Arc<Mutex<crate::domain::TriageSessionRegistry>>,
     factory_sessions: Arc<Mutex<FactorySessionRegistry>>,
@@ -1761,15 +2107,64 @@ impl TriageRuntime {
                     .max(1),
             },
         );
-        if let Some(events) = emitter {
+        if let Some(events) = emitter.clone() {
             review_coordinator = review_coordinator.with_events(events);
         }
+
+        // A5 recovery still needs the coordinator while attempts are running,
+        // even if verification.enabled is currently false; the workspace root
+        // is resolved only when the coordinator is actually needed so an
+        // unrelated triage/spec/review-only startup is never blocked by
+        // verification workspace configuration.
+        let verification_needed = config.verification.enabled
+            || match store.list_running_verification_attempts() {
+                Ok(attempts) => !attempts.is_empty(),
+                Err(error) => {
+                    tracing::warn!(
+                        event = "verification_recovery_probe_failed",
+                        error = %error,
+                        "could not read running verification attempts; skipping A5 recovery"
+                    );
+                    false
+                }
+            };
+        let verification_coordinator = if verification_needed {
+            let workspace_root = crate::verification::coordinator::resolve_workspace_root(config)?;
+            let mut coordinator = crate::verification::coordinator::VerificationCoordinator::new(
+                store.clone(),
+                client.clone(),
+                client.clone(),
+                crate::github::projects_v2::ProjectsV2Client::new(client.clone()),
+                crate::verification::worker::LiveVerificationWorker,
+                crate::verification::coordinator::VerificationCoordinatorConfig {
+                    forge_host: forge_host.clone(),
+                    repository: repository.clone(),
+                    owner_instance: owner_instance.clone(),
+                    workflow_dir: workflow_dir.clone(),
+                    project_owner: owner.to_string(),
+                    project_number,
+                    max_pages: config
+                        .triage
+                        .max_intake_pages
+                        .max(config.spec.max_intake_pages)
+                        .max(1),
+                    workspace_root,
+                },
+            );
+            if let Some(events) = emitter.clone() {
+                coordinator = coordinator.with_events(events);
+            }
+            Some(coordinator)
+        } else {
+            None
+        };
 
         Ok(Some(Self {
             coordinator,
             spec_coordinator,
             implementation_coordinator: Some(implementation_coordinator),
             review_coordinator: Some(review_coordinator),
+            verification_coordinator,
             store,
             sessions,
             factory_sessions,
@@ -1829,6 +2224,38 @@ impl TriageRuntime {
 
     pub async fn poll(&mut self, config: &ServiceConfig) -> Result<TriagePollSummary> {
         self.reconcile_factory_sessions();
+        // A5 claim/reconciliation runs before legacy dispatch so verification
+        // recovery can terminate owned processes before any new dispatch.
+        if let Some(coordinator) = self.verification_coordinator.as_mut() {
+            match coordinator.poll_once(config).await {
+                Ok(summary) => {
+                    if summary.verification_enabled
+                        || summary.candidates_seen > 0
+                        || summary.recovered > 0
+                    {
+                        tracing::info!(
+                            event = "verification_poll_completed",
+                            enabled = summary.verification_enabled,
+                            candidates_seen = summary.candidates_seen,
+                            attempts_started = summary.attempts_started,
+                            attempts_completed = summary.attempts_completed,
+                            attempts_failed = summary.attempts_failed,
+                            waiting = summary.waiting,
+                            recovered = summary.recovered,
+                            preview_published = summary.preview_published,
+                            "verification poll completed"
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        event = "verification_poll_failed",
+                        error = %error,
+                        "verification poll failed; continuing orchestrator loop"
+                    );
+                }
+            }
+        }
         let triage = if let Some(coordinator) = self.coordinator.as_mut() {
             coordinator.poll_once(config).await?
         } else {

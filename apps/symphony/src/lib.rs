@@ -1,4 +1,5 @@
 pub mod config;
+pub mod credential_env;
 pub mod domain;
 pub mod error;
 pub mod helper;
@@ -22,6 +23,7 @@ pub mod spec;
 pub mod starter_assets;
 pub mod supervisor;
 pub mod triage;
+pub mod verification;
 
 pub mod codex;
 pub mod doctor;
