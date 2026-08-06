@@ -9,7 +9,7 @@ Before finishing:
 1. Keep the committed approved-spec file at the configured path byte-identical to the provided render.
 2. Leave a clean Git tree on a single head commit that implements the acceptance criteria.
 3. Change at least one non-spec repository path.
-4. Write only the schema-version-1 JSON implementation manifest to `$SYMPHONY_STAGE_OUTPUT`:
+4. Use your file-write tool to write only the schema-version-1 JSON implementation manifest to the exact path in `$SYMPHONY_STAGE_OUTPUT` (do not merely print it in your reply):
 
 ```json
 {"schema_version":1,"status":"completed","head_commit":"<40-or-64-char lowercase hex>","summary":"what changed","acceptance_criteria":[{"index":1,"status":"implemented","evidence":[{"kind":"repository","reference":"path","summary":"why"}]}],"known_limitations":[]}

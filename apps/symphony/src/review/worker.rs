@@ -59,7 +59,7 @@ impl ReviewWorker for LiveReviewWorker {
             "implementation_manifest": &request.implementation_manifest,
         });
         let prompt = format!(
-            "{}\n\nA4 worker contract: read only the JSON context in the stage-input directory and the cloned repository. Write one strict JSON review findings manifest to $SYMPHONY_STAGE_OUTPUT. Do not modify the repository, invoke forge or tracker APIs, push, approve, merge, or emit prose outside the output file.",
+            "{}\n\nA4 worker contract: read only the JSON context in the stage-input directory and the cloned repository. Use your file-write tool to write one strict JSON review findings manifest to the exact path in $SYMPHONY_STAGE_OUTPUT (do not merely print it in your reply). Do not modify the repository, invoke forge or tracker APIs, push, approve, merge, or emit prose outside the output file.",
             request.prompt
         );
         let raw_request = TriageRunnerRequest {

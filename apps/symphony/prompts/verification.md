@@ -22,8 +22,9 @@ You may also inspect the cloned repository read-only.
 
 ## Output
 
-Write exactly one strict JSON object to `$SYMPHONY_STAGE_OUTPUT` with this
-shape and nothing else:
+Use your file-write tool to write exactly one strict JSON object to the exact
+path in `$SYMPHONY_STAGE_OUTPUT` with this shape and nothing else (do not
+merely print it in your reply):
 
 ```json
 {

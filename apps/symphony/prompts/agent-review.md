@@ -1,7 +1,8 @@
 ## A4 review worker contract
 
 Review the pinned pull request and produce one JSON object at
-`$SYMPHONY_STAGE_OUTPUT`. The stage input directory contains
+`$SYMPHONY_STAGE_OUTPUT` using your file-write tool (do not merely print it
+in your reply). The stage input directory contains
 `review-context.json`, with the unified diff, pull-request description, approved
 specification, and A3 implementation manifest. The repository checkout is
 read-only context for files touched by the diff.
