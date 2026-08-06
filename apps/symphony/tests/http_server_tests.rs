@@ -1819,11 +1819,11 @@ async fn test_factory_run_metrics_stage_validation() {
         verification_metrics: Some(symphony::http_server::VerificationRunMetricsHttpResponse {
             base: symphony::http_server::FactoryRunMetricsHttpResponse {
                 stage: "verification".to_string(),
+                total_attempts: 3,
+                completed_attempts: 2,
+                failed_attempts: 1,
                 ..metrics.clone()
             },
-            total_attempts: 3,
-            completed_attempts: 2,
-            failed_attempts: 1,
             interrupted_attempts: 0,
             superseded_attempts: 0,
             blocked_attempts: 1,
@@ -1835,7 +1835,7 @@ async fn test_factory_run_metrics_stage_validation() {
             evidence_files: 5,
             evidence_bytes: 120,
             preview_publications: 1,
-            attempt_duration_avg_ms: 4000,
+            command_duration_avg_ms: 4000,
             max_same_head_attempts: 2,
             input_tokens: 10,
             output_tokens: 5,

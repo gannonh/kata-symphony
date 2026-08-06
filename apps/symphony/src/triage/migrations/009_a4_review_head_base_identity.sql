@@ -3,9 +3,13 @@
 -- base_sha) so a base-only change opens a fresh A4 cycle. Data, findings, and
 -- publication references are preserved; only uniqueness constraints and
 -- indexes are rebuilt. Runs with foreign_keys OFF because the rebuild drops
--- tables that review_publication_intents references.
+-- tables that review_publication_intents references. The whole rebuild is one
+-- transaction: a mid-batch failure rolls back to the pre-009 schema so the
+-- next startup retries the migration instead of skipping it half-applied.
 
 PRAGMA foreign_keys = OFF;
+
+BEGIN IMMEDIATE;
 
 -- Rebuild review_findings_artifacts with the head/base identity.
 CREATE TABLE IF NOT EXISTS review_findings_artifacts_new (
@@ -106,5 +110,7 @@ ON review_finding_records(run_id, reviewed_head_sha, base_sha, lifecycle_state);
 DROP INDEX IF EXISTS idx_review_attempts_run_head;
 CREATE INDEX IF NOT EXISTS idx_review_attempts_run_head
 ON review_attempts(run_id, reviewed_head_sha, base_sha, created_at DESC);
+
+COMMIT;
 
 PRAGMA foreign_keys = ON;

@@ -45,6 +45,11 @@ const BARRIER_CLOSED_EXIT: i32 = 98;
 /// Exit codes 0..=127 are real command exits; 128+ are signals (128+sig).
 const SIGNAL_BASE: i32 = 128;
 
+/// Rolling capture window per stream; `bounded_redacted_tail` bounds the
+/// persisted tail, so keeping the newest bytes preserves the failure message
+/// at the end of a run.
+const CAPTURE_CAP: usize = crate::verification::domain::VERIFICATION_OUTPUT_TAIL_MAX_BYTES;
+
 /// Output captured for one command run.
 #[derive(Debug, Clone)]
 pub struct CommandOutput {
@@ -191,7 +196,7 @@ async fn execute_local(
         &request.home_dir,
         &request.workspace_path,
         &request.evidence_dir,
-        "attempt",
+        &request.attempt_id,
         &request.command,
     );
 
@@ -242,8 +247,10 @@ async fn execute_local(
             match stdout.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if raw.len() < 64 * 1024 {
-                        raw.extend_from_slice(&buf[..n]);
+                    raw.extend_from_slice(&buf[..n]);
+                    if raw.len() > CAPTURE_CAP {
+                        let excess = raw.len() - CAPTURE_CAP;
+                        raw.drain(..excess);
                     }
                 }
             }
@@ -257,8 +264,10 @@ async fn execute_local(
             match stderr.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if raw.len() < 64 * 1024 {
-                        raw.extend_from_slice(&buf[..n]);
+                    raw.extend_from_slice(&buf[..n]);
+                    if raw.len() > CAPTURE_CAP {
+                        let excess = raw.len() - CAPTURE_CAP;
+                        raw.drain(..excess);
                     }
                 }
             }
@@ -413,7 +422,7 @@ async fn execute_docker(
         Path::new(home_in_container),
         Path::new(workspace_in_container),
         Path::new(evidence_in_container),
-        "attempt",
+        &request.attempt_id,
         &request.command,
     );
 
@@ -439,7 +448,11 @@ async fn execute_docker(
         .arg(format!(
             "{}:{evidence_in_container}",
             request.evidence_dir.display()
-        ));
+        ))
+        // Untrusted command payloads get no network access: the container
+        // cannot exfiltrate workspace contents or contact external services.
+        .arg("--network")
+        .arg("none");
     for (key, value) in &env {
         create.arg("-e").arg(format!("{key}={value}"));
     }
@@ -518,17 +531,30 @@ async fn execute_docker(
             )));
         }
         Err(_elapsed) => {
-            // Timeout: stop and remove the persisted container, then report.
+            // Timeout: collect the container logs before stopping and
+            // removing the container, then attach the bounded tails like the
+            // local path instead of discarding the diagnostic output.
+            let logs = Command::new("docker")
+                .args(["logs", "--tail", "200", &container_id])
+                .output()
+                .await;
+            let (stdout_tail, stderr_tail) = match logs {
+                Ok(logs) => (
+                    bounded_redacted_tail(&logs.stdout),
+                    bounded_redacted_tail(&logs.stderr),
+                ),
+                Err(_) => (String::new(), String::new()),
+            };
             let stopped = stop_container(&container_id).await;
             if stopped.is_err() {
                 return Err(CommandRunFailure::StillRunning(format!(
-                    "command timed out and container {container_id} could not be removed"
+                    "command timed out and container {container_id} could not be stopped and removed"
                 )));
             }
             return Err(CommandRunFailure::TimedOut(CommandOutput {
-                stdout_tail: String::new(),
-                stderr_tail: String::new(),
-                output_sha256: String::new(),
+                output_sha256: output_digest(&stdout_tail, &stderr_tail),
+                stdout_tail,
+                stderr_tail,
             }));
         }
     };
@@ -808,6 +834,58 @@ mod tests {
         }
         assert!(env_output.contains("SYMPHONY_EVIDENCE_DIR"));
         std::env::remove_var("GH_TOKEN");
+    }
+
+    #[tokio::test]
+    async fn command_receives_the_requested_attempt_id() {
+        let dir = tempdir().unwrap();
+        let request = CommandExecutionRequest {
+            attempt_id: "distinct-attempt-42".to_string(),
+            command_name: "attempt-id-propagation".to_string(),
+            workspace_path: dir.path().join("workspace"),
+            evidence_dir: dir.path().join("evidence"),
+            home_dir: dir.path().join("home"),
+            command: "printf %s \"$SYMPHONY_ATTEMPT_ID\"".to_string(),
+            timeout_ms: 30_000,
+            execution_profile: ExecutionProfile::Local,
+            docker: None,
+        };
+        std::fs::create_dir_all(&request.workspace_path).unwrap();
+        std::fs::create_dir_all(&request.evidence_dir).unwrap();
+        std::fs::create_dir_all(&request.home_dir).unwrap();
+
+        let result = execute_command(&request, |_| Ok(())).await.unwrap();
+        assert_eq!(result.output.stdout_tail.trim(), "distinct-attempt-42");
+    }
+
+    #[tokio::test]
+    async fn capture_keeps_the_trailing_bytes_of_large_output() {
+        let dir = tempdir().unwrap();
+        let request = CommandExecutionRequest {
+            attempt_id: "attempt-1".to_string(),
+            command_name: "large-output".to_string(),
+            workspace_path: dir.path().join("workspace"),
+            evidence_dir: dir.path().join("evidence"),
+            home_dir: dir.path().join("home"),
+            command: "head -c 262144 /dev/zero | tr '\\0' 'x'; echo END-MARKER".to_string(),
+            timeout_ms: 30_000,
+            execution_profile: ExecutionProfile::Local,
+            docker: None,
+        };
+        std::fs::create_dir_all(&request.workspace_path).unwrap();
+        std::fs::create_dir_all(&request.evidence_dir).unwrap();
+        std::fs::create_dir_all(&request.home_dir).unwrap();
+
+        let result = execute_command(&request, |_| Ok(())).await.unwrap();
+        assert!(
+            result.output.stdout_tail.trim_end().ends_with("END-MARKER"),
+            "the persisted tail must retain the end of the output, got: {}",
+            result.output.stdout_tail
+        );
+        assert!(
+            result.output.stdout_tail.len()
+                <= crate::verification::domain::VERIFICATION_OUTPUT_TAIL_MAX_BYTES
+        );
     }
 
     #[test]

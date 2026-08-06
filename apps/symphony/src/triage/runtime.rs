@@ -2111,9 +2111,19 @@ impl TriageRuntime {
             review_coordinator = review_coordinator.with_events(events);
         }
 
-        let workspace_root = crate::verification::coordinator::resolve_workspace_root(config)?;
-        let mut verification_coordinator =
-            crate::verification::coordinator::VerificationCoordinator::new(
+        // A5 recovery still needs the coordinator while attempts are running,
+        // even if verification.enabled is currently false; the workspace root
+        // is resolved only when the coordinator is actually needed so an
+        // unrelated triage/spec/review-only startup is never blocked by
+        // verification workspace configuration.
+        let verification_needed = config.verification.enabled
+            || store
+                .list_running_verification_attempts()
+                .map(|attempts| !attempts.is_empty())
+                .unwrap_or(false);
+        let verification_coordinator = if verification_needed {
+            let workspace_root = crate::verification::coordinator::resolve_workspace_root(config)?;
+            let mut coordinator = crate::verification::coordinator::VerificationCoordinator::new(
                 store.clone(),
                 client.clone(),
                 client.clone(),
@@ -2134,16 +2144,20 @@ impl TriageRuntime {
                     workspace_root,
                 },
             );
-        if let Some(events) = emitter.clone() {
-            verification_coordinator = verification_coordinator.with_events(events);
-        }
+            if let Some(events) = emitter.clone() {
+                coordinator = coordinator.with_events(events);
+            }
+            Some(coordinator)
+        } else {
+            None
+        };
 
         Ok(Some(Self {
             coordinator,
             spec_coordinator,
             implementation_coordinator: Some(implementation_coordinator),
             review_coordinator: Some(review_coordinator),
-            verification_coordinator: Some(verification_coordinator),
+            verification_coordinator,
             store,
             sessions,
             factory_sessions,

@@ -1693,7 +1693,7 @@ pub fn check_verification(config: &ServiceConfig, workflow_path: &Path) -> Vec<D
         .workspace
         .repo
         .as_deref()
-        .map(|path| Path::new(path).is_dir())
+        .map(|path| repo_is_remote(path) || Path::new(path).is_dir())
         .unwrap_or(false)
     {
         results.push(DoctorCheckResult::pass(
@@ -1706,7 +1706,7 @@ pub fn check_verification(config: &ServiceConfig, workflow_path: &Path) -> Vec<D
     } else {
         results.push(DoctorCheckResult::error(
             "Verification Workspace",
-            "workspace.repo must resolve to an existing trusted repository",
+            "workspace.repo must resolve to an existing trusted repository or a remote URL",
         ));
     }
     let root = Path::new(config.workspace.root.as_str());

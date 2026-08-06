@@ -1270,9 +1270,6 @@ pub fn review_run_metrics_http_response(
 pub struct VerificationRunMetricsHttpResponse {
     #[serde(flatten)]
     pub base: FactoryRunMetricsHttpResponse,
-    pub total_attempts: u64,
-    pub completed_attempts: u64,
-    pub failed_attempts: u64,
     pub interrupted_attempts: u64,
     pub superseded_attempts: u64,
     pub blocked_attempts: u64,
@@ -1284,7 +1281,7 @@ pub struct VerificationRunMetricsHttpResponse {
     pub evidence_files: u64,
     pub evidence_bytes: u64,
     pub preview_publications: u64,
-    pub attempt_duration_avg_ms: u64,
+    pub command_duration_avg_ms: u64,
     pub max_same_head_attempts: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
@@ -1297,11 +1294,13 @@ pub fn verification_run_metrics_http_response(
 ) -> VerificationRunMetricsHttpResponse {
     let mut base = factory_run_metrics_http_response(metrics.base);
     base.stage = crate::verification::domain::VERIFICATION_STAGE_NAME.to_string();
+    // The shared attempt counters are reused: verification reports its own
+    // attempt counts through the base keys so no JSON keys are duplicated.
+    base.total_attempts = metrics.total_attempts;
+    base.completed_attempts = metrics.completed_attempts;
+    base.failed_attempts = metrics.failed_attempts;
     VerificationRunMetricsHttpResponse {
         base,
-        total_attempts: metrics.total_attempts,
-        completed_attempts: metrics.completed_attempts,
-        failed_attempts: metrics.failed_attempts,
         interrupted_attempts: metrics.interrupted_attempts,
         superseded_attempts: metrics.superseded_attempts,
         blocked_attempts: metrics.blocked_attempts,
@@ -1313,7 +1312,7 @@ pub fn verification_run_metrics_http_response(
         evidence_files: metrics.evidence_files,
         evidence_bytes: metrics.evidence_bytes,
         preview_publications: metrics.preview_publications,
-        attempt_duration_avg_ms: metrics.attempt_duration_avg_ms,
+        command_duration_avg_ms: metrics.command_duration_avg_ms,
         max_same_head_attempts: metrics.max_same_head_attempts,
         input_tokens: metrics.input_tokens,
         output_tokens: metrics.output_tokens,

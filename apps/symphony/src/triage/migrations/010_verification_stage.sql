@@ -127,3 +127,8 @@ CREATE TABLE IF NOT EXISTS verification_publication_intents (
 
 CREATE INDEX IF NOT EXISTS idx_verification_publication_intents_pending
 ON verification_publication_intents(status, updated_at);
+
+-- One durable intent per attempt and kind, mirroring the single-owned-comment
+-- contract at the store layer.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_verification_publication_intents_attempt_kind
+ON verification_publication_intents(attempt_id, kind);

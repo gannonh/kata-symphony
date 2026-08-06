@@ -68,19 +68,25 @@ fn walk_evidence_dir(
     aggregate_bytes: &mut u64,
     records: &mut Vec<VerificationEvidenceRecord>,
 ) -> Result<()> {
-    let entries = fs::read_dir(dir).map_err(|error| {
-        SymphonyError::TriageError(format!(
-            "failed reading evidence directory {}: {error}",
-            dir.display()
-        ))
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|error| {
+    let mut entries = fs::read_dir(dir)
+        .map_err(|error| {
+            SymphonyError::TriageError(format!(
+                "failed reading evidence directory {}: {error}",
+                dir.display()
+            ))
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|error| {
             SymphonyError::TriageError(format!(
                 "failed reading evidence entry in {}: {error}",
                 dir.display()
             ))
         })?;
+    // `fs::read_dir` enumerates in filesystem order, which is not
+    // deterministic across runs and filesystems; sort by file name so the
+    // persisted records, verifier context, and preview comment are stable.
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
         let path = entry.path();
         let meta = fs::symlink_metadata(&path).map_err(|error| {
             SymphonyError::TriageError(format!(

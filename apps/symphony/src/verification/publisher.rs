@@ -15,15 +15,20 @@ use crate::verification::domain::{
     VERIFICATION_COMMENT_MARKER_SUFFIX,
 };
 
-pub fn verification_marker(intent_id: &str) -> String {
-    format!("{VERIFICATION_COMMENT_MARKER_PREFIX}{intent_id}{VERIFICATION_COMMENT_MARKER_SUFFIX}")
+/// Durable marker for the owned preview comment. Keyed by run id and
+/// reviewed head SHA — not the intent id — so every attempt for the same run
+/// and head reuses the same comment instead of duplicating it, while a fresh
+/// head opens a fresh comment.
+pub fn verification_marker(run_id: &str, reviewed_head_sha: &str) -> String {
+    format!(
+        "{VERIFICATION_COMMENT_MARKER_PREFIX}{run_id}:{reviewed_head_sha}{VERIFICATION_COMMENT_MARKER_SUFFIX}"
+    )
 }
 
 /// Everything needed to render the owned preview summary. Only digests and
 /// metadata — never blob bytes — and stable HTTP links for the run.
 #[derive(Debug, Clone)]
 pub struct PreviewCommentContext<'a> {
-    pub intent_id: &'a str,
     pub run_id: &'a str,
     pub attempt_id: &'a str,
     pub pr_number: u64,
@@ -40,7 +45,6 @@ pub struct PreviewCommentContext<'a> {
 /// Render the owned preview summary.
 pub fn render_verification_preview_comment(context: &PreviewCommentContext<'_>) -> String {
     let PreviewCommentContext {
-        intent_id,
         run_id,
         attempt_id,
         pr_number,
@@ -53,7 +57,7 @@ pub fn render_verification_preview_comment(context: &PreviewCommentContext<'_>) 
         commands,
         evidence,
     } = context;
-    let marker = verification_marker(intent_id);
+    let marker = verification_marker(run_id, reviewed_head_sha);
     let mut lines = vec![
         format!("{marker}"),
         "## Verification evidence preview".to_string(),
@@ -143,44 +147,36 @@ pub async fn publish_preview_comment<C: TriageCommentPort>(
             return Ok(comment_id.to_string());
         }
     }
-    let marker = verification_marker(&intent.intent_id);
+    let marker = verification_marker(&intent.run_id, context.reviewed_head_sha);
     let body = render_verification_preview_comment(context);
     let login = comments.authenticated_login().await?;
     let mut owned: Option<GithubIssueComment> = None;
-    let mut page = 0;
-    loop {
-        let comments_page = comments.list_comments(context.pr_number, max_pages).await?;
-        for comment in comments_page {
-            if comment
-                .body
-                .as_deref()
-                .is_some_and(|body| body.contains(&marker))
-            {
-                let author = comment
-                    .user
-                    .as_ref()
-                    .map(|user| user.login.as_str())
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty());
-                // A comment with no author is never adoptable: updating it
-                // could clobber a foreign marker.
-                if !author.is_some_and(|value| value.eq_ignore_ascii_case(&login)) {
-                    return Err(SymphonyError::TriageError(format!(
-                        "verification marker {marker} is owned by another GitHub login {}",
-                        author.unwrap_or("unknown")
-                    )));
-                }
-                owned = Some(comment);
-                break;
-            }
+    // `list_comments` already paginates internally up to `max_pages`; a single
+    // call scans the full listing instead of repeating one identical request.
+    for comment in comments.list_comments(context.pr_number, max_pages).await? {
+        if !comment
+            .body
+            .as_deref()
+            .is_some_and(|body| body.contains(&marker))
+        {
+            continue;
         }
-        if owned.is_some() {
-            break;
+        let author = comment
+            .user
+            .as_ref()
+            .map(|user| user.login.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        // A comment with no author is never adoptable: updating it
+        // could clobber a foreign marker.
+        if !author.is_some_and(|value| value.eq_ignore_ascii_case(&login)) {
+            return Err(SymphonyError::TriageError(format!(
+                "verification marker {marker} is owned by another GitHub login {}",
+                author.unwrap_or("unknown")
+            )));
         }
-        page += 1;
-        if page >= max_pages {
-            break;
-        }
+        owned = Some(comment);
+        break;
     }
 
     let comment_id = match owned {
@@ -267,7 +263,6 @@ mod tests {
     #[test]
     fn rendered_comment_contains_marker_gate_commands_and_digests() {
         let body = render_verification_preview_comment(&PreviewCommentContext {
-            intent_id: "intent-1",
             run_id: "run-1",
             attempt_id: "attempt-1",
             pr_number: 42,
@@ -280,7 +275,7 @@ mod tests {
             commands: &commands(),
             evidence: &[],
         });
-        assert!(body.contains("<!-- symphony:verification:intent-1 -->"));
+        assert!(body.contains("<!-- symphony:verification:run-1:head-sha -->"));
         assert!(body.contains("**passed**"));
         assert!(body.contains("affected-validation"));
         assert!(body.contains("abcdef012345"));

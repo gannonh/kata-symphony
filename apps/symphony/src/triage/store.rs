@@ -5829,6 +5829,17 @@ impl SqliteFactoryStore {
         attempt_id: &str,
         kind: &str,
     ) -> Result<VerificationPublicationIntent> {
+        // Reuse an existing pending intent for the same run and kind so a
+        // retried attempt keeps the same durable intent (mirrors
+        // `create_review_publication_intent`). Applied intents are never
+        // reused: a fresh head opens a fresh preview intent.
+        if let Some(existing) = self
+            .list_verification_publications_for_run(run_id)?
+            .into_iter()
+            .find(|intent| intent.kind == kind && intent.status == PublicationStatus::Pending)
+        {
+            return Ok(existing);
+        }
         let intent_id = new_id();
         let now_s = ts(Self::now());
         self.conn
@@ -6070,12 +6081,12 @@ impl SqliteFactoryStore {
                 |row| row.get(0),
             )
             .map_err(storage_error)?;
-        let attempt_duration_avg_ms: u64 = self
+        let command_duration_avg_ms: u64 = self
             .conn
             .query_row(
-                "SELECT CAST(COALESCE(ROUND(AVG((julianday(completed_at) - julianday(started_at)) * 86400000)), 0) AS INTEGER)
+                "SELECT CAST(COALESCE(ROUND(AVG(duration_ms)), 0) AS INTEGER)
                  FROM verification_command_runs
-                 WHERE completed_at IS NOT NULL AND started_at IS NOT NULL",
+                 WHERE duration_ms IS NOT NULL",
                 [],
                 |row| row.get(0),
             )
@@ -6138,7 +6149,7 @@ impl SqliteFactoryStore {
             evidence_files,
             evidence_bytes,
             preview_publications,
-            attempt_duration_avg_ms,
+            command_duration_avg_ms,
             max_same_head_attempts,
             input_tokens,
             output_tokens,
@@ -6430,9 +6441,20 @@ fn apply_migration(conn: &Connection, migration: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
-/// Whether the review-findings unique key already covers `base_sha` — the
-/// post-#617 identity. The rebuild is skipped when it is already in force.
+/// Whether the review-findings identity already covers `base_sha` — the
+/// post-#617 identity. The rebuild is skipped only when BOTH rebuilt tables
+/// carry the head/base identity: validating just the artifacts unique key
+/// would let a partially migrated store (artifacts rebuilt, finding records
+/// not) skip the finding-record rebuild forever.
 fn review_identity_is_head_base(conn: &Connection) -> rusqlite::Result<bool> {
+    let has_base_sha_column = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('review_finding_records') WHERE name = 'base_sha')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    if !has_base_sha_column {
+        return Ok(false);
+    }
     let mut stmt = conn.prepare("PRAGMA index_list('review_findings_artifacts')")?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(1)?, row.get::<_, String>(3)?))
@@ -7983,6 +8005,25 @@ mod tests {
         assert_eq!(intents.len(), 1);
         assert_eq!(intents[0].status.as_str(), "applied");
         assert_eq!(intents[0].comment_id.as_deref(), Some("comment-99"));
+
+        // A retried attempt reuses a pending intent for the same run and kind
+        // instead of inserting another row, while an applied intent is never
+        // reused so a fresh head still opens a fresh publication.
+        let retry = store
+            .create_verification_publication_intent(&run_id, "verification-attempt-2", "preview")
+            .unwrap();
+        assert_ne!(retry.intent_id, intent.intent_id);
+        let fresh = store
+            .create_verification_publication_intent(&run_id, "verification-attempt-3", "preview")
+            .unwrap();
+        assert_eq!(fresh.intent_id, retry.intent_id);
+        assert_eq!(
+            store
+                .list_verification_publications_for_run(&run_id)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[test]

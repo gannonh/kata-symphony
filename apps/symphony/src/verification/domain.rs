@@ -275,8 +275,9 @@ pub struct VerificationMetricsAggregate {
     pub evidence_files: u64,
     pub evidence_bytes: u64,
     pub preview_publications: u64,
-    /// Average verification attempt duration in milliseconds.
-    pub attempt_duration_avg_ms: u64,
+    /// Average verification command run duration in milliseconds (computed
+    /// from the stored `duration_ms` of completed command runs).
+    pub command_duration_avg_ms: u64,
     /// Highest number of attempts recorded for one reviewed head (same-head
     /// attempt count).
     pub max_same_head_attempts: u64,

@@ -2465,16 +2465,19 @@ pub fn validate(config: &ServiceConfig) -> Result<ValidatedServiceConfig> {
         validate_verification_commands(&config.verification.commands)?;
         // Artifact-directory access: the store path must be usable for the
         // content-addressed evidence blobs beside the factory database.
-        if let Some(storage_path) = config.storage.path.as_deref() {
-            let artifacts_dir =
-                crate::implementation::bundle::artifacts_dir(std::path::Path::new(storage_path));
-            if let Some(parent) = artifacts_dir.parent() {
-                if !parent.exists() {
-                    return Err(SymphonyError::InvalidWorkflowConfig(format!(
-                        "verification requires an existing artifact-directory parent {}; create it or fix storage.path",
-                        parent.display()
-                    )));
-                }
+        let Some(storage_path) = config.storage.path.as_deref() else {
+            return Err(SymphonyError::InvalidWorkflowConfig(
+                "storage.path is required when verification is enabled".to_string(),
+            ));
+        };
+        let artifacts_dir =
+            crate::implementation::bundle::artifacts_dir(std::path::Path::new(storage_path));
+        if let Some(parent) = artifacts_dir.parent() {
+            if !parent.exists() {
+                return Err(SymphonyError::InvalidWorkflowConfig(format!(
+                    "verification requires an existing artifact-directory parent {}; create it or fix storage.path",
+                    parent.display()
+                )));
             }
         }
     }
@@ -2882,6 +2885,17 @@ implementation:
 
     fn verification_yaml(command_overrides: &str) -> String {
         let mut yaml = github_base_yaml();
+        // storage.path must exist before validation: point it at a real
+        // temporary artifact-directory parent.
+        let storage_root = std::env::temp_dir().join("symphony-config-test-storage");
+        std::fs::create_dir_all(&storage_root).unwrap();
+        yaml.push_str(&format!(
+            r#"
+storage:
+  path: {}/state.db
+"#,
+            storage_root.display()
+        ));
         yaml.push_str(
             r#"
 spec:

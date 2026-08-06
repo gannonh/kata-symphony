@@ -194,23 +194,24 @@ where
                 if run.status != "launching" && run.status != "running" {
                     continue;
                 }
-                if let Some(container_id) = run.container_id.as_deref() {
-                    termination_verified = termination_verified
-                        && crate::verification::executor::stop_persisted_container(container_id)
-                            .await
-                            .is_ok();
+                let verified = if let Some(container_id) = run.container_id.as_deref() {
+                    crate::verification::executor::stop_persisted_container(container_id)
+                        .await
+                        .is_ok()
                 } else if let Some(identity) = local_identity_from_record(&run) {
-                    termination_verified = termination_verified
-                        && matches!(
-                            crate::triage::process_identity::terminate_process_group(&identity)
-                                .await,
-                            crate::triage::process_identity::TerminationOutcome::Terminated
-                        );
+                    matches!(
+                        crate::triage::process_identity::terminate_process_group(&identity).await,
+                        crate::triage::process_identity::TerminationOutcome::Terminated
+                    )
                 } else {
                     // A launching record with no identity never released its
                     // payload; nothing is left to terminate.
-                    termination_verified = true;
-                }
+                    true
+                };
+                // Accumulate: a termination failure recorded for an earlier
+                // command run must not be erased by a later run with no
+                // persisted identity.
+                termination_verified = termination_verified && verified;
                 let _ = self.store.complete_verification_command(
                     crate::triage::store::CompleteVerificationCommandRequest {
                         command_run_id: &run.command_run_id,
@@ -761,41 +762,11 @@ where
                 updated_at: Utc::now(),
             };
             self.store.store_verification_gate(&gate)?;
-            self.store.complete_verification_stage_run(&stage.stage_run_id, total_usage)?;
-            self.store.update_verification_attempt(
-                crate::triage::store::UpdateVerificationAttemptRequest {
-                    attempt_id: &attempt_id,
-                    status: Some("completed"),
-                    workspace_path: None,
-                    evidence_dir: None,
-                    error: None,
-                },
-            )?;
 
-            // Preview publication: one owned comment; nothing else mutates.
-            let intent = self
-                .store
-                .create_verification_publication_intent(&candidate.run_id, &attempt_id, "preview")?;
-
-            // Final revision fence immediately before the comment side effect.
+            // Final revision fence immediately before the comment side
+            // effect: a drifted head/base supersedes without leaving any
+            // durable publication intent behind.
             if self.revision_changed(candidate, issue_number).await? {
-                let error = FactoryError::new(
-                    "verification_superseded",
-                    "verification_coordinator",
-                    "head or base changed before publication; gate retained without publishing"
-                        .to_string(),
-                    false,
-                    None,
-                );
-                let _ = self.store.update_verification_attempt(
-                    crate::triage::store::UpdateVerificationAttemptRequest {
-                        attempt_id: &attempt_id,
-                        status: Some("superseded"),
-                        workspace_path: None,
-                        evidence_dir: None,
-                        error: Some(&error),
-                    },
-                );
                 self.record_event(
                     Some(&candidate.run_id),
                     Some(&stage.stage_run_id),
@@ -806,18 +777,27 @@ where
                         "attempt_id": attempt_id,
                     }),
                 )?;
-                self.cleanup_attempt_workspace(
-                    &workspace.workspace_path.display().to_string(),
-                    &attempt_id,
-                );
-                return Ok(ProcessOutcome::Waiting);
+                return self
+                    .supersede(
+                        &stage.stage_run_id,
+                        &attempt_id,
+                        &workspace,
+                        "head_or_base_changed_before_publication",
+                    )
+                    .await;
             }
+
+            // Preview publication: one owned comment; nothing else mutates.
+            // The intent is reused across attempts for the same run and kind,
+            // so the marker stays stable: one owned comment per run and head.
+            let intent = self
+                .store
+                .create_verification_publication_intent(&candidate.run_id, &attempt_id, "preview")?;
             let comment_id = publish_preview_comment(
                 &self.comments,
                 &self.store,
                 &intent,
                 &crate::verification::publisher::PreviewCommentContext {
-                    intent_id: &intent.intent_id,
                     run_id: &candidate.run_id,
                     attempt_id: &attempt_id,
                     pr_number: candidate.pr_number,
@@ -833,6 +813,21 @@ where
                 self.config.max_pages,
             )
             .await?;
+
+            // The stage completes only after the owned preview comment is
+            // durable: a publication failure leaves the stage run non-terminal
+            // so the next poll can retry the attempt instead of stranding a
+            // completed stage with a pending intent and no comment.
+            self.store.complete_verification_stage_run(&stage.stage_run_id, total_usage)?;
+            self.store.update_verification_attempt(
+                crate::triage::store::UpdateVerificationAttemptRequest {
+                    attempt_id: &attempt_id,
+                    status: Some("completed"),
+                    workspace_path: None,
+                    evidence_dir: None,
+                    error: None,
+                },
+            )?;
             self.record_event(
                 Some(&candidate.run_id),
                 Some(&stage.stage_run_id),
@@ -916,7 +911,6 @@ where
         } else {
             crate::implementation::domain::ExecutionProfile::Local
         };
-        let mut records = Vec::new();
         let mut failed = false;
         let mut interrupted_index: Option<usize> = None;
         for (index, command) in commands.iter().enumerate() {
@@ -984,17 +978,6 @@ where
                             duration_ms: result.duration_ms,
                         },
                     )?;
-                    records.push(
-                        self.store
-                            .list_verification_command_runs(attempt_id)?
-                            .into_iter()
-                            .find(|record| record.command_run_id == command_run_id)
-                            .ok_or_else(|| {
-                                SymphonyError::StorageError(format!(
-                                    "command run {command_run_id} missing after completion"
-                                ))
-                            })?,
-                    );
                     if !result.passed {
                         failed = true;
                         interrupted_index = Some(index + 1);
@@ -1635,7 +1618,6 @@ mod tests {
             .create_verification_publication_intent("run-1", "attempt-1", "preview")
             .unwrap();
         let context = crate::verification::publisher::PreviewCommentContext {
-            intent_id: &intent.intent_id,
             run_id: "run-1",
             attempt_id: "attempt-1",
             pr_number: 42,
@@ -1687,7 +1669,7 @@ mod tests {
                     }),
                     body: Some(format!(
                         "foreign body\n{}",
-                        crate::verification::publisher::verification_marker(&intent2.intent_id)
+                        crate::verification::publisher::verification_marker("run-1", "head-sha")
                     )),
                     html_url: None,
                     created_at: None,
@@ -1697,7 +1679,6 @@ mod tests {
             id
         };
         let context2 = crate::verification::publisher::PreviewCommentContext {
-            intent_id: &intent2.intent_id,
             run_id: "run-1",
             attempt_id: "attempt-2",
             pr_number: 42,
