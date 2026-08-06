@@ -40,6 +40,9 @@ pub struct VerificationWorkerRequest {
     pub review_artifact: ReviewFindingsArtifactRecord,
     pub command_runs: Vec<VerificationCommandRunRecord>,
     pub evidence: Vec<VerificationEvidenceRecord>,
+    /// Durable artifact identities the strict manifest must match exactly.
+    pub spec_artifact_id: String,
+    pub implementation_artifact_id: String,
     /// Fired with the verifier's process identity as soon as the child exists,
     /// so the attempt record stays durable for restart recovery.
     pub spawned: Option<TriageSpawnSink>,
@@ -100,6 +103,9 @@ impl VerificationWorker for LiveVerificationWorker {
             "command_runs": commands,
             "evidence": evidence,
             "attempt_id": &request.attempt_id,
+            "spec_artifact_id": &request.spec_artifact_id,
+            "implementation_artifact_id": &request.implementation_artifact_id,
+            "review_artifact_id": &request.review_artifact.artifact_id,
         });
         let prompt = format!(
             "{}\n\nA5 verifier contract: read only the JSON context in the stage-input directory and the cloned repository. Assess whether the A3 implementation satisfies every acceptance criterion of the approved A2 spec, using the A4 findings, the recorded command results, and the evidence metadata. Use your file-write tool to write ONE strict JSON verification manifest to the exact path in $SYMPHONY_STAGE_OUTPUT (do not merely print it in your reply) with schema_version 1, spec_artifact_id, implementation_artifact_id, review_artifact_id, reviewed_head_sha, base_sha, a summary, and a criteria array. Every criterion needs an index, status (pass|fail|not_proven), a non-empty rationale, and for pass/fail at least one evidence reference that names a relative_path exactly as listed in the evidence array. Never reference evidence that is not listed. Do not modify the repository, invoke forge or tracker APIs, push, approve, merge, or emit prose outside the output file.",

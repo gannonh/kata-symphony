@@ -622,6 +622,8 @@ where
                 review_artifact: review_artifact.clone(),
                 command_runs: command_runs.clone(),
                 evidence: evidence_records.clone(),
+                spec_artifact_id: candidate.spec_artifact_id.clone(),
+                implementation_artifact_id: candidate.implementation_artifact_id.clone(),
                 spawned,
             };
 
@@ -1713,6 +1715,524 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("owned by another GitHub login"));
         assert!(foreign.comment(foreign_owned).is_some());
+    }
+
+    /// Fake verifier that emits a strict manifest derived from its request:
+    /// every approved criterion is `pass` with the first evidence reference
+    /// when evidence exists, otherwise `not_proven`.
+    #[derive(Default)]
+    struct FakeManifestWorker;
+
+    #[async_trait]
+    impl VerificationWorker for FakeManifestWorker {
+        async fn run(
+            &self,
+            request: &VerificationWorkerRequest,
+        ) -> Result<VerificationWorkerResult> {
+            let criteria = request
+                .approved_spec
+                .acceptance_criteria
+                .iter()
+                .enumerate()
+                .map(
+                    |(index, _)| crate::verification::domain::VerifierCriterion {
+                        index: (index + 1) as u32,
+                        status: if request.evidence.is_empty() {
+                            crate::verification::domain::VerifierCriterionStatus::NotProven
+                        } else {
+                            crate::verification::domain::VerifierCriterionStatus::Pass
+                        },
+                        rationale: "fake worker assessment".to_string(),
+                        evidence: request
+                            .evidence
+                            .first()
+                            .map(|record| vec![record.relative_path.clone()])
+                            .unwrap_or_default(),
+                    },
+                )
+                .collect();
+            let manifest = crate::verification::domain::VerifierManifest {
+                schema_version: 1,
+                spec_artifact_id: request.spec_artifact_id.clone(),
+                implementation_artifact_id: request.implementation_artifact_id.clone(),
+                review_artifact_id: request.review_artifact.artifact_id.clone(),
+                reviewed_head_sha: request.review_artifact.reviewed_head_sha.clone(),
+                base_sha: request.review_artifact.base_sha.clone(),
+                summary: "fake verification".to_string(),
+                criteria,
+            };
+            let output_bytes = serde_json::to_vec(&manifest).unwrap();
+            Ok(VerificationWorkerResult {
+                output_bytes,
+                usage: StageUsage::default(),
+            })
+        }
+    }
+
+    fn init_git_repo() -> (tempfile::TempDir, tempfile::TempDir, String) {
+        use std::process::Command;
+        let bare = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        for args in [["init", "-q", "--bare", "-b", "main"].as_slice()] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(bare.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        for args in [
+            ["init", "-q", "-b", "main"].as_slice(),
+            ["config", "user.email", "t@example.com"].as_slice(),
+            ["config", "user.name", "T"].as_slice(),
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        let repo_path = repo.path();
+        std::fs::write(repo_path.join("README.md"), "base\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(repo_path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(repo_path)
+            .status()
+            .unwrap()
+            .success());
+        let head = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(repo_path)
+            .output()
+            .unwrap();
+        let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+        // `origin` remote used by the pull-ref fetch; seed refs/pull/63/head.
+        assert!(Command::new("git")
+            .args(["remote", "add", "origin", bare.path().to_str().unwrap()])
+            .current_dir(repo_path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["push", "-q", "origin", "main:refs/heads/main"])
+            .current_dir(repo_path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["push", "-q", "origin", "main:refs/pull/63/head",])
+            .current_dir(repo_path)
+            .status()
+            .unwrap()
+            .success());
+        (bare, repo, head)
+    }
+
+    fn seed_full_pipeline_run(store: &SharedFactoryStore, head: &str, base: &str) {
+        let now = Utc::now().to_rfc3339();
+        store.disable_foreign_keys_for_test();
+        let run = |sql: &str, params: Vec<&str>| {
+            let _ = store.execute_batch_for_test(sql);
+            let _ = params;
+        };
+        let _ = run;
+        let spec_json = serde_json::json!({
+            "schema_version": 1,
+            "product_behavior": "add a heading",
+            "technical_approach": "edit README",
+            "acceptance_criteria": ["heading present"],
+            "open_decisions": [],
+        })
+        .to_string();
+        let mut sql = String::new();
+        let _ = &mut sql;
+        store.execute_batch_for_test(&format!(
+            "INSERT INTO factory_runs (run_id, forge_host, repository, issue_id, issue_identifier, issue_revision, status, current_stage, created_at, updated_at)
+             VALUES ('run-review', 'github.com', 'owner/repo', '63', '#63', 'issue-rev', 'running', 'review', '{now}', '{now}');
+             INSERT INTO spec_run_state (run_id, approved_artifact_id, approved_version, decision, updated_at)
+             VALUES ('run-review', 'spec-artifact', 1, 'approved', '{now}');
+             INSERT INTO spec_artifacts (artifact_id, run_id, stage_run_id, issue_revision, configuration_revision, version, schema_version, artifact_json, review_cycles, unresolved_findings_json, received_at, bytes_len)
+             VALUES ('spec-artifact', 'run-review', 'spec-stage', 'issue-rev', 'config-rev', 1, 1, '{spec_json}', 1, '[]', '{now}', 1);
+             INSERT INTO implementation_artifacts (artifact_id, run_id, stage_run_id, approved_artifact_id, approved_version, issue_revision, configuration_revision, schema_version, manifest_json, base_commit, approved_spec_path, validation_cycles, execution_profile, received_at, bytes_len)
+             VALUES ('implementation-artifact', 'run-review', 'implementation-stage', 'spec-artifact', 1, 'issue-rev', 'config-rev', 1, '{{\"schema_version\":1,\"status\":\"completed\",\"summary\":\"s\",\"acceptance_criteria\":[],\"known_limitations\":[]}}', 'base', 'spec.md', 1, 'local', '{now}', 1);
+             INSERT INTO implementation_publication_intents (intent_id, run_id, artifact_id, kind, status, completed_steps_json, desired_effects_json, observed_baseline_json, expected_projection_json, created_at, updated_at)
+             VALUES ('implementation-intent', 'run-review', 'implementation-artifact', 'draft_pr', 'applied', '[]', '{{}}', '{{}}', '{{}}', '{now}', '{now}');
+             INSERT INTO implementation_draft_pr_artifacts (artifact_id, run_id, implementation_artifact_id, intent_id, number, url, draft, head, base, head_sha, marker, created_at)
+             VALUES ('draft-artifact', 'run-review', 'implementation-artifact', 'implementation-intent', 63, 'https://github.com/owner/repo/pull/63', 1, 'feature', 'main', '{head}', 'marker', '{now}');
+             INSERT INTO review_attempts (attempt_id, run_id, stage_run_id, draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id, pr_number, reviewed_head_sha, base_sha, status, created_at, updated_at)
+             VALUES ('review-attempt', 'run-review', 'review-stage', 'draft-artifact', 'implementation-artifact', 'spec-artifact', 63, '{head}', '{base}', 'completed', '{now}', '{now}');
+             INSERT INTO review_findings_artifacts (artifact_id, run_id, stage_run_id, attempt_id, draft_pr_artifact_id, implementation_artifact_id, spec_artifact_id, schema_version, reviewed_head_sha, base_sha, manifest_json, no_findings, finding_count, received_at, bytes_len)
+             VALUES ('review-artifact', 'run-review', 'review-stage', 'review-attempt', 'draft-artifact', 'implementation-artifact', 'spec-artifact', 1, '{head}', '{base}', '{{\"schema_version\":1,\"reviewed_head_sha\":\"{head}\",\"base_sha\":\"{base}\",\"spec_conformance_summary\":\"none\",\"no_findings\":true,\"findings\":[]}}', 1, 0, '{now}', 2);
+             INSERT INTO review_publication_intents (intent_id, run_id, artifact_id, kind, status, completed_steps_json, retry_count, route_state, desired_effects_json, observed_baseline_json, expected_projection_json, created_at, updated_at)
+             VALUES ('automatic-intent', 'run-review', 'review-artifact', 'automatic', 'applied', '[]', 0, 'Human Review', '{{}}', '{{}}', '{{}}', '{now}', '{now}');
+            "
+        ));
+    }
+
+    #[tokio::test]
+    async fn process_candidate_runs_the_full_pipeline_against_mock_github() {
+        use mockito::Server;
+        let (_bare, repo, head) = init_git_repo();
+        let base = "base-sha";
+
+        let mut server = Server::new_async().await;
+        // Pull endpoint: open PR whose head/base match the reviewed revision.
+        let pull_json = serde_json::json!({
+            "number": 63,
+            "html_url": "https://github.com/owner/repo/pull/63",
+            "draft": true,
+            "state": "open",
+            "title": "UAT",
+            "head": {"ref": "feature", "sha": head},
+            "base": {"ref": "main", "sha": base},
+        })
+        .to_string();
+        let pull_mock = server
+            .mock("GET", "/repos/owner/repo/pulls/63")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(pull_json)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        // Projects v2 GraphQL: status field resolution.
+        let fields_json = serde_json::json!({
+            "data": {
+                "user": {
+                    "projectV2": {
+                        "id": "project-1",
+                        "field": {
+                            "id": "field-1",
+                            "options": [
+                                {"id": "opt-todo", "name": "Todo"},
+                                {"id": "opt-verification", "name": "Human Review"}
+                            ]
+                        }
+                    }
+                },
+                "organization": null
+            }
+        })
+        .to_string();
+        let fields_mock = server
+            .mock("POST", "/graphql")
+            .match_body(mockito::Matcher::Regex(r"field\(name:".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(fields_json)
+            .create_async()
+            .await;
+
+        // Projects v2 GraphQL: items query returns issue #63 in Human Review.
+        let items_json = serde_json::json!({
+            "data": {
+                "node": {
+                    "items": {
+                        "nodes": [{
+                            "id": "item-1",
+                            "content": {
+                                "number": 63,
+                                "repository": {"name": "repo", "owner": {"login": "owner"}},
+                                "blockedBy": {"nodes": []}
+                            },
+                            "status": {"name": "Human Review", "optionId": "opt-verification"},
+                            "kataId": null
+                        }],
+                        "pageInfo": {"hasNextPage": false, "endCursor": null}
+                    }
+                }
+            }
+        })
+        .to_string();
+        let items_mock = server
+            .mock("POST", "/graphql")
+            .match_body(mockito::Matcher::Regex("fieldValueByName".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(items_json)
+            .create_async()
+            .await;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = open_store(&temp.path().join("factory.db"));
+        seed_full_pipeline_run(&store, &head, base);
+        let comments = FakeComments::new("symphony-bot");
+        let github = GithubClient::with_base_url(
+            "token".to_string(),
+            "owner".to_string(),
+            "repo".to_string(),
+            "symphony".to_string(),
+            &server.url(),
+        );
+        let mut coordinator = VerificationCoordinator::new(
+            store.clone(),
+            comments,
+            github.clone(),
+            ProjectsV2Client::new(github),
+            FakeManifestWorker,
+            VerificationCoordinatorConfig {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                owner_instance: "owner-1".to_string(),
+                workflow_dir: temp.path().to_path_buf(),
+                project_owner: "owner".to_string(),
+                project_number: 16,
+                max_pages: 5,
+                workspace_root: temp.path().join("workspaces"),
+            },
+        );
+
+        let service = ServiceConfig {
+            verification: VerificationConfig {
+                enabled: true,
+                mode: "preview".to_string(),
+                prompt: "prompts/verification.md".to_string(),
+                model: Some("deepseek/deepseek-v4-flash".to_string()),
+                max_turns: 1,
+                invocation_timeout_ms: 60_000,
+                max_attempts: 3,
+                max_reprompts: 0,
+                max_evidence_files: 100,
+                max_evidence_bytes: 1024 * 1024,
+                trigger_state: "Human Review".to_string(),
+                commands: vec![
+                    crate::verification::domain::VerificationCommandConfig {
+                        name: "affected-validation".to_string(),
+                        kind: crate::verification::domain::VerificationCommandKind::Test,
+                        command: format!(
+                            "test -f README.md && printf 'ok\n' > \"$SYMPHONY_EVIDENCE_DIR/repo-smoke.txt\""
+                        ),
+                        timeout_ms: 60_000,
+                    },
+                    crate::verification::domain::VerificationCommandConfig {
+                        name: "product-acceptance".to_string(),
+                        kind: crate::verification::domain::VerificationCommandKind::Acceptance,
+                        command: "test -f README.md".to_string(),
+                        timeout_ms: 60_000,
+                    },
+                ],
+            },
+            workspace: crate::domain::WorkspaceConfig {
+                root: temp.path().join("workspaces").display().to_string(),
+                repo: Some(repo.path().display().to_string()),
+                ..crate::domain::WorkspaceConfig::default()
+            },
+            storage: crate::triage::domain::StorageConfig {
+                path: Some(temp.path().join("factory.db").display().to_string()),
+                ..crate::triage::domain::StorageConfig::default()
+            },
+            ..ServiceConfig::default()
+        };
+
+        // The prompt file and workspace root must exist.
+        std::fs::create_dir_all(temp.path().join("workspaces")).unwrap();
+        std::fs::create_dir_all(temp.path().join("prompts")).unwrap();
+        std::fs::write(
+            temp.path().join("prompts/verification.md"),
+            "You are the verifier.\n",
+        )
+        .unwrap();
+
+        let eligible = store.list_a5_eligible_verification_runs(3).unwrap();
+        assert_eq!(eligible.len(), 1, "one eligible run expected in store");
+        let summary = coordinator.poll_once(&service).await.unwrap();
+        assert_eq!(summary.candidates_seen, 1, "one eligible run expected");
+        assert_eq!(summary.attempts_started, 1);
+        assert_eq!(summary.attempts_completed, 1);
+        assert_eq!(summary.preview_published, 1);
+
+        let attempts = store.list_verification_attempts("run-review").unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].status, "completed");
+        let gate = store
+            .get_verification_gate(&attempts[0].attempt_id)
+            .unwrap()
+            .expect("gate must be recorded");
+        assert_eq!(gate.status, "passed");
+        let evidence = store
+            .list_verification_evidence(&attempts[0].attempt_id)
+            .unwrap();
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(evidence[0].relative_path, "repo-smoke.txt");
+        let intents = store
+            .list_verification_publications_for_run("run-review")
+            .unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].status.as_str(), "applied");
+
+        pull_mock.assert_async().await;
+        fields_mock.assert_async().await;
+        items_mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn verifier_failure_after_reprompts_records_a_blocked_attempt() {
+        use mockito::Server;
+        let (_bare, repo, head) = init_git_repo();
+        let base = "base-sha";
+
+        let mut server = Server::new_async().await;
+        let pull_json = serde_json::json!({
+            "number": 63,
+            "html_url": "https://github.com/owner/repo/pull/63",
+            "draft": true,
+            "state": "open",
+            "title": "UAT",
+            "head": {"ref": "feature", "sha": head},
+            "base": {"ref": "main", "sha": base},
+        })
+        .to_string();
+        let _pull_mock = server
+            .mock("GET", "/repos/owner/repo/pulls/63")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(pull_json)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let fields_json = serde_json::json!({
+            "data": {
+                "user": {"projectV2": {"id": "project-1", "field": {"id": "field-1", "options": [{"id": "opt-verification", "name": "Human Review"}]}}},
+                "organization": null
+            }
+        })
+        .to_string();
+        let _fields_mock = server
+            .mock("POST", "/graphql")
+            .match_body(mockito::Matcher::Regex(r"field\(name:".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(fields_json)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+        let items_json = serde_json::json!({
+            "data": {
+                "node": {
+                    "items": {
+                        "nodes": [{
+                            "id": "item-1",
+                            "content": {
+                                "number": 63,
+                                "repository": {"name": "repo", "owner": {"login": "owner"}},
+                                "blockedBy": {"nodes": []}
+                            },
+                            "status": {"name": "Human Review", "optionId": "opt-verification"},
+                            "kataId": null
+                        }],
+                        "pageInfo": {"hasNextPage": false, "endCursor": null}
+                    }
+                }
+            }
+        })
+        .to_string();
+        let _items_mock = server
+            .mock("POST", "/graphql")
+            .match_body(mockito::Matcher::Regex("fieldValueByName".to_string()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(items_json)
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("workspaces")).unwrap();
+        std::fs::create_dir_all(temp.path().join("prompts")).unwrap();
+        std::fs::write(
+            temp.path().join("prompts/verification.md"),
+            "You are the verifier.\n",
+        )
+        .unwrap();
+        let store = open_store(&temp.path().join("factory.db"));
+        seed_full_pipeline_run(&store, &head, base);
+        let comments = FakeComments::new("symphony-bot");
+        let github = GithubClient::with_base_url(
+            "token".to_string(),
+            "owner".to_string(),
+            "repo".to_string(),
+            "symphony".to_string(),
+            &server.url(),
+        );
+        let mut coordinator = VerificationCoordinator::new(
+            store.clone(),
+            comments,
+            github.clone(),
+            ProjectsV2Client::new(github),
+            FakeWorker,
+            VerificationCoordinatorConfig {
+                forge_host: "github.com".to_string(),
+                repository: "owner/repo".to_string(),
+                owner_instance: "owner-1".to_string(),
+                workflow_dir: temp.path().to_path_buf(),
+                project_owner: "owner".to_string(),
+                project_number: 16,
+                max_pages: 5,
+                workspace_root: temp.path().join("workspaces"),
+            },
+        );
+        let service = ServiceConfig {
+            verification: VerificationConfig {
+                enabled: true,
+                mode: "preview".to_string(),
+                prompt: "prompts/verification.md".to_string(),
+                max_turns: 1,
+                model: None,
+                invocation_timeout_ms: 60_000,
+                max_attempts: 3,
+                max_reprompts: 1,
+                max_evidence_files: 100,
+                max_evidence_bytes: 1024 * 1024,
+                trigger_state: "Human Review".to_string(),
+                commands: vec![crate::verification::domain::VerificationCommandConfig {
+                    name: "product-acceptance".to_string(),
+                    kind: crate::verification::domain::VerificationCommandKind::Acceptance,
+                    command: "test -f README.md".to_string(),
+                    timeout_ms: 60_000,
+                }],
+            },
+            workspace: crate::domain::WorkspaceConfig {
+                root: temp.path().join("workspaces").display().to_string(),
+                repo: Some(repo.path().display().to_string()),
+                ..crate::domain::WorkspaceConfig::default()
+            },
+            storage: crate::triage::domain::StorageConfig {
+                path: Some(temp.path().join("factory.db").display().to_string()),
+                ..crate::triage::domain::StorageConfig::default()
+            },
+            ..ServiceConfig::default()
+        };
+
+        let summary = coordinator.poll_once(&service).await.unwrap();
+        assert_eq!(summary.candidates_seen, 1);
+        assert_eq!(summary.attempts_failed, 1);
+        let attempts = store.list_verification_attempts("run-review").unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].status, "blocked",
+            "verifier exhaustion after max_reprompts must record the distinct blocked outcome"
+        );
+        assert_eq!(
+            attempts[0].error.as_ref().map(|error| error.code.as_str()),
+            Some("verification_verifier_failed")
+        );
+        // Blocked attempts consume the retry budget: the run stays eligible
+        // (1 < max_attempts) but every claim records another blocked attempt
+        // instead of auto-completing.
+        let summary = coordinator.poll_once(&service).await.unwrap();
+        assert_eq!(summary.candidates_seen, 1);
+        assert_eq!(summary.attempts_failed, 1);
+        let attempts = store.list_verification_attempts("run-review").unwrap();
+        assert_eq!(attempts.len(), 2);
+        assert!(attempts.iter().all(|attempt| attempt.status == "blocked"));
     }
 
     #[test]

@@ -58,6 +58,19 @@ pub struct SharedFactoryStore {
 impl SharedFactoryStore {
     /// Test-only helper: disable foreign keys so fixtures can use placeholder
     /// artifact ids from other stages.
+    /// Test-only helper: run a raw SQL batch against the store, panicking on
+    /// failure so fixtures cannot silently mis-seed.
+    #[cfg(test)]
+    pub fn execute_batch_for_test(&self, sql: &str) {
+        self.with_store_mut(|store| {
+            store
+                .connection_for_test()
+                .execute_batch(sql)
+                .map_err(|error| SymphonyError::StorageError(error.to_string()))
+        })
+        .expect("fixture SQL batch must succeed");
+    }
+
     #[cfg(test)]
     pub fn disable_foreign_keys_for_test(&self) {
         let _ = self.with_store_mut(|store| {

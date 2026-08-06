@@ -346,6 +346,81 @@ mod tests {
         let _ = head;
     }
 
+    #[tokio::test]
+    async fn fetch_pull_head_verifies_reviewed_sha_with_scoped_auth() {
+        use std::process::Command;
+        let bare = tempdir().unwrap();
+        let repo = tempdir().unwrap();
+        assert!(Command::new("git")
+            .args(["init", "-q", "--bare", "-b", "main"])
+            .current_dir(bare.path())
+            .status()
+            .unwrap()
+            .success());
+        for args in [
+            ["init", "-q", "-b", "main"].as_slice(),
+            ["config", "user.email", "t@example.com"].as_slice(),
+            ["config", "user.name", "T"].as_slice(),
+        ] {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .status()
+                .unwrap()
+                .success());
+        }
+        let repo_path = repo.path();
+        fs::write(repo_path.join("README.md"), "base\n").unwrap();
+        assert!(Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(repo_path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(Command::new("git")
+            .args(["commit", "-qm", "init"])
+            .current_dir(repo_path)
+            .status()
+            .unwrap()
+            .success());
+        let head = git_stdout(repo_path, &["rev-parse", "HEAD"]).unwrap();
+        assert!(Command::new("git")
+            .args(["remote", "add", "origin", bare.path().to_str().unwrap()])
+            .current_dir(repo_path)
+            .status()
+            .unwrap()
+            .success());
+        for refspec in ["main:refs/heads/main", "main:refs/pull/7/head"] {
+            assert!(Command::new("git")
+                .args(["push", "-q", "origin", refspec])
+                .current_dir(repo_path)
+                .status()
+                .unwrap()
+                .success());
+        }
+
+        // Successful fetch matches the reviewed head.
+        let fetched =
+            fetch_pull_head_verified(repo_path, 7, &head, None, "symphony-verification/att-1")
+                .await
+                .unwrap();
+        assert_eq!(fetched, head);
+
+        // A mismatched expected head fails closed.
+        let error = fetch_pull_head_verified(
+            repo_path,
+            7,
+            "0000000000000000000000000000000000000000",
+            None,
+            "symphony-verification/att-2",
+        )
+        .await
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("does not equal the A4 reviewed head"));
+    }
+
     #[test]
     fn cleanup_root_accepts_only_runner_created_attempt_dirs() {
         let workspace_root = Path::new("/srv/workspaces");
