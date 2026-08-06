@@ -827,6 +827,13 @@ pub fn execute_cli(cli: &Cli, deps: &mut dyn BootstrapDeps) -> Result<(), String
         )
     })?;
 
+    // Configuration is fully loaded: scrub credential env vars from this
+    // process so local verification payloads cannot read them back via
+    // /proc/<parent>/environ and inherited children do not carry them. The
+    // values were captured at process start and are forwarded explicitly to
+    // the agent subprocesses that legitimately need them.
+    symphony::credential_env::scrub();
+
     deps.start_orchestrator(&workflow_path, cli).map_err(|err| {
         format!(
             "orchestrator startup failed for {}: {err}",
@@ -1563,6 +1570,10 @@ fn apply_github_token_aliases() {
 async fn main() {
     load_canonical_project_env();
     apply_github_token_aliases();
+    // Snapshot credential env vars before startup (and the later scrub) so
+    // lazy token resolution and explicit subprocess forwarding can still see
+    // them after the process environment is cleaned.
+    symphony::credential_env::capture();
 
     let code = run_entrypoint(std::env::args_os());
     flush_file_logs();

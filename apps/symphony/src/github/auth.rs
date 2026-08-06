@@ -39,8 +39,7 @@ pub fn resolve_github_token(tracker: &TrackerConfig) -> Option<ResolvedGithubTok
             source: GithubTokenSource::TrackerApiKey,
         })
         .or_else(|| {
-            std::env::var("GH_TOKEN")
-                .ok()
+            crate::credential_env::value("GH_TOKEN")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .map(|token| ResolvedGithubToken {
@@ -49,8 +48,7 @@ pub fn resolve_github_token(tracker: &TrackerConfig) -> Option<ResolvedGithubTok
                 })
         })
         .or_else(|| {
-            std::env::var("GITHUB_TOKEN")
-                .ok()
+            crate::credential_env::value("GITHUB_TOKEN")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty())
                 .map(|token| ResolvedGithubToken {

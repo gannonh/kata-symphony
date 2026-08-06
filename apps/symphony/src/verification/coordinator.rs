@@ -633,6 +633,16 @@ where
             let mut total_usage = StageUsage::default();
             let base_prompt = worker_request.prompt.clone();
             let criterion_count = spec.artifact.acceptance_criteria.len();
+            let expected_commands: Vec<crate::verification::gate::ExpectedCommand<'_>> = commands
+                .iter()
+                .enumerate()
+                .map(|(index, command)| crate::verification::gate::ExpectedCommand {
+                    ordinal: (index + 1) as u32,
+                    name: &command.name,
+                    kind: command.kind,
+                    configuration_revision: &configuration_revision,
+                })
+                .collect();
             let gate_identity = GateIdentity {
                 spec_artifact_id: &candidate.spec_artifact_id,
                 implementation_artifact_id: &candidate.implementation_artifact_id,
@@ -640,6 +650,7 @@ where
                 reviewed_head_sha: &pull.head.sha,
                 base_sha: &pull.base.sha,
                 criterion_count,
+                expected_commands: &expected_commands,
             };
             for reprompt in 0..=service.verification.max_reprompts {
                 worker_request.prompt = if reprompt == 0 {
@@ -1598,6 +1609,7 @@ mod tests {
                 reviewed_head_sha: "head-sha",
                 base_sha: "base-sha",
                 criterion_count: 0,
+                expected_commands: &[],
             },
             &[],
             &[],

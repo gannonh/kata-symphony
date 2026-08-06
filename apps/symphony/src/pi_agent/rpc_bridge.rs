@@ -690,6 +690,12 @@ pub async fn start_session(
             if let Some(symphony_workflow_path) = &symphony_workflow_path {
                 command.env("SYMPHONY_WORKFLOW_PATH", symphony_workflow_path);
             }
+            // The process environment is scrubbed at startup; forward the
+            // captured GitHub credentials explicitly so the session agent can
+            // keep operating on the forge.
+            for (name, value) in crate::credential_env::github_credentials() {
+                command.env(name, value);
+            }
             let child = command
                 .spawn()
                 .map_err(|err| SymphonyError::PiAgentError(format!("spawn failed: {err}")))?;

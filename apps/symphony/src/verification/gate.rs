@@ -9,8 +9,8 @@ use std::collections::HashSet;
 
 use crate::error::{Result, SymphonyError};
 use crate::verification::domain::{
-    VerificationCommandRunRecord, VerificationEvidenceRecord, VerifierCriterionStatus,
-    VerifierManifest, VERIFICATION_CRITERIA_MAX_ITEMS,
+    VerificationCommandKind, VerificationCommandRunRecord, VerificationEvidenceRecord,
+    VerifierCriterionStatus, VerifierManifest, VERIFICATION_CRITERIA_MAX_ITEMS,
 };
 
 /// Identity the verifier manifest must match exactly.
@@ -24,6 +24,19 @@ pub struct GateIdentity<'a> {
     /// Number of acceptance criteria in the approved A2 spec. Every criterion
     /// index must appear exactly once.
     pub criterion_count: usize,
+    /// The configured commands this attempt must have exactly one durable run
+    /// record for. The gate cannot pass with an incomplete record set.
+    pub expected_commands: &'a [ExpectedCommand<'a>],
+}
+
+/// A configured verification command the gate expects exactly one durable run
+/// record for.
+#[derive(Debug, Clone)]
+pub struct ExpectedCommand<'a> {
+    pub ordinal: u32,
+    pub name: &'a str,
+    pub kind: VerificationCommandKind,
+    pub configuration_revision: &'a str,
 }
 
 /// Output of the strict manifest validation and gate computation.
@@ -104,6 +117,42 @@ pub fn compute_gate(
                 "command '{}' has an unexpected status '{}'",
                 run.name, run.status
             )),
+        }
+    }
+    // Exact one-to-one coverage against the configured commands: a record set
+    // missing a configured command, carrying an unexpected record, or holding
+    // duplicates must not pass just because the recorded commands passed.
+    let mut matched = vec![false; identity.expected_commands.len()];
+    for run in command_runs {
+        let mut match_index = None;
+        for (index, expected) in identity.expected_commands.iter().enumerate() {
+            if run.ordinal == expected.ordinal
+                && run.name == expected.name
+                && run.kind == expected.kind
+                && run.configuration_revision == expected.configuration_revision
+            {
+                match_index = Some(index);
+                break;
+            }
+        }
+        match match_index {
+            Some(index) if !matched[index] => matched[index] = true,
+            Some(_) => reasons.push(format!(
+                "command '{}' has more than one run record",
+                run.name
+            )),
+            None => reasons.push(format!(
+                "command '{}' (ordinal {}) is not a configured verification command",
+                run.name, run.ordinal
+            )),
+        }
+    }
+    for (expected, is_matched) in identity.expected_commands.iter().zip(&matched) {
+        if !is_matched {
+            reasons.push(format!(
+                "configured command '{}' has no run record",
+                expected.name
+            ));
         }
     }
     // The acceptance command must have run and passed for a green gate.
@@ -262,6 +311,20 @@ mod tests {
             reviewed_head_sha: "head-sha",
             base_sha: "base-sha",
             criterion_count: 2,
+            expected_commands: &[
+                ExpectedCommand {
+                    ordinal: 1,
+                    name: "unit",
+                    kind: VerificationCommandKind::Test,
+                    configuration_revision: "cfg",
+                },
+                ExpectedCommand {
+                    ordinal: 2,
+                    name: "acceptance",
+                    kind: VerificationCommandKind::Acceptance,
+                    configuration_revision: "cfg",
+                },
+            ],
         }
     }
 
@@ -313,6 +376,18 @@ mod tests {
         }
     }
 
+    fn command_at(
+        ordinal: u32,
+        name: &str,
+        kind: VerificationCommandKind,
+        status: &str,
+        passed: Option<bool>,
+    ) -> VerificationCommandRunRecord {
+        let mut record = command(name, kind, status, passed);
+        record.ordinal = ordinal;
+        record
+    }
+
     fn manifest(criteria: Vec<VerifierCriterion>) -> VerifierManifest {
         VerifierManifest {
             schema_version: 1,
@@ -344,13 +419,15 @@ mod tests {
 
     fn passing_commands() -> Vec<VerificationCommandRunRecord> {
         vec![
-            command(
+            command_at(
+                1,
                 "unit",
                 VerificationCommandKind::Test,
                 "completed",
                 Some(true),
             ),
-            command(
+            command_at(
+                2,
                 "acceptance",
                 VerificationCommandKind::Acceptance,
                 "completed",
@@ -384,7 +461,8 @@ mod tests {
                 "completed",
                 Some(false),
             ),
-            command(
+            command_at(
+                2,
                 "acceptance",
                 VerificationCommandKind::Acceptance,
                 "not_run",
@@ -413,7 +491,8 @@ mod tests {
                 "completed",
                 Some(true),
             ),
-            command(
+            command_at(
+                2,
                 "acceptance",
                 VerificationCommandKind::Acceptance,
                 "not_run",
@@ -476,6 +555,147 @@ mod tests {
         let err =
             compute_gate(&manifest, &identity(), &passing_commands(), &evidence()).unwrap_err();
         assert!(err.to_string().contains("empty rationale"));
+    }
+
+    #[test]
+    fn missing_configured_command_fails_the_gate() {
+        let manifest = manifest(vec![
+            criterion(1, VerifierCriterionStatus::Pass, &["reports/ok.json"]),
+            criterion(2, VerifierCriterionStatus::Pass, &["reports/ok.json"]),
+        ]);
+        let commands = vec![command_at(
+            2,
+            "acceptance",
+            VerificationCommandKind::Acceptance,
+            "completed",
+            Some(true),
+        )];
+        let expected = [ExpectedCommand {
+            ordinal: 1,
+            name: "unit",
+            kind: VerificationCommandKind::Test,
+            configuration_revision: "cfg",
+        }];
+        let identity = GateIdentity {
+            expected_commands: &expected,
+            ..identity()
+        };
+        let verdict = compute_gate(&manifest, &identity, &commands, &evidence()).unwrap();
+        assert!(!verdict.passed);
+        assert!(verdict
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("configured command 'unit' has no run record")));
+    }
+
+    #[test]
+    fn unexpected_command_record_fails_the_gate() {
+        let manifest = manifest(vec![
+            criterion(1, VerifierCriterionStatus::Pass, &["reports/ok.json"]),
+            criterion(2, VerifierCriterionStatus::Pass, &["reports/ok.json"]),
+        ]);
+        let commands = vec![
+            command_at(
+                1,
+                "unit",
+                VerificationCommandKind::Test,
+                "completed",
+                Some(true),
+            ),
+            command_at(
+                2,
+                "acceptance",
+                VerificationCommandKind::Acceptance,
+                "completed",
+                Some(true),
+            ),
+            command_at(
+                3,
+                "sneaky",
+                VerificationCommandKind::Test,
+                "completed",
+                Some(true),
+            ),
+        ];
+        let expected = [
+            ExpectedCommand {
+                ordinal: 1,
+                name: "unit",
+                kind: VerificationCommandKind::Test,
+                configuration_revision: "cfg",
+            },
+            ExpectedCommand {
+                ordinal: 2,
+                name: "acceptance",
+                kind: VerificationCommandKind::Acceptance,
+                configuration_revision: "cfg",
+            },
+        ];
+        let identity = GateIdentity {
+            expected_commands: &expected,
+            ..identity()
+        };
+        let verdict = compute_gate(&manifest, &identity, &commands, &evidence()).unwrap();
+        assert!(!verdict.passed);
+        assert!(verdict
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("is not a configured verification command")));
+    }
+
+    #[test]
+    fn duplicate_command_record_fails_the_gate() {
+        let manifest = manifest(vec![
+            criterion(1, VerifierCriterionStatus::Pass, &["reports/ok.json"]),
+            criterion(2, VerifierCriterionStatus::Pass, &["reports/ok.json"]),
+        ]);
+        let commands = vec![
+            command_at(
+                1,
+                "unit",
+                VerificationCommandKind::Test,
+                "completed",
+                Some(true),
+            ),
+            command_at(
+                1,
+                "unit",
+                VerificationCommandKind::Test,
+                "completed",
+                Some(true),
+            ),
+            command_at(
+                2,
+                "acceptance",
+                VerificationCommandKind::Acceptance,
+                "completed",
+                Some(true),
+            ),
+        ];
+        let expected = [
+            ExpectedCommand {
+                ordinal: 1,
+                name: "unit",
+                kind: VerificationCommandKind::Test,
+                configuration_revision: "cfg",
+            },
+            ExpectedCommand {
+                ordinal: 2,
+                name: "acceptance",
+                kind: VerificationCommandKind::Acceptance,
+                configuration_revision: "cfg",
+            },
+        ];
+        let identity = GateIdentity {
+            expected_commands: &expected,
+            ..identity()
+        };
+        let verdict = compute_gate(&manifest, &identity, &commands, &evidence()).unwrap();
+        assert!(!verdict.passed);
+        assert!(verdict
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("has more than one run record")));
     }
 
     #[test]

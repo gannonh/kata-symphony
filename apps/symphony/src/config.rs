@@ -812,7 +812,7 @@ pub fn from_workflow(config: &Value) -> Result<ServiceConfig> {
             {
                 // Try canonical fallback only for Linear when an explicit $VAR
                 // reference was provided but resolved to nothing.
-                std::env::var("LINEAR_API_KEY").unwrap_or_default()
+                crate::credential_env::value("LINEAR_API_KEY").unwrap_or_default()
             } else {
                 resolved
             }

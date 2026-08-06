@@ -1,5 +1,8 @@
 # ADRs Update Log
 
+## 2026-08-06
+* **Updated**: [ADR-0006](0006-a5-verification-evidence-and-gate.md) records credential environment scrubbing (startup capture, post-config scrub, explicit forwarding to agent sessions, `core.filemode=true` pinned-tree attestation) and the end-state attestation boundary for transient mutations (read-only/overlay isolation is a Linux-only follow-up).
+
 ## 2026-08-02
 * **Accepted**: [ADR-0005 A4 durable review publication fencing](0005-a4-review-publication-fencing.md) records active lease CAS writes, heartbeat renewal during forge calls, changed-head supersession ownership, and the explicit operator reset boundary.
 

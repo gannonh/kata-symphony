@@ -46,9 +46,11 @@ attests acceptance criteria from that evidence.
    verifies the fetched SHA equals the A4 reviewed head, and creates a
    credential-free bundle clone for a disposable local or Docker workspace.
    HEAD, the committed tree, and tracked files are re-verified after command
-   execution. The live head/base are re-read before workspace creation, after
-   commands, after the verifier, and before publication; any change supersedes
-   the attempt without publishing.
+   execution (with `core.filemode=true` forced so repository-local
+   configuration cannot hide mode changes against the pinned tree). The live
+   head/base are re-read before workspace creation, after commands, after the
+   verifier, and before publication; any change supersedes the attempt without
+   publishing.
 
 4. **Pre-release launch barriers.** Local commands run through a
    new-process-group supervisor blocked on a controller-owned pipe. A
@@ -92,6 +94,17 @@ attests acceptance criteria from that evidence.
    containers, workspaces, and pending publications are safely terminal or
    recoverable.
 
+8. **Credential environment scrubbing.** At startup Symphony snapshots the
+   credential environment variables (`GH_TOKEN`, `GITHUB_TOKEN`,
+   `KATA_GITHUB_TOKEN`, `LINEAR_API_KEY`) and removes them from its own
+   process environment once configuration is loaded. Local verification
+   payloads therefore cannot recover forge or tracker credentials from
+   `/proc/<parent>/environ` on Linux, and children that inherit the
+   environment do not carry them. Agent session subprocesses that legitimately
+   need GitHub authentication receive the captured values explicitly at
+   spawn; git operations authenticate through scoped `GIT_CONFIG_*` headers
+   and never inherit the environment.
+
 ## Consequences
 
 - A5 preview mode performs exactly one owned issue comment and no other
@@ -101,7 +114,11 @@ attests acceptance criteria from that evidence.
 - Local commands are trusted workflow configuration; the local profile
   guarantees cleanup of the persisted process group, not OS confinement
   against an adversarial command. Docker provides the stronger containment
-  profile.
+  profile. End-state attestation compares the final git state against the
+  pinned revision; a command that mutates tracked files, produces evidence
+  from the altered tree, and restores them before the check cannot be
+  distinguished without filesystem-level isolation (read-only checkout with a
+  writable overlay), which is a Linux-only follow-up and out of scope here.
 - Acceptance commands must be repeatable after an interrupted attempt, and
   retries only ever run from a fresh credential-free workspace.
 - Cross-linked: [ADR-0004](../adrs/0004-a3-implementation-durability-and-bundles.md),

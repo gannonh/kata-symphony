@@ -1,4 +1,5 @@
 pub mod config;
+pub mod credential_env;
 pub mod domain;
 pub mod error;
 pub mod helper;
