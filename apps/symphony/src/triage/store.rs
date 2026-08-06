@@ -6073,7 +6073,7 @@ impl SqliteFactoryStore {
         let attempt_duration_avg_ms: u64 = self
             .conn
             .query_row(
-                "SELECT COALESCE(ROUND(AVG(completed_at - started_at) * 1000), 0)
+                "SELECT CAST(COALESCE(ROUND(AVG((julianday(completed_at) - julianday(started_at)) * 86400000)), 0) AS INTEGER)
                  FROM verification_command_runs
                  WHERE completed_at IS NOT NULL AND started_at IS NOT NULL",
                 [],
