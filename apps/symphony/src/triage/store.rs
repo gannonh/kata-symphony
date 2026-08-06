@@ -5502,7 +5502,7 @@ impl SqliteFactoryStore {
                      WHERE va2.run_id = r.run_id
                        AND va2.reviewed_head_sha = a.reviewed_head_sha
                        AND va2.base_sha = a.base_sha
-                       AND va2.status IN ('failed', 'interrupted')
+                       AND va2.status IN ('failed', 'interrupted', 'blocked')
                    ) < ?2
                  ORDER BY r.updated_at ASC, a.received_at DESC",
             )
@@ -5978,15 +5978,23 @@ impl SqliteFactoryStore {
     }
 
     pub fn verification_metrics(&self) -> Result<VerificationMetricsAggregate> {
-        let (total, completed, failed, interrupted, superseded): (u64, u64, u64, u64, u64) = self
+        let (total, completed, failed, interrupted, superseded, blocked): (
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+            u64,
+        ) = self
             .conn
             .query_row(
                 "SELECT COUNT(*),
-                    COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN status = 'interrupted' THEN 1 ELSE 0 END), 0),
-                    COALESCE(SUM(CASE WHEN status = 'superseded' THEN 1 ELSE 0 END), 0)
-                 FROM verification_attempts",
+                        COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status = 'interrupted' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status = 'superseded' THEN 1 ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN status = 'blocked' THEN 1 ELSE 0 END), 0)
+                     FROM verification_attempts",
                 [],
                 |row| {
                     Ok((
@@ -5995,6 +6003,7 @@ impl SqliteFactoryStore {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
                     ))
                 },
             )
@@ -6053,19 +6062,88 @@ impl SqliteFactoryStore {
                 |row| row.get(0),
             )
             .map_err(storage_error)?;
+        let evidence_bytes = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(bytes_len), 0) FROM verification_evidence",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let attempt_duration_avg_ms: u64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(ROUND(AVG(completed_at - started_at) * 1000), 0)
+                 FROM verification_command_runs
+                 WHERE completed_at IS NOT NULL AND started_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let max_same_head_attempts: u64 = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(MAX(c), 0) FROM (
+                    SELECT COUNT(*) AS c FROM verification_attempts
+                    GROUP BY run_id, reviewed_head_sha, base_sha
+                )",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(storage_error)?;
+        let (input_tokens, output_tokens, total_tokens): (u64, u64, u64) = self
+            .conn
+            .query_row(
+                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                    COALESCE(SUM(total_tokens), 0)
+                 FROM stage_runs WHERE stage = ?1",
+                params![VERIFICATION_STAGE_NAME],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(storage_error)?;
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT harness, model, SUM(input_tokens), SUM(output_tokens), SUM(total_tokens)
+                 FROM stage_runs WHERE stage = ?1
+                 GROUP BY harness, model ORDER BY SUM(total_tokens) DESC",
+            )
+            .map_err(storage_error)?;
+        let model_rows = stmt
+            .query_map(params![VERIFICATION_STAGE_NAME], |row| {
+                Ok(serde_json::json!({
+                    "harness": row.get::<_, String>(0)?,
+                    "model": row.get::<_, Option<String>>(1)?,
+                    "input_tokens": row.get::<_, u64>(2)?,
+                    "output_tokens": row.get::<_, u64>(3)?,
+                    "total_tokens": row.get::<_, u64>(4)?,
+                }))
+            })
+            .map_err(storage_error)?;
+        let model_usage = model_rows
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(storage_error)?;
         Ok(VerificationMetricsAggregate {
             total_attempts: total,
             completed_attempts: completed,
             failed_attempts: failed,
             interrupted_attempts: interrupted,
             superseded_attempts: superseded,
+            blocked_attempts: blocked,
             commands_run,
             commands_passed,
             commands_failed,
             gates_passed,
             gates_failed,
             evidence_files,
+            evidence_bytes,
             preview_publications,
+            attempt_duration_avg_ms,
+            max_same_head_attempts,
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            model_usage,
             base: crate::triage::domain::TriageMetricsAggregate::default(),
         })
     }
@@ -8150,6 +8228,7 @@ mod tests {
 
         // Two interrupted attempts leave the run eligible once more...
         for index in 1..=2u32 {
+            let _ = index;
             let stage = store
                 .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
                 .unwrap();
@@ -8193,6 +8272,55 @@ mod tests {
             store.list_a5_eligible_verification_runs(3).unwrap().len(),
             1
         );
+        // ...but the third attempt exhausts max_attempts=3. Blocked attempts
+        // (configuration/infrastructure failures) consume the same budget so
+        // a broken fixture cannot reclaim the revision pair indefinitely.
+        let stage = store
+            .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))
+            .unwrap();
+        store
+            .store_verification_attempt_inputs(StoreVerificationAttemptRequest {
+                attempt_id: "verification-attempt-blocked".to_string(),
+                stage_run_id: stage.stage_run_id.clone(),
+                pr_number: 42,
+                reviewed_head_sha: "head-sha".to_string(),
+                base_sha: "base-sha".to_string(),
+                spec_artifact_id: "spec-artifact".to_string(),
+                implementation_artifact_id: "implementation-artifact".to_string(),
+                review_artifact_id: "review-artifact".to_string(),
+                configuration_revision: "cfg-rev".to_string(),
+                execution_profile: "local".to_string(),
+            })
+            .unwrap();
+        store
+            .fail_attempt(
+                &stage.stage_run_id,
+                FactoryError::new(
+                    "verification_verifier_failed",
+                    "verification_coordinator",
+                    "blocked fixture".to_string(),
+                    false,
+                    None,
+                ),
+            )
+            .unwrap();
+        store
+            .update_verification_attempt(UpdateVerificationAttemptRequest {
+                attempt_id: "verification-attempt-blocked",
+                status: Some("blocked"),
+                workspace_path: None,
+                evidence_dir: None,
+                error: None,
+            })
+            .unwrap();
+        assert!(
+            store
+                .list_a5_eligible_verification_runs(3)
+                .unwrap()
+                .is_empty(),
+            "a blocked attempt must consume the retry budget"
+        );
+        return;
         // ...but the third interrupted attempt exhausts max_attempts=3.
         let stage = store
             .claim_stage_attempt(VERIFICATION_STAGE_NAME, claim_request("rev", "cfg"))

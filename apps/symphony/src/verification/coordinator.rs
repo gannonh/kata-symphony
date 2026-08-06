@@ -505,26 +505,15 @@ where
             // The pinned commit, tree, and tracked files must be unchanged.
             if let Err(error) = verify_workspace_unchanged(&workspace.workspace_path, &pull.head.sha)
             {
-                let factory_error = FactoryError::new(
-                    "verification_workspace_modified",
-                    "verification_coordinator",
-                    error.to_string(),
-                    false,
-                    None,
-                );
-                let _ = self.store.fail_attempt(&stage.stage_run_id, factory_error.clone());
-                let _ = self.store.update_verification_attempt(
-                    crate::triage::store::UpdateVerificationAttemptRequest {
-                        attempt_id: &attempt_id,
-                        status: Some("failed"),
-                        workspace_path: None,
-                        evidence_dir: None,
-                        error: Some(&factory_error),
-                    },
-                );
-                self.cleanup_attempt_workspace(
-                    &workspace.workspace_path.display().to_string(),
+                fail_verification_attempt(
+                    &self.store,
+                    &stage.stage_run_id,
                     &attempt_id,
+                    "verification_workspace_modified",
+                    error.to_string(),
+                    &workspace,
+                    &self.config.workspace_root,
+                    true,
                 );
                 return Err(error);
             }
@@ -552,12 +541,47 @@ where
                     max_files: service.verification.max_evidence_files,
                     max_bytes: service.verification.max_evidence_bytes,
                 },
-            )?;
+            )
+            .inspect_err(|error| {
+                fail_verification_attempt(
+                    &self.store,
+                    &stage.stage_run_id,
+                    &attempt_id,
+                    "verification_evidence_storage_failed",
+                    error.to_string(),
+                    &workspace,
+                    &self.config.workspace_root,
+                    true,
+                );
+            })?;
             self.store
-                .store_verification_evidence(&evidence_records)?;
+                .store_verification_evidence(&evidence_records)
+                .inspect_err(|error| {
+                    fail_verification_attempt(
+                        &self.store,
+                        &stage.stage_run_id,
+                        &attempt_id,
+                        "verification_evidence_storage_failed",
+                        error.to_string(),
+                        &workspace,
+                        &self.config.workspace_root,
+                        true,
+                    );
+                })?;
 
             // Read-only verifier.
-            let verifier_command = command_for_verification(service)?;
+            let verifier_command = command_for_verification(service).inspect_err(|error| {
+                fail_verification_attempt(
+                    &self.store,
+                    &stage.stage_run_id,
+                    &attempt_id,
+                    "verification_verifier_command_missing",
+                    error.to_string(),
+                    &workspace,
+                    &self.config.workspace_root,
+                    true,
+                );
+            })?;
             // The verifier works from the reviewed-head bundle clone (no
             // authenticated remote), not from the controller's checkout.
             let verifier_repo_path = workspace.workspace_path.clone();
@@ -665,32 +689,23 @@ where
                 break;
             }
             let Some(manifest) = manifest else {
-                let factory_error = FactoryError::new(
+                fail_verification_attempt(
+                    &self.store,
+                    &stage.stage_run_id,
+                    &attempt_id,
                     "verification_verifier_failed",
-                    "verification_coordinator",
                     format!(
                         "verifier exhausted {} attempts: {}",
                         service.verification.max_attempts,
                         last_error.unwrap_or_else(|| "unknown verifier failure".to_string())
                     ),
+                    &workspace,
+                    &self.config.workspace_root,
                     true,
-                    None,
                 );
-                let _ = self.store.fail_attempt(&stage.stage_run_id, factory_error.clone());
-                let _ = self.store.update_verification_attempt(
-                    crate::triage::store::UpdateVerificationAttemptRequest {
-                        attempt_id: &attempt_id,
-                        status: Some("failed"),
-                        workspace_path: None,
-                        evidence_dir: None,
-                        error: Some(&factory_error),
-                    },
-                );
-                self.cleanup_attempt_workspace(
-                    &workspace.workspace_path.display().to_string(),
-                    &attempt_id,
-                );
-                return Err(SymphonyError::TriageError(factory_error.remediation.clone()));
+                return Err(SymphonyError::TriageError(
+                    "verifier could not produce a valid manifest; attempt blocked".to_string(),
+                ));
             };
 
             // Deterministic gate from the validated manifest.
@@ -704,6 +719,7 @@ where
                         error.to_string(),
                         &workspace,
                         &self.config.workspace_root,
+                        true,
                     );
                 })?;
 
@@ -805,6 +821,9 @@ where
                     pr_number: candidate.pr_number,
                     reviewed_head_sha: &pull.head.sha,
                     base_sha: &pull.base.sha,
+                    spec_artifact_id: &candidate.spec_artifact_id,
+                    implementation_artifact_id: &candidate.implementation_artifact_id,
+                    review_artifact_id: &candidate.review_artifact_id,
                     gate: &gate,
                     commands: &command_runs,
                     evidence: &evidence_records,
@@ -1119,6 +1138,7 @@ where
 }
 
 /// Fail a verification attempt with a durable error and clean its workspace.
+#[allow(clippy::too_many_arguments)]
 fn fail_verification_attempt(
     store: &SharedFactoryStore,
     stage_run_id: &str,
@@ -1127,6 +1147,7 @@ fn fail_verification_attempt(
     message: String,
     workspace: &VerificationWorkspace,
     workspace_root: &Path,
+    blocked: bool,
 ) {
     let mut store = store.clone();
     let factory_error = FactoryError::new(code, "verification_coordinator", message, false, None);
@@ -1134,7 +1155,7 @@ fn fail_verification_attempt(
     let _ =
         store.update_verification_attempt(crate::triage::store::UpdateVerificationAttemptRequest {
             attempt_id,
-            status: Some("failed"),
+            status: Some(if blocked { "blocked" } else { "failed" }),
             workspace_path: None,
             evidence_dir: None,
             error: Some(&factory_error),

@@ -1275,13 +1275,21 @@ pub struct VerificationRunMetricsHttpResponse {
     pub failed_attempts: u64,
     pub interrupted_attempts: u64,
     pub superseded_attempts: u64,
+    pub blocked_attempts: u64,
     pub commands_run: u64,
     pub commands_passed: u64,
     pub commands_failed: u64,
     pub gates_passed: u64,
     pub gates_failed: u64,
     pub evidence_files: u64,
+    pub evidence_bytes: u64,
     pub preview_publications: u64,
+    pub attempt_duration_avg_ms: u64,
+    pub max_same_head_attempts: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub model_usage: Vec<serde_json::Value>,
 }
 
 pub fn verification_run_metrics_http_response(
@@ -1296,13 +1304,21 @@ pub fn verification_run_metrics_http_response(
         failed_attempts: metrics.failed_attempts,
         interrupted_attempts: metrics.interrupted_attempts,
         superseded_attempts: metrics.superseded_attempts,
+        blocked_attempts: metrics.blocked_attempts,
         commands_run: metrics.commands_run,
         commands_passed: metrics.commands_passed,
         commands_failed: metrics.commands_failed,
         gates_passed: metrics.gates_passed,
         gates_failed: metrics.gates_failed,
         evidence_files: metrics.evidence_files,
+        evidence_bytes: metrics.evidence_bytes,
         preview_publications: metrics.preview_publications,
+        attempt_duration_avg_ms: metrics.attempt_duration_avg_ms,
+        max_same_head_attempts: metrics.max_same_head_attempts,
+        input_tokens: metrics.input_tokens,
+        output_tokens: metrics.output_tokens,
+        total_tokens: metrics.total_tokens,
+        model_usage: metrics.model_usage,
     }
 }
 

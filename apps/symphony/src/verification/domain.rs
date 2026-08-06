@@ -266,13 +266,26 @@ pub struct VerificationMetricsAggregate {
     pub failed_attempts: u64,
     pub interrupted_attempts: u64,
     pub superseded_attempts: u64,
+    pub blocked_attempts: u64,
     pub commands_run: u64,
     pub commands_passed: u64,
     pub commands_failed: u64,
     pub gates_passed: u64,
     pub gates_failed: u64,
     pub evidence_files: u64,
+    pub evidence_bytes: u64,
     pub preview_publications: u64,
+    /// Average verification attempt duration in milliseconds.
+    pub attempt_duration_avg_ms: u64,
+    /// Highest number of attempts recorded for one reviewed head (same-head
+    /// attempt count).
+    pub max_same_head_attempts: u64,
+    /// Token usage reported by verification stage runs.
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    /// Harness/model usage reported by verification stage runs.
+    pub model_usage: Vec<serde_json::Value>,
     pub base: crate::triage::domain::TriageMetricsAggregate,
 }
 
