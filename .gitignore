@@ -140,3 +140,5 @@ apps/desktop/release/
 .pi-subagents/artifacts/
 statuses/
 events.jsonl
+.vercel
+.env*
