@@ -24,9 +24,9 @@
   },
   "devDependencies": {
     "chokidar": "^5.0.0",
-    "esbuild": "^0.28.1",
+    "esbuild": "^0.28.2",
     "shiki": "^4.3.1",
-    "tsx": "^4.23.1",
+    "tsx": "^4.23.12",
     "vitest": "^4.1.10"
   }
 }
