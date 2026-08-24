@@ -654,7 +654,7 @@ async fn run_codex_turns_in_session<E, EFut, EventCallback>(
     tracker_config: &TrackerConfig,
     graphql_executor: E,
     mut stream_event: EventCallback,
-) -> std::result::Result<SessionTurnLoopSuccess, SessionTurnLoopFailure>
+) -> std::result::Result<SessionTurnLoopSuccess, Box<SessionTurnLoopFailure>>
 where
     E: Fn(String, serde_json::Value) -> EFut + Clone + Send,
     EFut: Future<Output = Result<serde_json::Value>> + Send,
@@ -694,11 +694,11 @@ where
                 );
             }
             Err(err) => {
-                return Err(SessionTurnLoopFailure {
+                return Err(Box::new(SessionTurnLoopFailure {
                     error: err,
                     events: observed_events,
                     metrics,
-                });
+                }));
             }
         }
 
@@ -759,7 +759,7 @@ async fn run_pi_turns_in_session<EventCallback>(
     tracker_config: &TrackerConfig,
     steer_rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<rpc_bridge::FollowUpRequest>>,
     mut stream_event: EventCallback,
-) -> std::result::Result<SessionTurnLoopSuccess, SessionTurnLoopFailure>
+) -> std::result::Result<SessionTurnLoopSuccess, Box<SessionTurnLoopFailure>>
 where
     EventCallback: FnMut(AgentEvent) + Send,
 {
@@ -797,11 +797,11 @@ where
                 );
             }
             Err(err) => {
-                return Err(SessionTurnLoopFailure {
+                return Err(Box::new(SessionTurnLoopFailure {
                     error: err,
                     events: observed_events,
                     metrics,
-                });
+                }));
             }
         }
 
