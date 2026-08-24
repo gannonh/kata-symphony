@@ -92,7 +92,21 @@ Release workflows are manually dispatched (Symphony also has a scheduled nightly
 - `CLAUDE.md` files in this repo are symlinks to `AGENTS.md`. Always edit `AGENTS.md`.
 - Asset paths: use `getBundledAssetsDir(subfolder)` for bundled assets, never `import.meta.dir`.
 
-## Agent skills
+## Skills
+
+Project agent skills live under `.agents/skills/`. Bootstrap the shared skills with:
+
+```bash
+./scripts/install-skills.sh
+```
+
+Or equivalently:
+
+```bash
+npx skills add gannonh/skills --skill plan-build-verify --skill address-pr-comments -y
+```
+
+Install only those skills — do not add the full `gannonh/skills` pack or `okf`. Cursor engineering execution uses the pstack plugin; do not npx-install a `ps` skill.
 
 ### Issue tracker
 
@@ -106,18 +120,9 @@ Triage uses the default five-label vocabulary. See `docs/agents/triage-labels.md
 
 Domain docs use a single-context layout. See `docs/agents/domain.md`.
 
-## Open Knowledge Format docs
+## Documentation
 
-This repository maintains an [OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md) bundle at `./docs`.
-
-- Use `/okf read` when available, or read `./docs/index.md` directly before substantial work, to understand the current documentation map.
-- Follow cross-links into relevant specs, ADRs, runbooks, guides, architecture notes, reference docs, and domain docs before changing related code.
-- Specs are GitHub Issues, not files. See `## Specs live in GitHub Issues` below. `./docs/specs/index.md` is a pointer to the issue roadmap.
-- Historical Superpowers plans/specs remain under `./docs/superpowers/`; the roadmap indexes them rather than relocating them.
-- Add or update ADRs in `./docs/adrs` for durable architecture decisions.
-- After substantial work, PRs, behavior changes, architecture decisions, migrations, or documentation moves, update the OKF bundle and add concise entries to the relevant `log.md` files.
-- Maintain Markdown cross-links between related OKF concepts so future agents can traverse decisions, specs, architecture, runbooks, guides, and references.
-- Every non-reserved Markdown file under `./docs` should have OKF frontmatter with at least a non-empty `type` field. `index.md` and `log.md` are reserved navigation/history files.
+Project docs live under `./docs` (guides, ADRs, runbooks, historical archives). Specs are GitHub Issues — see below. Do not treat `docs/specs/index.md` as the live roadmap; use `gh issue list --label kind:spec --state open`. Historical Superpowers plans/specs remain under `./docs/superpowers/`. Add or update ADRs in `docs/adrs/` for durable architecture decisions.
 
 ## Specs live in GitHub Issues
 
@@ -125,7 +130,7 @@ Specs for this repository are GitHub Issues, not files. `docs/specs/` holds only
 
 - Read the roadmap with `gh issue list --label kind:spec --state open`.
 - Read a spec with `gh issue view <N>`; read an epic's phases with `gh sub-issue list <N>`.
-- Do not create spec files under `docs/specs/`. Use the `plan-build-verify-github` skill, which publishes specs as issues.
+- Do not create spec files under `docs/specs/`. Use the `plan-build-verify` skill, which publishes specs as issues.
 - Never build an issue that is not labeled `status:approved` without explicit maintainer approval.
 - Post build reports and acceptance evidence as comments on the spec issue.
 - ADRs remain files under `docs/adrs/`. Cross-link them with the issues they constrain.
