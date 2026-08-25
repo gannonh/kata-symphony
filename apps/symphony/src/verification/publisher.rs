@@ -59,7 +59,7 @@ pub fn render_verification_preview_comment(context: &PreviewCommentContext<'_>) 
     } = context;
     let marker = verification_marker(run_id, reviewed_head_sha);
     let mut lines = vec![
-        format!("{marker}"),
+        marker,
         "## Verification evidence preview".to_string(),
         String::new(),
         format!(
