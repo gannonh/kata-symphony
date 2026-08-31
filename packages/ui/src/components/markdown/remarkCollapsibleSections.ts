@@ -25,7 +25,7 @@ interface SectionNode extends Parent {
     hProperties: {
       'data-section-id': string
       'data-heading-level': number
-      className: string
+      className: string[]
     }
   }
   children: Content[]
@@ -110,7 +110,7 @@ function wrapHeadingsAtDepth(tree: Root, depth: number): void {
             hProperties: {
               'data-section-id': sectionId,
               'data-heading-level': depth,
-              className: 'markdown-section',
+              className: ['markdown-section'],
             },
           },
         }
