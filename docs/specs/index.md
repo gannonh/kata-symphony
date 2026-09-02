@@ -24,8 +24,9 @@ gh sub-issue list <N>                                   # read an epic's phases
 
 ## Writing and executing specs
 
-Use the `plan-build-verify-github` skill. It publishes specs as issues, runs Build
-against approved issues, and posts acceptance evidence back to the issue.
+Use the [plan-build-verify](https://github.com/gannonh/plan-build-verify) plugin
+(`/plan`, `/build`, `/verify`). It publishes specs as issues, runs Build against
+approved issues, and posts acceptance evidence back to the issue.
 
 ## Archive
 
