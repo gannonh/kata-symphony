@@ -1,4 +1,4 @@
-import LinkifyIt from 'linkify-it'
+import { LinkifyIt } from 'linkify-it'
 
 /**
  * Linkify - URL and file path detection for markdown preprocessing
@@ -7,8 +7,8 @@ import LinkifyIt from 'linkify-it'
  * plus custom regex for local file paths.
  */
 
-// Initialize linkify-it with default settings (fuzzy URLs, emails enabled)
-const linkify = new LinkifyIt()
+// v6 disables fuzzyLink by default; keep the previous "bare domain" behavior.
+const linkify = new LinkifyIt({ fuzzyLink: true })
 
 // File path regex - detects /path, ~/path, ./path with common extensions
 // Matches paths that start with /, ~/, or ./ followed by path chars and a file extension
@@ -161,7 +161,7 @@ export function detectLinks(text: string): DetectedLink[] {
  */
 export function preprocessLinks(text: string): string {
   // Quick check - if no potential links, return early
-  if (!linkify.pretest(text) && !/[~/.]\//.test(text)) {
+  if (!linkify.test(text) && !/[~/.]\//.test(text)) {
     return text
   }
 
@@ -202,5 +202,5 @@ export function preprocessLinks(text: string): string {
  * Useful for optimization - skip preprocessing if no links present
  */
 export function hasLinks(text: string): boolean {
-  return linkify.pretest(text) || /[~/.]\/[\w]/.test(text)
+  return linkify.test(text) || /[~/.]\/[\w]/.test(text)
 }
