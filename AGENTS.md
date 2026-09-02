@@ -94,19 +94,40 @@ Release workflows are manually dispatched (Symphony also has a scheduled nightly
 
 ## Skills
 
-Project agent skills live under `.agents/skills/`. Bootstrap the shared skills with:
+Project-specific agent skills live under `.agents/skills/` (git-tracked): `debug-symphony`, `mintlify`, `releasing-kata`.
+
+Product OS is the [plan-build-verify](https://github.com/gannonh/plan-build-verify) plugin. Install per host:
+
+**Cursor** (until a public listing is live):
 
 ```bash
 ./scripts/install-skills.sh
 ```
 
-Or equivalently:
+Or manually:
 
 ```bash
-npx skills add gannonh/skills --skill plan-build-verify --skill address-pr-comments -y
+git clone --depth 1 https://github.com/gannonh/plan-build-verify.git /tmp/plan-build-verify
+cp -R /tmp/plan-build-verify/plugins/cursor ~/.cursor/plugins/local/plan-build-verify
 ```
 
-Install only those skills — do not add the full `gannonh/skills` pack or `okf`. Cursor engineering execution uses the pstack plugin; do not npx-install a `ps` skill.
+Enable **Allow Local Plugin Imports**, then enable `plan-build-verify`. Skills: `plan`, `build`, `verify`, `triage`, `ship`.
+
+**Claude Code**:
+
+```text
+/plugin marketplace add gannonh/plan-build-verify
+/plugin install plan-build-verify@plan-build-verify
+```
+
+**Codex**:
+
+```text
+codex plugin marketplace add gannonh/plan-build-verify
+codex plugin add plan-build-verify@plan-build-verify
+```
+
+Cursor engineering execution uses the **pstack** plugin (separate install). Do not npx-install `ps` or the full `gannonh/skills` pack.
 
 ### Issue tracker
 
@@ -130,7 +151,7 @@ Specs for this repository are GitHub Issues, not files. `docs/specs/` holds only
 
 - Read the roadmap with `gh issue list --label kind:spec --state open`.
 - Read a spec with `gh issue view <N>`; read an epic's phases with `gh sub-issue list <N>`.
-- Do not create spec files under `docs/specs/`. Use the `plan-build-verify` skill, which publishes specs as issues.
+- Do not create spec files under `docs/specs/`. Use the plan-build-verify plugin (`/plan`, `/build`, `/verify`), which publishes specs as issues.
 - Never build an issue that is not labeled `status:approved` without explicit maintainer approval.
 - Post build reports and acceptance evidence as comments on the spec issue.
 - ADRs remain files under `docs/adrs/`. Cross-link them with the issues they constrain.
