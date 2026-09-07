@@ -63,8 +63,8 @@
     "vite": "^8.2.2"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.251",
-    "@anthropic-ai/sdk": "^0.122.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.261",
+    "@anthropic-ai/sdk": "^0.123.0",
     "@hapi/boom": "^10.0.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@radix-ui/react-avatar": "^1.2.3",
@@ -89,11 +89,11 @@
     "jotai": "^2.20.3",
     "js-yaml": "^5.4.1",
     "linkify-it": "^6.1.0",
-    "lucide-react": "^1.35.0",
+    "lucide-react": "^1.41.0",
     "marked": "^18.0.11",
     "markitdown-js": "^0.0.14",
     "md-to-slack": "^1.1.7",
-    "open": "^11.0.1",
+    "open": "^11.0.2",
     "pino": "^10.3.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
@@ -105,6 +105,6 @@
     "shiki": "^4.4.3",
     "tailwind-merge": "^3.6.0",
     "ws": "^8.21.3",
-    "zod": "^4.5.1"
+    "zod": "^4.5.4"
   }
 }
