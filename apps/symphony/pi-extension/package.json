@@ -46,7 +46,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.4.0",
-    "@types/ws": "^8.18.1",
+    "@types/ws": "^8.18.2",
     "typescript": "^6.0.3",
     "vitest": "^4.1.11"
   },
@@ -54,6 +54,6 @@
     "node": ">=20.6.0"
   },
   "dependencies": {
-    "ws": "^8.21.3"
+    "ws": "^8.22.0"
   }
 }
